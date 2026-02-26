@@ -1,0 +1,55 @@
+# Multi-node NexaFlow network
+#
+# Start with:  docker compose up --build -d
+# Logs:        docker compose logs -f
+# Stop:        docker compose down
+
+services:
+  node1:
+    build: .
+    container_name: nexaflow-node1
+    environment:
+      NEXAFLOW_NODE_ID: validator-1
+      NEXAFLOW_PORT: "9001"
+      NEXAFLOW_API_PORT: "8080"
+      NEXAFLOW_PEERS: "node2:9002"
+      NEXAFLOW_LOG_LEVEL: INFO
+    ports:
+      - "9001:9001"
+      - "8080:8080"
+    networks:
+      - nexaflow
+
+  node2:
+    build: .
+    container_name: nexaflow-node2
+    environment:
+      NEXAFLOW_NODE_ID: validator-2
+      NEXAFLOW_PORT: "9002"
+      NEXAFLOW_API_PORT: "8081"
+      NEXAFLOW_PEERS: "node1:9001"
+      NEXAFLOW_LOG_LEVEL: INFO
+    ports:
+      - "9002:9002"
+      - "8081:8081"
+    networks:
+      - nexaflow
+
+  node3:
+    build: .
+    container_name: nexaflow-node3
+    environment:
+      NEXAFLOW_NODE_ID: validator-3
+      NEXAFLOW_PORT: "9003"
+      NEXAFLOW_API_PORT: "8082"
+      NEXAFLOW_PEERS: "node1:9001,node2:9002"
+      NEXAFLOW_LOG_LEVEL: INFO
+    ports:
+      - "9003:9003"
+      - "8082:8082"
+    networks:
+      - nexaflow
+
+networks:
+  nexaflow:
+    driver: bridge

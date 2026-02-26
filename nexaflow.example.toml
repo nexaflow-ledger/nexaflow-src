@@ -1,0 +1,35 @@
+# NexaFlow Node Configuration
+# Copy to nexaflow.toml and edit to taste.
+
+[node]
+node_id = "validator-1"
+host = "0.0.0.0"
+port = 9001
+peers = []                # e.g. ["127.0.0.1:9002", "127.0.0.1:9003"]
+
+[ledger]
+total_supply = 100_000_000_000.0
+account_reserve = 20.0
+owner_reserve = 5.0
+min_fee = 0.000010
+
+[consensus]
+interval_seconds = 10
+proposal_wait_seconds = 2.0
+initial_threshold = 0.50
+final_threshold = 0.80
+
+[api]
+enabled = false
+host = "127.0.0.1"
+port = 8080
+
+[storage]
+enabled = false
+backend = "sqlite"
+path = "data/nexaflow.db"
+
+[logging]
+level = "INFO"
+format = "human"            # "human" or "json"
+# file = "logs/nexaflow.log" # uncomment to log to file

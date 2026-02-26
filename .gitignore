@@ -1,0 +1,69 @@
+# ── Byte-compiled / optimised ─────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+
+# ── Cython build artefacts ───────────────────────────────────
+*.so
+*.c
+*.html
+nexaflow_core/*.so
+nexaflow_core/*.c
+
+# ── Distribution / packaging ─────────────────────────────────
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+sdist/
+wheels/
+MANIFEST
+
+# ── Virtual environments ─────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── IDE / editor ─────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.settings/
+
+# ── Testing / coverage ──────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+
+# ── mypy / type checking ────────────────────────────────────
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# ── OS files ─────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Docker ───────────────────────────────────────────────────
+docker-compose.override.yml
+
+# ── Data / runtime ───────────────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+data/
+logs/
+*.log
+build/
+
+# macOS specific
+.DS_Store

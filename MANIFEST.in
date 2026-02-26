@@ -1,0 +1,8 @@
+# Include Cython sources so sdist can be built from source
+recursive-include nexaflow_core *.pyx *.pxd
+include LICENSE
+include README.md
+include CHANGELOG.md
+include pyproject.toml
+include requirements.txt
+include requirements-dev.txt
