@@ -41,6 +41,7 @@ cdef int _TEC_NO_LINE  = 103
 cdef int _TEC_INSUF_FEE = 104
 cdef int _TEC_BAD_SEQ  = 105
 cdef int _TEC_BAD_SIG  = 106
+cdef int _TEC_KEY_IMAGE_SPENT = 107
 
 TES_SUCCESS      = _TES_SUCCESS
 TEC_UNFUNDED     = _TEC_UNFUNDED
@@ -49,6 +50,7 @@ TEC_NO_LINE      = _TEC_NO_LINE
 TEC_INSUF_FEE    = _TEC_INSUF_FEE
 TEC_BAD_SEQ      = _TEC_BAD_SEQ
 TEC_BAD_SIG      = _TEC_BAD_SIG
+TEC_KEY_IMAGE_SPENT = _TEC_KEY_IMAGE_SPENT
 
 # Map names to codes for external use
 TX_TYPE_NAMES = {
@@ -67,6 +69,7 @@ RESULT_NAMES = {
     TEC_INSUF_FEE:     "tecINSUF_FEE",
     TEC_BAD_SEQ:       "tecBAD_SEQ",
     TEC_BAD_SIG:       "tecBAD_SIG",
+    TEC_KEY_IMAGE_SPENT: "tecKEY_IMAGE_SPENT",
 }
 
 
@@ -145,6 +148,14 @@ cdef class Transaction:
     cdef public object taker_gets     # Amount (OfferCreate)
     cdef public long long offer_sequence  # OfferCancel
     cdef public dict flags
+    # Privacy fields for confidential transactions
+    cdef public bytes commitment
+    cdef public bytes ring_signature
+    cdef public bytes stealth_address
+    cdef public bytes ephemeral_pub
+    cdef public bytes view_tag
+    cdef public bytes range_proof
+    cdef public bytes key_image
 
     def __init__(self, int tx_type, str account, str destination="",
                  object amount=None, object fee=None,
@@ -166,6 +177,14 @@ cdef class Transaction:
         self.taker_gets = None
         self.offer_sequence = 0
         self.flags = {}
+        # Initialize privacy fields
+        self.commitment = b""
+        self.ring_signature = b""
+        self.stealth_address = b""
+        self.ephemeral_pub = b""
+        self.view_tag = b""
+        self.range_proof = b""
+        self.key_image = b""
 
     cpdef bytes serialize_for_signing(self):
         """
@@ -194,6 +213,17 @@ cdef class Transaction:
         if self.offer_sequence != 0:
             buf.extend(struct.pack(">q", self.offer_sequence))
         buf.extend(self.memo.encode("utf-8"))
+        # Include privacy fields in signing preimage.
+        # NOTE: ring_signature is intentionally excluded — a signature must
+        # never be part of its own signing preimage.
+        if self.commitment:
+            buf.extend(self.commitment)
+        if self.stealth_address:
+            buf.extend(self.stealth_address)
+        if self.range_proof:
+            buf.extend(self.range_proof)
+        if self.key_image:
+            buf.extend(self.key_image)
         return bytes(buf)
 
     cpdef bytes hash_for_signing(self):
@@ -234,6 +264,16 @@ cdef class Transaction:
         if self.taker_pays is not None:
             d["taker_pays"] = (<Amount>self.taker_pays).to_dict()
             d["taker_gets"] = (<Amount>self.taker_gets).to_dict() if self.taker_gets else {}
+        if self.commitment:
+            d["commitment"] = self.commitment.hex()
+        if self.ring_signature:
+            d["ring_signature"] = self.ring_signature.hex()
+        if self.stealth_address:
+            d["stealth_address"] = self.stealth_address.hex()
+        if self.range_proof:
+            d["range_proof"] = self.range_proof.hex()
+        if self.key_image:
+            d["key_image"] = self.key_image.hex()
         return d
 
     def __repr__(self):

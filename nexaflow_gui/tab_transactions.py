@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
@@ -83,6 +84,9 @@ class TransactionTab(QWidget):
         self._edit_memo = QLineEdit()
         self._edit_memo.setPlaceholderText("Optional memo")
         pay_form.addRow("Memo:", self._edit_memo)
+
+        self._check_confidential = QCheckBox("Confidential Transaction (Monero-like privacy)")
+        pay_form.addRow(self._check_confidential)
 
         self._btn_send = make_primary_button("🚀  Send Payment")
         pay_form.addRow(self._btn_send)

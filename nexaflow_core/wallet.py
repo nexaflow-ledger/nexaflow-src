@@ -23,39 +23,66 @@ from nexaflow_core.transaction import Transaction
 
 
 class Wallet:
-    """User-facing wallet that manages a key-pair and signs transactions."""
+    """User-facing wallet that manages key-pairs for signing and stealth addresses."""
 
     def __init__(
         self,
         private_key: bytes,
         public_key: bytes,
         address: str | None = None,
+        view_private_key: bytes | None = None,
+        view_public_key: bytes | None = None,
+        spend_private_key: bytes | None = None,
+        spend_public_key: bytes | None = None,
     ):
         self.private_key = private_key
         self.public_key = public_key
         self.address = address or derive_address(public_key)
+        self.view_private_key = view_private_key
+        self.view_public_key = view_public_key
+        self.spend_private_key = spend_private_key
+        self.spend_public_key = spend_public_key
         self._sequence: int = 1  # track locally for convenience
 
     # ---- factory methods ----
 
     @classmethod
     def create(cls) -> Wallet:
-        """Generate a brand-new wallet."""
+        """Generate a brand-new wallet with view and spend keypairs."""
+        # Main keypair for signing
         priv, pub = generate_keypair()
-        return cls(priv, pub)
+        # View keypair
+        view_priv, view_pub = generate_keypair()
+        # Spend keypair
+        spend_priv, spend_pub = generate_keypair()
+        return cls(priv, pub, view_private_key=view_priv, view_public_key=view_pub,
+                   spend_private_key=spend_priv, spend_public_key=spend_pub)
 
     @classmethod
     def from_seed(cls, seed: str) -> Wallet:
         """
         Derive a wallet deterministically from a seed phrase.
-        (Simplified: seed is SHA-256 hashed to get a 32-byte private key.)
+        Generates view and spend keypairs from seed.
         """
         from ecdsa import SECP256k1, SigningKey
 
+        # Main keypair
         priv_bytes = sha256(seed.encode("utf-8"))
         sk = SigningKey.from_string(priv_bytes, curve=SECP256k1)
         pub_bytes = b"\x04" + sk.get_verifying_key().to_string()
-        return cls(priv_bytes, pub_bytes)
+
+        # View keypair
+        view_priv = sha256((seed + "_view").encode("utf-8"))
+        view_sk = SigningKey.from_string(view_priv, curve=SECP256k1)
+        view_pub = b"\x04" + view_sk.get_verifying_key().to_string()
+
+        # Spend keypair
+        spend_priv = sha256((seed + "_spend").encode("utf-8"))
+        spend_sk = SigningKey.from_string(spend_priv, curve=SECP256k1)
+        spend_pub = b"\x04" + spend_sk.get_verifying_key().to_string()
+
+        return cls(priv_bytes, pub_bytes, view_private_key=view_priv, view_public_key=view_pub,
+                   spend_private_key=spend_priv, spend_public_key=spend_pub)
 
     # ---- signing ----
 
@@ -75,6 +102,108 @@ class Wallet:
         self._sequence += 1
         return tx
 
+    def sign_confidential_payment(
+        self,
+        recipient_view_pub: bytes,
+        recipient_spend_pub: bytes,
+        amount: float,
+        decoy_pubs: list[bytes] | None = None,
+        fee: float = 0.00001,
+    ) -> Transaction:
+        """
+        Build and return a confidential Payment transaction.
+
+        The amount is hidden inside a Pedersen commitment; the recipient's
+        identity is protected by a one-time stealth address; the sender's
+        identity is hidden in a LSAG ring signature.
+
+        Parameters
+        ----------
+        recipient_view_pub   65-byte view public key of the recipient.
+        recipient_spend_pub  65-byte spend public key of the recipient.
+        amount               NXF amount to send (hidden on-chain).
+        decoy_pubs           Optional list of 65-byte decoy public keys.
+                             Pass [] for a ring of size 1 (no anonymity).
+        fee                  NXF fee deducted from sender's public balance.
+
+        Returns
+        -------
+        A fully populated Transaction ready for submission.
+        """
+        if self.spend_private_key is None:
+            raise ValueError("Wallet has no spend private key — cannot sign confidential TXs")
+
+        from nexaflow_core.privacy import create_confidential_payment  # type: ignore[import]
+
+        seq = self._sequence
+        self._sequence += 1
+
+        return create_confidential_payment(
+            sender_addr=self.address,
+            sender_priv=self.spend_private_key,
+            recipient_view_pub=recipient_view_pub,
+            recipient_spend_pub=recipient_spend_pub,
+            amount=amount,
+            decoy_pubs=list(decoy_pubs or []),
+            fee=fee,
+            sequence=seq,
+        )
+
+    def scan_confidential_outputs(self, ledger: object) -> list[dict]:
+        """
+        Scan all confidential UTXOs in *ledger* and return those belonging
+        to this wallet.
+
+        For each matched output the dict contains:
+          ``stealth_addr``   -- one-time address (hex key in ledger)
+          ``commitment``     -- Pedersen commitment bytes (hex str)
+          ``ephemeral_pub``  -- ephemeral pubkey needed to recover spend key
+          ``view_tag``       -- fast-scan hint byte (hex str)
+          ``tx_id``          -- originating transaction ID
+          ``one_time_priv``  -- recovered one-time private key (bytes)
+
+        The wallet needs ``view_private_key`` and ``spend_public_key`` for scanning.
+        Additionally, ``spend_private_key`` is used to compute ``one_time_priv``.
+        """
+        if self.view_private_key is None or self.spend_public_key is None:
+            raise ValueError("Wallet missing view keys — cannot scan outputs")
+
+        from nexaflow_core.privacy import StealthAddress  # type: ignore[import]
+
+        results: list[dict] = []
+        for utxo in ledger.get_all_confidential_outputs():
+            ephemeral_pub = bytes.fromhex(utxo["ephemeral_pub"])
+            view_tag      = bytes.fromhex(utxo["view_tag"])
+            matched_addr  = StealthAddress.scan_output(
+                self.view_private_key,
+                self.spend_public_key,
+                ephemeral_pub,
+                view_tag,
+            )
+            if matched_addr is None:
+                continue
+            # utxo["stealth_addr"] is the hex encoding of the raw address bytes;
+            # matched_addr is the decoded ASCII string — convert before comparing.
+            stealth_addr_hex = utxo.get("stealth_addr", "")
+            try:
+                stealth_addr_str = bytes.fromhex(stealth_addr_hex).decode()
+            except (ValueError, UnicodeDecodeError):
+                stealth_addr_str = stealth_addr_hex
+            if matched_addr != stealth_addr_str:
+                # view tag matched but address didn't — rare collision, skip
+                continue
+
+            row = dict(utxo)
+            if self.spend_private_key is not None:
+                row["one_time_priv"] = StealthAddress.recover_spend_key(
+                    self.view_private_key,
+                    self.spend_private_key,
+                    ephemeral_pub,
+                ).hex()
+            results.append(row)
+
+        return results
+
     # ---- serialisation ----
 
     def to_dict(self) -> dict:
@@ -82,6 +211,10 @@ class Wallet:
             "address": self.address,
             "public_key": self.public_key.hex(),
             "private_key": self.private_key.hex(),
+            "view_public_key": self.view_public_key.hex() if self.view_public_key else None,
+            "view_private_key": self.view_private_key.hex() if self.view_private_key else None,
+            "spend_public_key": self.spend_public_key.hex() if self.spend_public_key else None,
+            "spend_private_key": self.spend_private_key.hex() if self.spend_private_key else None,
         }
 
     def export_encrypted(self, passphrase: str) -> dict:
@@ -97,11 +230,17 @@ class Wallet:
         # AES-256-CBC via stdlib-compatible XOR-CTR (no external dep)
         iv = os.urandom(16)
         enc_priv = self._aes_ctr_encrypt(key, iv, self.private_key)
+        enc_view_priv = self._aes_ctr_encrypt(key, iv, self.view_private_key) if self.view_private_key else None
+        enc_spend_priv = self._aes_ctr_encrypt(key, iv, self.spend_private_key) if self.spend_private_key else None
         return {
             "version": 2,
             "address": self.address,
             "public_key": self.public_key.hex(),
             "encrypted_private_key": enc_priv.hex(),
+            "view_public_key": self.view_public_key.hex() if self.view_public_key else None,
+            "encrypted_view_private_key": enc_view_priv.hex() if enc_view_priv else None,
+            "spend_public_key": self.spend_public_key.hex() if self.spend_public_key else None,
+            "encrypted_spend_private_key": enc_spend_priv.hex() if enc_spend_priv else None,
             "salt": salt.hex(),
             "iv": iv.hex(),
             "kdf": "pbkdf2-hmac-sha256",
@@ -121,12 +260,26 @@ class Wallet:
             iterations = data.get("kdf_iterations", 100_000)
             key = hashlib.pbkdf2_hmac("sha256", passphrase.encode("utf-8"), salt, iterations)
             priv = cls._aes_ctr_encrypt(key, iv, enc_priv)  # CTR is symmetric
+            view_priv = None
+            if data.get("encrypted_view_private_key"):
+                enc_view_priv = bytes.fromhex(data["encrypted_view_private_key"])
+                view_priv = cls._aes_ctr_encrypt(key, iv, enc_view_priv)
+            spend_priv = None
+            if data.get("encrypted_spend_private_key"):
+                enc_spend_priv = bytes.fromhex(data["encrypted_spend_private_key"])
+                spend_priv = cls._aes_ctr_encrypt(key, iv, enc_spend_priv)
         else:
             # Legacy v1 XOR fallback
             key = sha256(passphrase.encode("utf-8"))
             priv = bytes(a ^ b for a, b in zip(enc_priv, key))
+            view_priv = None
+            spend_priv = None
 
-        return cls(priv, pub, data.get("address"))
+        view_pub = bytes.fromhex(data["view_public_key"]) if data.get("view_public_key") else None
+        spend_pub = bytes.fromhex(data["spend_public_key"]) if data.get("spend_public_key") else None
+
+        return cls(priv, pub, data.get("address"), view_private_key=view_priv, view_public_key=view_pub,
+                   spend_private_key=spend_priv, spend_public_key=spend_pub)
 
     # ---- AES-CTR using only hashlib (no external crypto libs) ----
 

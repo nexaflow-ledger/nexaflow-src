@@ -39,6 +39,55 @@ cdef inline double _add(double a, double b) nogil:
 
 
 # ===================================================================
+#  Confidential UTXO output — produced by confidential payments
+# ===================================================================
+
+@cython.freelist(16)
+cdef class ConfidentialOutput:
+    """
+    A Pedersen-committed UTXO note produced by a confidential payment.
+
+    Fields mirror a Monero transaction output:
+      commitment    — C = v*G + b*H (hides the amount v)
+      stealth_addr  — one-time address; only recipient can identify / spend
+      ephemeral_pub — r*G published on chain so recipient can derive shared secret
+      range_proof   — ZKP that v ≥ 0
+      view_tag      — 1-byte hint for fast output scanning
+      tx_id         — ID of the transaction that created this output
+      spent         — True once a subsequent ring-sig references this output
+    """
+    cdef public bytes commitment
+    cdef public bytes stealth_addr
+    cdef public bytes ephemeral_pub
+    cdef public bytes range_proof
+    cdef public bytes view_tag
+    cdef public str   tx_id
+    cdef public bint  spent
+
+    def __init__(self, bytes commitment, bytes stealth_addr,
+                 bytes ephemeral_pub, bytes range_proof,
+                 bytes view_tag, str tx_id):
+        self.commitment    = commitment
+        self.stealth_addr  = stealth_addr
+        self.ephemeral_pub = ephemeral_pub
+        self.range_proof   = range_proof
+        self.view_tag      = view_tag
+        self.tx_id         = tx_id
+        self.spent         = False
+
+    cpdef dict to_dict(self):
+        return {
+            "commitment":    self.commitment.hex(),
+            "stealth_addr":  self.stealth_addr.hex(),
+            "ephemeral_pub": self.ephemeral_pub.hex() if self.ephemeral_pub else "",
+            "range_proof":   self.range_proof.hex()   if self.range_proof   else "",
+            "view_tag":      self.view_tag.hex()       if self.view_tag      else "",
+            "tx_id":         self.tx_id,
+            "spent":         self.spent,
+        }
+
+
+# ===================================================================
 #  Account entry stored in the ledger
 # ===================================================================
 
@@ -186,6 +235,9 @@ cdef class Ledger:
     cdef public double total_supply
     cdef public double fee_pool        # accumulated fees
     cdef public str genesis_account
+    cdef public set spent_key_images   # bytes → kept for is_key_image_spent API
+    cdef public set applied_tx_ids     # str  → duplicate-TX detection
+    cdef public dict confidential_outputs  # stealth_addr_hex → ConfidentialOutput
 
     def __init__(self, double total_supply=100_000_000_000.0,
                  str genesis_account="nGenesisNXF"):
@@ -196,6 +248,9 @@ cdef class Ledger:
         self.total_supply = total_supply
         self.fee_pool = 0.0
         self.genesis_account = genesis_account
+        self.spent_key_images = set()
+        self.applied_tx_ids = set()
+        self.confidential_outputs = {}  # stealth_addr_hex → ConfidentialOutput
 
         # Create genesis account with full supply
         cdef AccountEntry genesis = AccountEntry(genesis_account, total_supply)
@@ -253,8 +308,13 @@ cdef class Ledger:
     cpdef int apply_payment(self, object tx):
         """
         Apply a Payment transaction to ledger state.
-        Returns result code.
+        Confidential transactions (with key_image set) are routed to
+        _apply_confidential_payment; normal payments use the standard path.
+        Returns a result code.
         """
+        if tx.key_image:
+            return self._apply_confidential_payment(tx)
+
         from nexaflow_core.transaction import Amount
         cdef object amount = tx.amount
         cdef object fee = tx.fee
@@ -319,6 +379,75 @@ cdef class Ledger:
         src_acc.sequence += 1
         return 0  # tesSUCCESS
 
+    cpdef int _apply_confidential_payment(self, object tx):
+        """
+        Apply a Confidential Payment (Monero-style UTXO note).
+
+        Checks:
+          1. Key image not already spent (double-spend prevention)
+          2. Range proof integrity  (value ≥ 0 without revealing it)
+          3. Ring signature validity (sender authorised without revealing address)
+          4. Fee deducted from sender's public account
+          5. New ConfidentialOutput UTXO recorded in ledger
+          6. Key image marked as spent
+        
+        The hidden amount is never written to the account table; only the
+        Pedersen commitment is stored in the UTXO output entry.
+        """
+        from nexaflow_core.privacy import RangeProof, verify_ring_signature
+
+        # ── 1. Double-spend check (per tx_id) ────────────────────────────────
+        if tx.tx_id and tx.tx_id in self.applied_tx_ids:
+            return 107  # tecKEY_IMAGE_SPENT — duplicate transaction
+
+        # ── 2. Range proof: value committed is non-negative ───────────────
+        if tx.range_proof and tx.commitment:
+            rp = RangeProof(tx.range_proof)
+            if not rp.verify(tx.commitment):
+                return 106  # tecBAD_SIG — range proof invalid
+
+        # ── 3. Ring signature: sender is member of the ring ───────────────
+        if tx.ring_signature:
+            msg_hash = tx.hash_for_signing()
+            if not verify_ring_signature(tx.ring_signature, msg_hash):
+                return 106  # tecBAD_SIG — ring sig invalid
+
+        # ── 4. Fee is paid publicly from the sender's account ────────────
+        cdef str src = tx.account
+        cdef double fee_val = tx.fee.value if hasattr(tx.fee, 'value') else 0.0
+        cdef AccountEntry src_acc = self.accounts.get(src)
+        if fee_val > 0.0:
+            if src_acc is None:
+                return 101  # tecUNFUNDED — no account to pay fee
+            if src_acc.balance < fee_val:
+                return 104  # tecINSUF_FEE
+            src_acc.balance -= fee_val
+            self.fee_pool += fee_val
+        # Advance sequence so the tx cannot be replayed
+        if src_acc is not None:
+            if tx.sequence != 0 and tx.sequence != src_acc.sequence:
+                return 105  # tecBAD_SEQ
+            src_acc.sequence += 1
+
+        # ── 5. Record the UTXO output ─────────────────────────────────────
+        if tx.commitment and tx.stealth_address:
+            sa_hex = tx.stealth_address.hex()
+            output = ConfidentialOutput(
+                tx.commitment,
+                tx.stealth_address,
+                tx.ephemeral_pub if tx.ephemeral_pub else b"",
+                tx.range_proof if tx.range_proof else b"",
+                tx.view_tag if tx.view_tag else b"",
+                tx.tx_id,
+            )
+            self.confidential_outputs[sa_hex] = output
+
+        # ── 6. Mark key image as spent and record applied tx_id ─────────────
+        self.spent_key_images.add(tx.key_image)
+        if tx.tx_id:
+            self.applied_tx_ids.add(tx.tx_id)
+        return 0  # tesSUCCESS
+
     cpdef int apply_trust_set(self, object tx):
         """Apply a TrustSet transaction."""
         cdef str src = tx.account
@@ -381,13 +510,19 @@ cdef class Ledger:
             tx_blob += tx.tx_id.encode("utf-8")
         header.tx_hash = hashlib.sha256(tx_blob).hexdigest() if tx_blob else "0" * 64
 
-        # State hash (simplified: hash of all account balances)
+        # State hash (simplified: hash of all account balances + confidential state)
         cdef bytes state_blob = b""
         for addr in sorted(self.accounts.keys()):
             acc = self.accounts[addr]
             state_blob += addr.encode("utf-8")
             state_blob += struct.pack(">d", acc.balance)
             state_blob += struct.pack(">q", acc.sequence)
+        # Include commitment to confidential UTXOs and spent key images
+        state_blob += struct.pack(">q", len(self.confidential_outputs))
+        state_blob += struct.pack(">q", len(self.spent_key_images))
+        for sa_hex in sorted(self.confidential_outputs.keys()):
+            out = self.confidential_outputs[sa_hex]
+            state_blob += out.commitment
         header.state_hash = hashlib.sha256(state_blob).hexdigest()
 
         header.total_nxf = self.total_supply
@@ -413,4 +548,31 @@ cdef class Ledger:
             "total_accounts": len(self.accounts),
             "total_supply": self.total_supply,
             "fee_pool": self.fee_pool,
+            "confidential_outputs": len(self.confidential_outputs),
+            "spent_key_images": len(self.spent_key_images),
         }
+
+    # ---- confidential UTXO queries ----
+
+    cpdef object get_confidential_output(self, str stealth_addr_hex):
+        """Return the ConfidentialOutput for a stealth address, or None."""
+        return self.confidential_outputs.get(stealth_addr_hex)
+
+    cpdef list get_all_confidential_outputs(self):
+        """
+        Return all unspent confidential outputs as a list of dicts.
+        Recipients call this to scan for payments addressed to them.
+        """
+        cdef list result = []
+        for sa_hex, out in self.confidential_outputs.items():
+            if not (<ConfidentialOutput>out).spent:
+                result.append((<ConfidentialOutput>out).to_dict())
+        return result
+
+    cpdef bint is_key_image_spent(self, bytes key_image):
+        """Return True if the key image has already been spent."""
+        return key_image in self.spent_key_images
+
+    cpdef bint is_stealth_address_used(self, str stealth_addr_hex):
+        """Return True if a confidential output exists at this stealth address."""
+        return stealth_addr_hex in self.confidential_outputs

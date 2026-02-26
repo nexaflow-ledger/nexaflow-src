@@ -16,6 +16,7 @@ from nexaflow_core.transaction import (
     TEC_BAD_SEQ,
     TEC_BAD_SIG,
     TEC_INSUF_FEE,
+    TEC_KEY_IMAGE_SPENT,
     TEC_NO_LINE,
     TEC_UNFUNDED,
     TES_SUCCESS,
@@ -44,6 +45,27 @@ class TransactionValidator:
         if tx.signature and tx.signing_pub_key and not tx.verify_signature():
             return False, TEC_BAD_SIG, "Invalid signature"
 
+        # 1.5. Privacy checks for confidential transactions
+        if tx.commitment:
+            from nexaflow_core.privacy import (  # type: ignore[import]
+                RangeProof,
+                verify_ring_signature,
+            )
+
+            # Key image double-spend check against ledger
+            if tx.key_image and self.ledger.is_key_image_spent(tx.key_image):
+                return False, TEC_KEY_IMAGE_SPENT, "Key image already spent (double-spend attempt)"
+
+            # Range proof structural check
+            if tx.range_proof and not RangeProof(tx.range_proof).verify(tx.commitment):
+                return False, TEC_BAD_SIG, "Invalid range proof"
+
+            # Ring signature verification
+            if tx.ring_signature and not verify_ring_signature(
+                tx.ring_signature, tx.hash_for_signing()
+            ):
+                return False, TEC_BAD_SIG, "Invalid ring signature"
+
         # 2. Source account exists
         src_acc = self.ledger.get_account(tx.account)
         if src_acc is None:
@@ -62,39 +84,40 @@ class TransactionValidator:
                 f"Expected seq {src_acc.sequence}, got {tx.sequence}",
             )
 
-        # 5. Balance check — must cover fee + reserve
-        required_reserve = ACCOUNT_RESERVE + OWNER_RESERVE * src_acc.owner_count
-        if tx.tx_type == 0:  # Payment
-            amt = tx.amount
-            if amt.is_native():
-                needed = amt.value + fee_val
-                if src_acc.balance - needed < required_reserve:
-                    return (
-                        False,
-                        TEC_UNFUNDED,
-                        f"Insufficient balance: have {src_acc.balance}, "
-                        f"need {needed} + reserve {required_reserve}",
+        # 5. Balance check — must cover fee + reserve (skip for confidential)
+        if not tx.commitment:
+            required_reserve = ACCOUNT_RESERVE + OWNER_RESERVE * src_acc.owner_count
+            if tx.tx_type == 0:  # Payment
+                amt = tx.amount
+                if amt.is_native():
+                    needed = amt.value + fee_val
+                    if src_acc.balance - needed < required_reserve:
+                        return (
+                            False,
+                            TEC_UNFUNDED,
+                            f"Insufficient balance: have {src_acc.balance}, "
+                            f"need {needed} + reserve {required_reserve}",
+                        )
+                else:
+                    # IOU — just check fee
+                    if src_acc.balance < fee_val:
+                        return False, TEC_INSUF_FEE, "Cannot cover fee"
+                    # Check trust line
+                    tl = self.ledger.get_trust_line(
+                        tx.account, amt.currency, amt.issuer
                     )
-            else:
-                # IOU — just check fee
+                    if tl is None and tx.account != amt.issuer:
+                        return (
+                            False,
+                            TEC_NO_LINE,
+                            f"No trust line for {amt.currency}/{amt.issuer}",
+                        )
+            elif tx.tx_type == 20:  # TrustSet
                 if src_acc.balance < fee_val:
                     return False, TEC_INSUF_FEE, "Cannot cover fee"
-                # Check trust line
-                tl = self.ledger.get_trust_line(
-                    tx.account, amt.currency, amt.issuer
-                )
-                if tl is None and tx.account != amt.issuer:
-                    return (
-                        False,
-                        TEC_NO_LINE,
-                        f"No trust line for {amt.currency}/{amt.issuer}",
-                    )
-        elif tx.tx_type == 20:  # TrustSet
-            if src_acc.balance < fee_val:
-                return False, TEC_INSUF_FEE, "Cannot cover fee"
-        else:
-            if src_acc.balance < fee_val:
-                return False, TEC_INSUF_FEE, "Cannot cover fee"
+            else:
+                if src_acc.balance < fee_val:
+                    return False, TEC_INSUF_FEE, "Cannot cover fee"
 
         return True, TES_SUCCESS, "Valid"
 

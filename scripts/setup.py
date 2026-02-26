@@ -25,6 +25,7 @@ _PYX_MODULES = [
     ("nexaflow_core.transaction",  "nexaflow_core/transaction"),
     ("nexaflow_core.ledger",       "nexaflow_core/ledger"),
     ("nexaflow_core.consensus",    "nexaflow_core/consensus"),
+    ("nexaflow_core.privacy",      "nexaflow_core/privacy"),
 ]
 
 USE_CYTHON = False
