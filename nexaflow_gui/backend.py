@@ -16,9 +16,12 @@ from nexaflow_core.transaction import (
     Amount,
     create_offer,
     create_payment,
+    create_stake,
     create_trust_set,
+    create_unstake,
 )
 from nexaflow_core.wallet import Wallet
+from nexaflow_core.staking import StakeTier, TIER_NAMES, TIER_CONFIG
 
 logger = logging.getLogger("nexaflow_gui.backend")
 
@@ -46,6 +49,7 @@ class NodeBackend(QObject):
     peers_changed = pyqtSignal()                   # network topology changed
     order_book_changed = pyqtSignal()              # DEX state changed
     wallet_created = pyqtSignal(dict)              # wallet info
+    staking_changed = pyqtSignal()                 # any staking state change
 
     def __init__(self, parent: QObject | None = None):
         super().__init__(parent)
@@ -344,6 +348,144 @@ class NodeBackend(QObject):
 
     def get_recent_fills(self, limit: int = 50) -> list[dict]:
         return self.order_book.get_fills(limit)
+
+    # ── Staking operations ──────────────────────────────────────────────
+
+    def stake_nxf(
+        self, address: str, amount: float, tier: int
+    ) -> dict | None:
+        """
+        Build, sign, and apply a Stake transaction.
+
+        Returns the tx dict on success, None on failure.
+        """
+        wallet = self.wallets.get(address)
+        if not wallet:
+            self.error_occurred.emit(f"No wallet found for {address}")
+            return None
+
+        try:
+            tx = create_stake(
+                account=address,
+                amount=amount,
+                stake_tier=tier,
+                sequence=wallet.sequence,
+            )
+            wallet.sign_transaction(tx)
+            wallet.sequence += 1
+
+            results = self.network.broadcast_transaction(tx)
+            accepted = any(ok for ok, _code, _msg in results.values())
+
+            if accepted:
+                tier_name = TIER_NAMES.get(StakeTier(tier), "Unknown")
+                self.staking_changed.emit()
+                self.accounts_changed.emit()
+                bal = self._primary_node.ledger.get_balance(address)
+                self.balance_updated.emit(address, bal)
+                self._log(
+                    f"Staked {amount:,.2f} NXF | {address[:16]}… | "
+                    f"tier={tier_name} | tx={tx.tx_id[:12]}…"
+                )
+            else:
+                msgs = [msg for _ok, _code, msg in results.values()]
+                self.error_occurred.emit(f"Stake rejected: {msgs[0]}")
+                return None
+
+            return tx.to_dict()
+
+        except Exception as exc:
+            self.error_occurred.emit(f"Staking failed: {exc}")
+            return None
+
+    def cancel_stake(self, stake_id: str) -> dict | None:
+        """
+        Build, sign, and apply an Unstake (early cancellation) transaction.
+
+        Locked-tier stakes will incur a penalty.
+        Returns the tx dict on success, None on failure.
+        """
+        # Find which wallet owns this stake
+        record = self._primary_node.ledger.staking_pool.stakes.get(stake_id)
+        if record is None:
+            self.error_occurred.emit(f"Stake {stake_id} not found")
+            return None
+
+        address = record.address
+        wallet = self.wallets.get(address)
+        if not wallet:
+            self.error_occurred.emit(f"No wallet found for {address}")
+            return None
+
+        try:
+            tx = create_unstake(
+                account=address,
+                stake_id=stake_id,
+                sequence=wallet.sequence,
+            )
+            wallet.sign_transaction(tx)
+            wallet.sequence += 1
+
+            results = self.network.broadcast_transaction(tx)
+            accepted = any(ok for ok, _code, _msg in results.values())
+
+            if accepted:
+                self.staking_changed.emit()
+                self.accounts_changed.emit()
+                bal = self._primary_node.ledger.get_balance(address)
+                self.balance_updated.emit(address, bal)
+                self._log(
+                    f"Cancelled stake {stake_id[:12]}… | "
+                    f"payout={record.payout_amount:,.4f} NXF"
+                )
+            else:
+                msgs = [msg for _ok, _code, msg in results.values()]
+                self.error_occurred.emit(f"Unstake rejected: {msgs[0]}")
+                return None
+
+            return tx.to_dict()
+
+        except Exception as exc:
+            self.error_occurred.emit(f"Unstake failed: {exc}")
+            return None
+
+    def get_stakes_for_address(
+        self, address: str, active_only: bool = True
+    ) -> list[dict]:
+        """Return all stakes for an address."""
+        if active_only:
+            stakes = self._primary_node.ledger.staking_pool.get_active_stakes(address)
+        else:
+            stakes = self._primary_node.ledger.staking_pool.get_all_stakes(address)
+        return [s.to_dict() for s in stakes]
+
+    def get_all_active_stakes(self) -> list[dict]:
+        """Return all active stakes across all tracked wallets."""
+        result = []
+        for addr in self.wallets:
+            stakes = self._primary_node.ledger.staking_pool.get_active_stakes(addr)
+            result.extend(s.to_dict() for s in stakes)
+        return result
+
+    def get_staking_summary(self, address: str) -> dict:
+        """Return staking summary for an address."""
+        return self._primary_node.ledger.get_staking_summary(address)
+
+    def get_staking_pool_summary(self) -> dict:
+        """Return global staking pool stats."""
+        return self._primary_node.ledger.staking_pool.get_pool_summary()
+
+    def get_staking_tiers(self) -> list[dict]:
+        """Return available staking tier info with current effective APYs."""
+        return self._primary_node.ledger.staking_pool.get_tier_info(
+            self._primary_node.ledger.total_supply
+        )
+
+    def get_demand_multiplier(self) -> float:
+        """Return the current demand multiplier for dynamic APY."""
+        return self._primary_node.ledger.staking_pool.get_demand_multiplier(
+            self._primary_node.ledger.total_supply
+        )
 
     def find_payment_paths(
         self,

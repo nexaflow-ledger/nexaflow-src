@@ -244,6 +244,12 @@ class P2PNode:
         self.on_consensus_result: Callable | None = None
         self.on_peer_connected: Callable | None = None
         self.on_peer_disconnected: Callable | None = None
+        self.on_ledger_request: Callable | None = None   # (peer_id) -> dict
+        self.on_ledger_response: Callable | None = None  # (payload, peer_id) -> None
+
+        # Known peer addresses for gossip-based discovery
+        # {  "host:port": last_seen_timestamp  }
+        self._known_addrs: dict[str, float] = {}
 
         # Dedup - track seen message hashes to avoid rebroadcasts
         self._seen_ids: set[str] = set()
@@ -424,12 +430,23 @@ class P2PNode:
             if self.on_consensus_result:
                 self.on_consensus_result(payload, peer.peer_id)
 
+        elif msg_type == "PEERS":
+            # Gossip: peer shares known addresses
+            addrs = payload.get("addresses", [])
+            for addr in addrs:
+                if isinstance(addr, str) and addr not in self._known_addrs:
+                    self._known_addrs[addr] = time.time()
+
         elif msg_type == "LEDGER_REQ":
-            # Respond with our ledger state (handled externally)
-            pass
+            # Peer is requesting our ledger state
+            if self.on_ledger_request:
+                state = self.on_ledger_request(peer.peer_id)
+                if state:
+                    await peer.send("LEDGER_RES", state)
 
         elif msg_type == "LEDGER_RES":
-            pass
+            if self.on_ledger_response:
+                self.on_ledger_response(payload, peer.peer_id)
 
     # ---- broadcasting ----
 
@@ -457,6 +474,27 @@ class P2PNode:
             return await peer.send(msg_type, payload)
         return False
 
+    async def broadcast_peers(self):
+        """Share our known peer addresses with all connected peers (gossip)."""
+        my_addr = f"{self.host}:{self.port}"
+        addrs = [my_addr] + list(self._known_addrs.keys())
+        # Include currently connected peers
+        for peer in self.peers.values():
+            if peer.remote_addr not in addrs:
+                addrs.append(peer.remote_addr)
+        for peer in list(self.peers.values()):
+            await peer.send("PEERS", {"addresses": addrs})
+
+    async def request_ledger(self, peer_id: str) -> bool:
+        """Send a LEDGER_REQ to a specific peer to sync state."""
+        return await self.send_to_peer(peer_id, "LEDGER_REQ", {
+            "node_id": self.node_id,
+        })
+
+    def register_address(self, addr: str) -> None:
+        """Register a known peer address for gossip discovery."""
+        self._known_addrs[addr] = time.time()
+
     async def _relay(self, origin_peer: str, msg_type: str, payload: dict):
         """Relay a message to all peers except the origin."""
         for pid, peer in list(self.peers.items()):
@@ -466,14 +504,35 @@ class P2PNode:
     # ---- keepalive ----
 
     async def _keepalive_loop(self):
-        """Ping all peers every 30 seconds."""
+        """Ping all peers every 30 seconds; gossip peer addresses every 60s."""
+        cycle = 0
         while self._running:
             await asyncio.sleep(30)
+            cycle += 1
+
+            # Ping
             for peer in list(self.peers.values()):
                 ok = await peer.send("PING", {"node_id": self.node_id})
                 if not ok:
                     self.peers.pop(peer.peer_id, None)
                     await peer.close()
+
+            # Every other cycle (~60s) share known addresses
+            if cycle % 2 == 0:
+                await self.broadcast_peers()
+                # Try connecting to any discovered addresses we aren't connected to
+                connected_addrs = {p.remote_addr for p in self.peers.values()}
+                my_addr = f"{self.host}:{self.port}"
+                for addr in list(self._known_addrs.keys()):
+                    if addr == my_addr or addr in connected_addrs:
+                        continue
+                    if ":" in addr:
+                        try:
+                            host, port_str = addr.rsplit(":", 1)
+                            port = int(port_str)
+                            asyncio.create_task(self.connect_to_peer(host, port))
+                        except (ValueError, OSError):
+                            pass
 
     # ---- helpers ----
 

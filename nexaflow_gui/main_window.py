@@ -26,6 +26,7 @@ from nexaflow_gui.backend import NodeBackend
 from nexaflow_gui.tab_dashboard import DashboardTab
 from nexaflow_gui.tab_ledger import LedgerTab
 from nexaflow_gui.tab_network import NetworkTab
+from nexaflow_gui.tab_staking import StakingTab
 from nexaflow_gui.tab_transactions import TransactionTab
 from nexaflow_gui.tab_trustdex import TrustDexTab
 from nexaflow_gui.tab_wallets import WalletTab
@@ -94,6 +95,7 @@ class MainWindow(QMainWindow):
         self.tab_ledger = LedgerTab(self.backend)
         self.tab_network = NetworkTab(self.backend)
         self.tab_trustdex = TrustDexTab(self.backend)
+        self.tab_staking = StakingTab(self.backend)
 
         self.tabs.addTab(self.tab_dashboard, "  Dashboard  ")
         self.tabs.addTab(self.tab_wallets, "  Wallets  ")
@@ -101,6 +103,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.tab_ledger, "  Ledger  ")
         self.tabs.addTab(self.tab_network, "  Network  ")
         self.tabs.addTab(self.tab_trustdex, "  Trust / DEX  ")
+        self.tabs.addTab(self.tab_staking, "  Staking  ")
 
         root_layout.addWidget(self.tabs, 1)
 

@@ -81,6 +81,28 @@ class LedgerStore:
                 timestamp   REAL
             )
         """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS stakes (
+                stake_id       TEXT PRIMARY KEY,
+                tx_id          TEXT NOT NULL,
+                address        TEXT NOT NULL,
+                amount         REAL NOT NULL,
+                tier           INTEGER NOT NULL,
+                base_apy       REAL NOT NULL,
+                effective_apy  REAL NOT NULL,
+                lock_duration  INTEGER NOT NULL,
+                start_time     REAL NOT NULL,
+                maturity_time  REAL NOT NULL,
+                matured        INTEGER NOT NULL DEFAULT 0,
+                cancelled      INTEGER NOT NULL DEFAULT 0,
+                payout_amount  REAL NOT NULL DEFAULT 0
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS applied_tx_ids (
+                tx_id TEXT PRIMARY KEY
+            )
+        """)
         c.commit()
 
     # ── accounts ─────────────────────────────────────────────────
@@ -203,6 +225,54 @@ class LedgerStore:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    # ── stakes ───────────────────────────────────────────────────
+
+    def save_stake(
+        self,
+        stake_id: str,
+        tx_id: str,
+        address: str,
+        amount: float,
+        tier: int,
+        base_apy: float,
+        effective_apy: float,
+        lock_duration: int,
+        start_time: float,
+        maturity_time: float,
+        matured: bool = False,
+        cancelled: bool = False,
+        payout_amount: float = 0.0,
+    ) -> None:
+        self._conn.execute(
+            """INSERT OR REPLACE INTO stakes
+               (stake_id, tx_id, address, amount, tier, base_apy,
+                effective_apy, lock_duration, start_time, maturity_time,
+                matured, cancelled, payout_amount)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (stake_id, tx_id, address, amount, tier, base_apy,
+             effective_apy, lock_duration, start_time, maturity_time,
+             int(matured), int(cancelled), payout_amount),
+        )
+        self._conn.commit()
+
+    def load_stakes(self) -> list[dict[str, Any]]:
+        rows = self._conn.execute("SELECT * FROM stakes").fetchall()
+        return [dict(r) for r in rows]
+
+    # ── applied tx ids (replay protection) ───────────────────────
+
+    def save_applied_tx_ids(self, tx_ids: set[str]) -> None:
+        """Bulk-save applied transaction IDs for replay protection."""
+        self._conn.executemany(
+            "INSERT OR IGNORE INTO applied_tx_ids (tx_id) VALUES (?)",
+            [(tid,) for tid in tx_ids],
+        )
+        self._conn.commit()
+
+    def load_applied_tx_ids(self) -> set[str]:
+        rows = self._conn.execute("SELECT tx_id FROM applied_tx_ids").fetchall()
+        return {r["tx_id"] for r in rows}
+
     # ── bulk helpers ─────────────────────────────────────────────
 
     def snapshot_ledger(self, ledger: Any) -> None:
@@ -221,6 +291,88 @@ class LedgerStore:
                 header.timestamp, header.transaction_count,
                 header.total_nxf, header.account_count,
             )
+
+        # Persist staking pool
+        if hasattr(ledger, "staking_pool") and ledger.staking_pool is not None:
+            for record in ledger.staking_pool.stakes.values():
+                self.save_stake(
+                    record.stake_id, record.tx_id, record.address,
+                    record.amount, int(record.tier), record.base_apy,
+                    record.effective_apy, record.lock_duration,
+                    record.start_time, record.maturity_time,
+                    record.matured, record.cancelled, record.payout_amount,
+                )
+
+        # Persist applied tx IDs (replay protection)
+        if hasattr(ledger, "applied_tx_ids") and ledger.applied_tx_ids:
+            self.save_applied_tx_ids(ledger.applied_tx_ids)
+
+    def restore_ledger(self, ledger: Any) -> None:
+        """
+        Restore ledger state from the database (accounts, trust lines,
+        closed ledgers, staking pool, applied tx IDs).
+        """
+        from nexaflow_core.staking import StakeRecord, StakeTier
+
+        # Accounts
+        for row in self.load_accounts():
+            acc = ledger.create_account(row["address"], row["balance"])
+            acc.sequence = row["sequence"]
+            acc.is_gateway = bool(row["is_gateway"])
+            acc.owner_count = row["owner_count"]
+
+        # Trust lines
+        for row in self.load_trust_lines():
+            ledger.set_trust_line(
+                row["holder"], row["currency"], row["issuer"], row["limit"],
+            )
+            tl = ledger.accounts[row["holder"]].trust_lines.get(
+                (row["currency"], row["issuer"])
+            )
+            if tl is not None:
+                tl.balance = row["balance"]
+
+        # Closed ledgers
+        from nexaflow_core.ledger import LedgerHeader
+        for row in self.load_closed_ledgers():
+            header = LedgerHeader(
+                row["sequence"], row["hash"], row["previous_hash"],
+                row["timestamp"], row["transaction_count"],
+                row["total_nxf"], row["account_count"],
+            )
+            ledger.closed_ledgers.append(header)
+        if ledger.closed_ledgers:
+            ledger.current_sequence = ledger.closed_ledgers[-1].sequence + 1
+
+        # Staking pool
+        if hasattr(ledger, "staking_pool"):
+            for row in self.load_stakes():
+                record = StakeRecord(
+                    stake_id=row["stake_id"],
+                    tx_id=row["tx_id"],
+                    address=row["address"],
+                    amount=row["amount"],
+                    tier=StakeTier(row["tier"]),
+                    base_apy=row["base_apy"],
+                    effective_apy=row["effective_apy"],
+                    lock_duration=row["lock_duration"],
+                    start_time=row["start_time"],
+                    maturity_time=row["maturity_time"],
+                    matured=bool(row["matured"]),
+                    cancelled=bool(row["cancelled"]),
+                    payout_amount=row["payout_amount"],
+                )
+                pool = ledger.staking_pool
+                pool.stakes[record.stake_id] = record
+                pool.stakes_by_address.setdefault(record.address, []).append(record.stake_id)
+                if record.is_active:
+                    pool.total_staked += record.amount
+                if record.payout_amount > record.amount:
+                    pool.total_interest_paid += record.payout_amount - record.amount
+
+        # Applied tx IDs (replay protection)
+        if hasattr(ledger, "applied_tx_ids"):
+            ledger.applied_tx_ids = self.load_applied_tx_ids()
 
     # ── lifecycle ────────────────────────────────────────────────
 

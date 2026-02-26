@@ -18,10 +18,15 @@ from nexaflow_core.transaction import (
     TEC_INSUF_FEE,
     TEC_KEY_IMAGE_SPENT,
     TEC_NO_LINE,
+    TEC_STAKE_DUPLICATE,
+    TEC_STAKE_LOCKED,
     TEC_UNFUNDED,
     TES_SUCCESS,
+    TT_STAKE,
+    TT_UNSTAKE,
     Transaction,
 )
+from nexaflow_core.staking import MIN_STAKE_AMOUNT, StakeTier, TIER_CONFIG
 
 # Minimum fee in NXF
 MIN_FEE = 0.000010
@@ -115,6 +120,40 @@ class TransactionValidator:
             elif tx.tx_type == 20:  # TrustSet
                 if src_acc.balance < fee_val:
                     return False, TEC_INSUF_FEE, "Cannot cover fee"
+            elif tx.tx_type == TT_STAKE:  # Stake
+                amt_val = tx.amount.value if hasattr(tx.amount, 'value') else float(tx.amount)
+                if amt_val < MIN_STAKE_AMOUNT:
+                    return (
+                        False,
+                        TEC_UNFUNDED,
+                        f"Minimum stake is {MIN_STAKE_AMOUNT} NXF",
+                    )
+                tier_val = tx.flags.get("stake_tier", -1) if tx.flags else -1
+                try:
+                    StakeTier(tier_val)
+                except (ValueError, KeyError):
+                    return False, TEC_STAKE_LOCKED, f"Invalid staking tier: {tier_val}"
+                needed = amt_val + fee_val
+                if src_acc.balance - needed < required_reserve:
+                    return (
+                        False,
+                        TEC_UNFUNDED,
+                        f"Insufficient balance: have {src_acc.balance}, "
+                        f"need {needed} + reserve {required_reserve}",
+                    )
+            elif tx.tx_type == TT_UNSTAKE:  # Unstake (early cancel)
+                if src_acc.balance < fee_val:
+                    return False, TEC_INSUF_FEE, "Cannot cover fee"
+                stake_id = tx.flags.get("stake_id", "") if tx.flags else ""
+                if not stake_id:
+                    return False, TEC_STAKE_LOCKED, "Missing stake_id in flags"
+                record = self.ledger.staking_pool.stakes.get(stake_id)
+                if record is None:
+                    return False, TEC_STAKE_LOCKED, f"Stake {stake_id} not found"
+                if record.address != tx.account:
+                    return False, TEC_STAKE_LOCKED, "Cannot cancel another account's stake"
+                if record.matured or record.cancelled:
+                    return False, TEC_STAKE_DUPLICATE, "Stake already resolved"
             else:
                 if src_acc.balance < fee_val:
                     return False, TEC_INSUF_FEE, "Cannot cover fee"

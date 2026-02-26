@@ -21,6 +21,7 @@
 | **TCP P2P networking** | Async JSON-over-TCP peer discovery, broadcast & keepalive |
 | **REST API** | `aiohttp`-based HTTP API for wallets, transactions & node status |
 | **Order book / DEX** | In-memory limit-order matching engine for cross-currency trades |
+| **Staking with interest** | Tiered lock-up staking (Flexible–365 days) with dynamic APY and early-cancel penalties |
 | **Wallet encryption** | PBKDF2-HMAC-SHA256 + AES-256-CBC encrypted wallet export |
 | **SQLite persistence** | Optional durable storage for ledger state |
 | **TOML configuration** | Flexible file-based node configuration |
@@ -79,6 +80,59 @@ ledger.apply_payment(tx)
 # Recipient scans for their outputs — nothing else is visible on-chain
 found = recipient.scan_confidential_outputs(ledger)
 # found[0] contains stealth_addr, commitment, ephemeral_pub, one_time_priv, …
+```
+
+---
+
+## Staking
+
+NexaFlow supports **tiered staking** with dynamic interest rates and early-cancellation penalties.
+
+### Tiers
+
+| Tier | Lock Period | Base APY | Description |
+|------|------------|----------|-------------|
+| Flexible | None | 2 % | Withdraw any time, no penalty |
+| 30 Days | 30 days | 5 % | |
+| 90 Days | 90 days | 8 % | |
+| 180 Days | 180 days | 12 % | |
+| 365 Days | 365 days | 15 % | Highest yield |
+
+### Dynamic Interest
+
+Base APY is scaled by a **demand multiplier** (0.5×–2×) derived from the network staking ratio:
+
+$$\text{effective\_apy} = \text{base\_apy} \times \text{demand\_multiplier}$$
+
+When fewer tokens are staked the multiplier rises to attract capital.  When too many are staked it drops to release liquidity.  Target ratio = 30 %.
+
+### Early Cancellation
+
+Locked-tier stakes can be cancelled before maturity at a penalty:
+
+- **Interest penalty** — forfeit 50–90 % of accrued interest (scaled by tier APY)
+- **Principal penalty** — burn 2–10 % of principal (scaled by tier APY)
+- **Time decay** — penalties decrease linearly as the stake approaches maturity
+
+Flexible-tier stakes have zero penalty.
+
+### API Examples
+
+```bash
+# Stake 1000 NXF for 90 days (tier 2)
+curl -X POST http://localhost:8080/tx/stake \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: YOUR_KEY" \
+  -d '{"amount": 1000.0, "tier": 2}'
+
+# Check staking info
+curl http://localhost:8080/staking/rMyAddress
+
+# Cancel a stake early
+curl -X POST http://localhost:8080/tx/unstake \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: YOUR_KEY" \
+  -d '{"stake_id": "TX_ID_HERE"}'
 ```
 
 ---
@@ -149,6 +203,11 @@ python run_node.py --node-id alice --port 9001 --api-port 8080
 | GET | `/ledger` | Latest closed ledger info |
 | POST | `/consensus` | Trigger a consensus round |
 | GET | `/orderbook/{base}/{counter}` | Order book snapshot |
+| POST | `/tx/stake` | Submit a stake |
+| POST | `/tx/unstake` | Cancel a stake (early cancellation) |
+| GET | `/staking/{address}` | Staking summary for an address |
+| GET | `/staking` | Global staking pool stats & tier info |
+| GET | `/health` | Deep health check |
 
 ---
 
@@ -183,6 +242,7 @@ nexaflow-src/
 │   ├── api.py              # aiohttp REST API server
 │   ├── storage.py          # SQLite persistence
 │   ├── order_book.py       # DEX limit-order engine
+│   ├── staking.py          # Tiered staking pool with dynamic APY
 │   ├── config.py           # TOML configuration loader
 │   └── logging_config.py   # Structured logging
 ├── nexaflow_gui/           # Optional desktop GUI

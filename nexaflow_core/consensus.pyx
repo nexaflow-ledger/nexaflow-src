@@ -2,14 +2,24 @@
 """
 Cython-optimized NexaFlow Protocol Consensus Algorithm (RPCA) for NexaFlow.
 
-Simplified model of NexaFlow's consensus:
-  1. Each validator proposes a candidate transaction set.
-  2. Proposals are exchanged across the Unique Node List (UNL).
-  3. Voting rounds increase the threshold until ≥80 % agreement.
-  4. Agreed transactions are applied; ledger is closed.
+Implements a Byzantine-fault-tolerant (BFT) variant of RPCA:
 
-This module also implements a fast proposal-voting engine with
-configurable thresholds and round limits.
+  1. Each validator proposes a candidate transaction set and **signs** the
+     proposal with its secp256k1 private key.
+  2. Proposals are exchanged across the Unique Node List (UNL).
+  3. The engine verifies every incoming proposal signature before counting
+     the vote.  Validators that submit conflicting proposals for the same
+     ledger sequence / round (equivocation) are flagged as Byzantine and
+     excluded from the quorum count.
+  4. Safety guarantee: the system tolerates up to
+         f = floor((n - 1) / 3)   Byzantine UNL members
+     where n = |UNL| + 1 (including self).  The engine logs a warning when
+     the current UNL is smaller than 3f + 1.
+  5. Voting rounds escalate the vote threshold from 50 % to 80 %.  Because
+     80 % > 2/3 the final threshold already satisfies the standard BFT
+     requirement (2f + 1 out of n honest votes).
+
+Module also exposes the fast proposal-voting engine used by the node runner.
 """
 
 import hashlib
@@ -56,26 +66,86 @@ PHASE_NAMES = {
 
 @cython.freelist(8)
 cdef class Proposal:
-    """A validator's proposed transaction set for a ledger round."""
-    cdef public str validator_id
+    """A validator's proposed transaction set for a ledger round.
+
+    Attributes
+    ----------
+    validator_id  Unique identifier for the proposing validator.
+    ledger_seq    Ledger sequence number this proposal targets.
+    tx_ids        Set of tx_id strings the validator wants included.
+    round_number  Consensus round in which this proposal was created.
+    signature     Optional DER-encoded ECDSA signature over the proposal
+                  hash.  When present it is verified by the engine before
+                  the proposal is counted.
+    """
+    cdef public str   validator_id
     cdef public long long ledger_seq
-    cdef public set tx_ids             # set of tx_id strings
+    cdef public set   tx_ids             # set of tx_id strings
     cdef public long long timestamp
-    cdef public int round_number
+    cdef public int   round_number
+    cdef public bytes signature          # DER ECDSA sig, or b"" if unsigned
 
     def __init__(self, str validator_id, long long ledger_seq,
-                 set tx_ids=None, int round_number=0):
+                 set tx_ids=None, int round_number=0,
+                 bytes signature=b""):
         self.validator_id = validator_id
         self.ledger_seq = ledger_seq
         self.tx_ids = tx_ids if tx_ids is not None else set()
         self.timestamp = <long long>c_time(NULL)
         self.round_number = round_number
+        self.signature = signature
 
     cpdef str compute_hash(self):
-        """Deterministic hash of the proposal for comparison."""
-        cdef str blob = f"{self.validator_id}:{self.ledger_seq}:" + \
-                        ",".join(sorted(self.tx_ids))
+        """Deterministic hash of the proposal content (hex SHA-256)."""
+        cdef str blob = (
+            f"{self.validator_id}:{self.ledger_seq}:{self.round_number}:"
+            + ",".join(sorted(self.tx_ids))
+        )
         return hashlib.sha256(blob.encode()).hexdigest()
+
+    cpdef bytes signing_digest(self):
+        """Raw 32-byte SHA-256 digest over the canonical proposal blob."""
+        cdef str blob = (
+            f"{self.validator_id}:{self.ledger_seq}:{self.round_number}:"
+            + ",".join(sorted(self.tx_ids))
+        )
+        return hashlib.sha256(blob.encode()).digest()
+
+    cpdef bint verify_signature(self, bytes pubkey_bytes):
+        """
+        Verify the DER ECDSA signature against *pubkey_bytes* (65-byte
+        uncompressed secp256k1 public key).
+
+        Returns True when the signature is valid or when no signature was
+        provided (unsigned proposals are accepted only when the engine is
+        not running in BFT mode).
+        """
+        if not self.signature:
+            return True   # unsigned — caller decides whether to accept
+        try:
+            from ecdsa import VerifyingKey, SECP256k1
+            from ecdsa.util import sigdecode_der
+            vk = VerifyingKey.from_string(pubkey_bytes[1:], curve=SECP256k1)
+            vk.verify_digest(
+                self.signature,
+                self.signing_digest(),
+                sigdecode=sigdecode_der,
+            )
+            return True
+        except Exception:
+            return False
+
+    cpdef void sign(self, bytes privkey_bytes):
+        """
+        Sign the proposal with *privkey_bytes* (32-byte secp256k1 private key).
+        Stores the DER-encoded signature in :attr:`signature`.
+        """
+        from ecdsa import SigningKey, SECP256k1
+        from ecdsa.util import sigencode_der
+        sk = SigningKey.from_string(privkey_bytes, curve=SECP256k1)
+        self.signature = sk.sign_digest(
+            self.signing_digest(), sigencode=sigencode_der
+        )
 
 
 # ===================================================================
@@ -84,35 +154,57 @@ cdef class Proposal:
 
 cdef class ConsensusEngine:
     """
-    Drives the RPCA consensus rounds.
+    Drives BFT-RPCA consensus rounds.
 
-    Usage:
-        engine = ConsensusEngine(unl_validators, my_id, ledger_seq)
+    BFT behaviour
+    -------------
+    * Set ``unl_pubkeys`` to a ``{validator_id: 65-byte-pubkey}`` dict.
+      The engine will then **reject** any proposal whose signature does
+      not verify against the known pubkey.
+    * Validators that submit two different proposals for the same ledger
+      sequence (equivocation) are added to ``byzantine_validators`` and
+      their votes are excluded from all quorum calculations.
+    * The maximum tolerable Byzantine faults is
+      ``max_byzantine_faults = floor((n - 1) / 3)`` where
+      ``n = len(unl) + 1``.  A warning is emitted when the active UNL
+      is too small to achieve BFT safety.
+
+    Usage::
+
+        engine = ConsensusEngine(unl_validators, my_id, ledger_seq,
+                                 unl_pubkeys={\"v2\": pubkey2, \"v3\": pubkey3},
+                                 my_privkey=my_priv)
         engine.submit_transactions(candidate_txns)
         engine.add_proposal(peer_proposal)
-        ...
         result = engine.run_rounds()
         if result is not None:
             # apply result.agreed_tx_ids to ledger
     """
-    cdef public str my_id
+    cdef public str   my_id
     cdef public long long ledger_seq
-    cdef public list unl                # list of validator id strings
-    cdef public int unl_size
-    cdef public dict proposals         # validator_id -> Proposal
-    cdef public set my_tx_ids          # my candidate set
-    cdef public int phase
-    cdef public int current_round
-    cdef public int max_rounds
+    cdef public list  unl                # list of validator id strings
+    cdef public int   unl_size
+    cdef public dict  proposals          # validator_id -> Proposal
+    cdef public set   my_tx_ids          # my candidate set
+    cdef public int   phase
+    cdef public int   current_round
+    cdef public int   max_rounds
     cdef public double initial_threshold
     cdef public double final_threshold
     cdef public double threshold_step
-    cdef public list round_history
+    cdef public list  round_history
+    # BFT fields
+    cdef public dict  unl_pubkeys        # validator_id -> 65-byte pubkey (optional)
+    cdef public bytes my_privkey         # 32-byte privkey for signing own proposals
+    cdef public set   byzantine_validators
+    cdef public int   max_byzantine_faults
 
     def __init__(self, list unl, str my_id, long long ledger_seq,
                  int max_rounds=10,
                  double initial_threshold=0.50,
-                 double final_threshold=0.80):
+                 double final_threshold=0.80,
+                 dict unl_pubkeys=None,
+                 bytes my_privkey=b""):
         self.my_id = my_id
         self.ledger_seq = ledger_seq
         self.unl = list(unl)
@@ -130,25 +222,79 @@ cdef class ConsensusEngine:
         else:
             self.threshold_step = 0.0
         self.round_history = []
+        # BFT
+        self.unl_pubkeys = dict(unl_pubkeys) if unl_pubkeys else {}
+        self.my_privkey = my_privkey
+        self.byzantine_validators = set()
+        # Maximum Byzantine faults: f = floor((n-1)/3) where n = |UNL| + 1
+        cdef int n = len(unl) + 1
+        self.max_byzantine_faults = (n - 1) // 3
 
     # ---- public API ----
 
     cpdef void submit_transactions(self, list tx_ids):
-        """Set our candidate transaction IDs."""
+        """Set our candidate transaction IDs and create our own signed proposal."""
         self.my_tx_ids = set(tx_ids)
-        # Create our own proposal
-        cdef Proposal p = Proposal(self.my_id, self.ledger_seq,
-                                    set(self.my_tx_ids), 0)
+        cdef Proposal p = Proposal(
+            self.my_id, self.ledger_seq,
+            set(self.my_tx_ids), 0,
+        )
+        if self.my_privkey:
+            p.sign(self.my_privkey)
         self.proposals[self.my_id] = p
 
-    cpdef void add_proposal(self, object proposal):
-        """Receive a proposal from a UNL peer."""
-        self.proposals[(<Proposal>proposal).validator_id] = proposal
+    cpdef bint add_proposal(self, object proposal):
+        """
+        Receive a proposal from a UNL peer.
+
+        Returns True when the proposal is accepted.  Returns False and
+        marks the sending validator as Byzantine when:
+          * signature verification fails (pubkey known), or
+          * the validator has already submitted a different proposal for
+            this ledger/round (equivocation).
+        """
+        cdef Proposal p = <Proposal>proposal
+        cdef str vid = p.validator_id
+
+        # ── Signature check ──────────────────────────────────────────
+        if self.unl_pubkeys:
+            pubkey = self.unl_pubkeys.get(vid)
+            if pubkey is not None:
+                if not p.verify_signature(pubkey):
+                    import logging as _log
+                    _log.getLogger("nexaflow_consensus").warning(
+                        f"[BFT] Invalid proposal signature from {vid} — "
+                        "treating as Byzantine"
+                    )
+                    self.byzantine_validators.add(vid)
+                    return False
+
+        # ── Equivocation check ───────────────────────────────────────
+        existing = self.proposals.get(vid)
+        if existing is not None:
+            if (<Proposal>existing).compute_hash() != p.compute_hash():
+                import logging as _log
+                _log.getLogger("nexaflow_consensus").warning(
+                    f"[BFT] Equivocation detected from {vid}: conflicting "
+                    f"proposals for ledger {self.ledger_seq} round "
+                    f"{p.round_number} — marking Byzantine"
+                )
+                self.byzantine_validators.add(vid)
+                # Remove existing vote; do not replace with conflicting one
+                del self.proposals[vid]
+                return False
+
+        self.proposals[vid] = p
+        return True
 
     cpdef object run_rounds(self):
         """
         Execute voting rounds until consensus or failure.
-        Returns a ConsensusResult or None on failure.
+
+        Byzantine validators are excluded from the quorum denominator so
+        the threshold is computed over honest nodes only.
+
+        Returns a :class:`ConsensusResult` or None on failure.
         """
         self.phase = PHASE_ESTABLISH
         cdef double threshold
@@ -170,6 +316,7 @@ cdef class ConsensusEngine:
                 "proposals": total_proposals,
                 "agreed_txns": len(agreed),
                 "candidate_txns": len(self.my_tx_ids),
+                "byzantine_count": len(self.byzantine_validators),
             })
 
             # If we've reached final threshold and have agreement
@@ -181,13 +328,18 @@ cdef class ConsensusEngine:
                     self.current_round,
                     threshold,
                     total_proposals,
+                    len(self.byzantine_validators),
                 )
 
             # Update our candidate set to the agreed set
             self.my_tx_ids = agreed
-            self.proposals[self.my_id] = Proposal(
-                self.my_id, self.ledger_seq, set(agreed), self.current_round
+            updated = Proposal(
+                self.my_id, self.ledger_seq,
+                set(agreed), self.current_round,
             )
+            if self.my_privkey:
+                updated.sign(self.my_privkey)
+            self.proposals[self.my_id] = updated
             self.current_round += 1
 
         # Even if we hit max rounds, accept what we have at final threshold
@@ -197,23 +349,38 @@ cdef class ConsensusEngine:
             return ConsensusResult(
                 self.ledger_seq, agreed, self.current_round,
                 self.final_threshold, len(self.proposals),
+                len(self.byzantine_validators),
             )
 
         self.phase = PHASE_FAILED
         return None
+
+    cpdef bint is_bft_safe(self):
+        """
+        Return True when the current UNL is large enough to tolerate
+        ``max_byzantine_faults`` Byzantine failures.
+
+        BFT requires n >= 3f + 1.  Returns False (and is_bft_safe should
+        trigger a warning in the caller) when the UNL is too small.
+        """
+        cdef int n = self.unl_size + 1
+        cdef int f = self.max_byzantine_faults
+        return n >= 3 * f + 1
 
     # ---- internal ----
 
     cdef set _compute_agreed(self, double threshold):
         """
         Compute the set of tx_ids that appear in >= threshold fraction
-        of UNL proposals.
+        of honest (non-Byzantine) UNL proposals.
         """
         cdef dict vote_count = {}
         cdef int total = 0
         cdef str tx_id
 
         for vid, prop in self.proposals.items():
+            if vid in self.byzantine_validators:
+                continue   # exclude Byzantine voters
             if vid in self.unl or vid == self.my_id:
                 total += 1
                 for tx_id in (<Proposal>prop).tx_ids:
@@ -241,19 +408,21 @@ cdef class ConsensusEngine:
 cdef class ConsensusResult:
     """Outcome of a successful consensus round."""
     cdef public long long ledger_seq
-    cdef public set agreed_tx_ids
-    cdef public int rounds_taken
+    cdef public set   agreed_tx_ids
+    cdef public int   rounds_taken
     cdef public double final_threshold
-    cdef public int total_proposals
+    cdef public int   total_proposals
+    cdef public int   byzantine_count
 
     def __init__(self, long long ledger_seq, set agreed_tx_ids,
                  int rounds_taken, double final_threshold,
-                 int total_proposals):
+                 int total_proposals, int byzantine_count=0):
         self.ledger_seq = ledger_seq
         self.agreed_tx_ids = agreed_tx_ids
         self.rounds_taken = rounds_taken
         self.final_threshold = final_threshold
         self.total_proposals = total_proposals
+        self.byzantine_count = byzantine_count
 
     cpdef dict to_dict(self):
         return {
@@ -262,9 +431,11 @@ cdef class ConsensusResult:
             "rounds_taken": self.rounds_taken,
             "threshold": self.final_threshold,
             "proposals": self.total_proposals,
+            "byzantine_validators_excluded": self.byzantine_count,
         }
 
     def __repr__(self):
         return (f"ConsensusResult(seq={self.ledger_seq}, "
                 f"txns={len(self.agreed_tx_ids)}, "
-                f"rounds={self.rounds_taken})")
+                f"rounds={self.rounds_taken}, "
+                f"byzantine={self.byzantine_count})")

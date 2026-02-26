@@ -18,6 +18,7 @@ __all__ = [
     "ledger",
     "network",
     "payment_path",
+    "staking",
     "transaction",
     "trust_line",
     "validator",

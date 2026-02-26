@@ -18,16 +18,40 @@ interval_seconds = 10
 proposal_wait_seconds = 2.0
 initial_threshold = 0.50
 final_threshold = 0.80
+# BFT mode — sign and verify consensus proposals.
+# Generate keys with:  python scripts/gen_node_cert.py --node-id validator-1
+validator_key_file = ""              # e.g. "certs/validator-1.key"
+validator_pubkeys_dir = ""           # e.g. "certs/pubkeys/"
+
+[tls]
+# When enabled every P2P connection is TLS-encrypted.
+# Set verify_peer = true for mutual TLS (recommended for production).
+# Generate certificates with:  python scripts/gen_node_cert.py --node-id validator-1
+enabled = false
+cert_file = "certs/node.crt"
+key_file  = "certs/node.key"
+ca_file   = "certs/ca.crt"
+verify_peer = true              # mutual TLS — require peer certificate
 
 [api]
 enabled = false
 host = "127.0.0.1"
 port = 8080
+api_key = ""                 # set a secret key to protect POST endpoints (or use NEXAFLOW_API_KEY env)
+rate_limit_rpm = 120         # max requests per minute per IP (0 = unlimited)
+cors_origins = []            # e.g. ["https://dashboard.nexaflow.io"]
+max_body_bytes = 1_048_576   # 1 MiB
 
 [storage]
 enabled = false
 backend = "sqlite"
 path = "data/nexaflow.db"
+
+# Deterministic genesis — every node must use the same genesis config.
+# When [genesis.accounts] is empty the default genesis account receives all supply.
+[genesis.accounts]
+# "nGenesisNXF" = 100_000_000_000.0
+# "rFoundation" = 10_000_000.0
 
 [logging]
 level = "INFO"

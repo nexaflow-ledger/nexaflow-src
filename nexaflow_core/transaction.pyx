@@ -25,6 +25,8 @@ cdef int _TT_TRUST_SET    = 20
 cdef int _TT_OFFER_CREATE = 7
 cdef int _TT_OFFER_CANCEL = 8
 cdef int _TT_ACCOUNT_SET  = 3
+cdef int _TT_STAKE        = 30
+cdef int _TT_UNSTAKE      = 31
 
 # Python-visible aliases
 TT_PAYMENT      = _TT_PAYMENT
@@ -32,6 +34,8 @@ TT_TRUST_SET    = _TT_TRUST_SET
 TT_OFFER_CREATE = _TT_OFFER_CREATE
 TT_OFFER_CANCEL = _TT_OFFER_CANCEL
 TT_ACCOUNT_SET  = _TT_ACCOUNT_SET
+TT_STAKE        = _TT_STAKE
+TT_UNSTAKE      = _TT_UNSTAKE
 
 # Transaction result codes (cdef + Python-visible)
 cdef int _TES_SUCCESS  = 0
@@ -42,6 +46,8 @@ cdef int _TEC_INSUF_FEE = 104
 cdef int _TEC_BAD_SEQ  = 105
 cdef int _TEC_BAD_SIG  = 106
 cdef int _TEC_KEY_IMAGE_SPENT = 107
+cdef int _TEC_STAKE_LOCKED = 108
+cdef int _TEC_STAKE_DUPLICATE = 109
 
 TES_SUCCESS      = _TES_SUCCESS
 TEC_UNFUNDED     = _TEC_UNFUNDED
@@ -51,6 +57,8 @@ TEC_INSUF_FEE    = _TEC_INSUF_FEE
 TEC_BAD_SEQ      = _TEC_BAD_SEQ
 TEC_BAD_SIG      = _TEC_BAD_SIG
 TEC_KEY_IMAGE_SPENT = _TEC_KEY_IMAGE_SPENT
+TEC_STAKE_LOCKED = _TEC_STAKE_LOCKED
+TEC_STAKE_DUPLICATE = _TEC_STAKE_DUPLICATE
 
 # Map names to codes for external use
 TX_TYPE_NAMES = {
@@ -59,18 +67,23 @@ TX_TYPE_NAMES = {
     "OfferCreate": TT_OFFER_CREATE,
     "OfferCancel": TT_OFFER_CANCEL,
     "AccountSet": TT_ACCOUNT_SET,
+    "Stake": TT_STAKE,
+    "Unstake": TT_UNSTAKE,
 }
 
 RESULT_NAMES = {
-    TES_SUCCESS:       "tesSUCCESS",
-    TEC_UNFUNDED:      "tecUNFUNDED",
+    TES_SUCCESS:        "tesSUCCESS",
+    TEC_UNFUNDED:       "tecUNFUNDED",
     TEC_PATH_NOT_FOUND: "tecPATH_NOT_FOUND",
-    TEC_NO_LINE:       "tecNO_LINE",
-    TEC_INSUF_FEE:     "tecINSUF_FEE",
-    TEC_BAD_SEQ:       "tecBAD_SEQ",
-    TEC_BAD_SIG:       "tecBAD_SIG",
+    TEC_NO_LINE:        "tecNO_LINE",
+    TEC_INSUF_FEE:      "tecINSUF_FEE",
+    TEC_BAD_SEQ:        "tecBAD_SEQ",
+    TEC_BAD_SIG:        "tecBAD_SIG",
     TEC_KEY_IMAGE_SPENT: "tecKEY_IMAGE_SPENT",
+    TEC_STAKE_LOCKED:    "tecSTAKE_LOCKED",
+    TEC_STAKE_DUPLICATE: "tecSTAKE_DUPLICATE",
 }
+
 
 
 # ===================================================================
@@ -224,6 +237,10 @@ cdef class Transaction:
             buf.extend(self.range_proof)
         if self.key_image:
             buf.extend(self.key_image)
+        # Include flags for deterministic stake / unstake hashing
+        if self.flags:
+            import json as _json
+            buf.extend(_json.dumps(self.flags, sort_keys=True).encode("utf-8"))
         return bytes(buf)
 
     cpdef bytes hash_for_signing(self):
@@ -274,6 +291,8 @@ cdef class Transaction:
             d["range_proof"] = self.range_proof.hex()
         if self.key_image:
             d["key_image"] = self.key_image.hex()
+        if self.flags:
+            d["flags"] = self.flags
         return d
 
     def __repr__(self):
@@ -316,6 +335,41 @@ cpdef object create_offer(str account, object taker_pays, object taker_gets,
     )
     tx.taker_pays = taker_pays
     tx.taker_gets = taker_gets
+    return tx
+
+
+cpdef object create_stake(str account, double amount, int stake_tier,
+                          double fee=0.00001, long long sequence=0,
+                          str memo=""):
+    """
+    Create a Stake transaction.
+
+    The destination is set to the account itself (self-payment on maturity).
+    The ``flags`` dict carries ``stake_tier`` so the ledger knows which
+    APY / lock duration to apply.
+    """
+    cdef Transaction tx = Transaction(
+        TT_STAKE, account, account,  # destination = self
+        Amount(amount), Amount(fee), sequence, memo,
+    )
+    tx.flags = {"stake_tier": stake_tier}
+    return tx
+
+
+cpdef object create_unstake(str account, str stake_id,
+                            double fee=0.00001, long long sequence=0,
+                            str memo=""):
+    """
+    Create an Unstake transaction (early cancellation).
+
+    ``flags["stake_id"]`` identifies the stake to cancel.
+    Locked-tier stakes will suffer a penalty; Flexible are free.
+    """
+    cdef Transaction tx = Transaction(
+        TT_UNSTAKE, account, account,
+        Amount(0.0), Amount(fee), sequence, memo,
+    )
+    tx.flags = {"stake_id": stake_id}
     return tx
 
 

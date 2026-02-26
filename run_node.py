@@ -33,8 +33,10 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from nexaflow_core.consensus import ConsensusEngine, Proposal  # noqa: E402
+from nexaflow_core.config import load_config  # noqa: E402
 from nexaflow_core.ledger import Ledger  # noqa: E402
 from nexaflow_core.p2p import P2PNode  # noqa: E402
+from nexaflow_core.storage import LedgerStore  # noqa: E402
 from nexaflow_core.transaction import Amount, Transaction, create_payment  # noqa: E402
 from nexaflow_core.trust_line import TrustGraph  # noqa: E402
 from nexaflow_core.validator import TransactionValidator  # noqa: E402
@@ -70,10 +72,12 @@ class NexaFlowNode:
         host: str = "0.0.0.0",
         port: int = 9001,
         peers: list[str] | None = None,
+        config=None,
     ):
         self.node_id = node_id
         self.port = port
         self.peers_to_connect = peers or []
+        self.config = config
 
         # Core components
         self.ledger = Ledger()
@@ -81,6 +85,9 @@ class NexaFlowNode:
         self.wallet = Wallet.from_seed(node_id)
         self.validator = TransactionValidator(self.ledger)
         self.trust_graph = TrustGraph()
+
+        # Persistence
+        self.store: LedgerStore | None = None
 
         # Transaction pool (tx_id -> tx dict from network, or Transaction obj)
         self.tx_pool: dict[str, dict] = {}
@@ -92,17 +99,48 @@ class NexaFlowNode:
         # Background task references (prevent GC)
         self._bg_tasks: list[asyncio.Task] = []
 
+        # API server reference
+        self._api = None
+
         # Wire up P2P callbacks
         self.p2p.on_transaction = self._on_tx_received
         self.p2p.on_proposal = self._on_proposal_received
         self.p2p.on_consensus_result = self._on_consensus_result
         self.p2p.on_peer_connected = self._on_peer_connected
         self.p2p.on_peer_disconnected = self._on_peer_disconnected
+        self.p2p.on_ledger_request = self._on_ledger_request
+        self.p2p.on_ledger_response = self._on_ledger_response
 
     # ---- lifecycle ----
 
     async def start(self):
-        """Start networking and periodic consensus."""
+        """Start networking, persistence, API, and periodic consensus."""
+        # ── Deterministic genesis ────────────────────────────────
+        if self.config and self.config.genesis.accounts:
+            genesis_accounts = self.config.genesis.accounts
+            logger.info(f"Applying deterministic genesis ({len(genesis_accounts)} accounts)")
+            for addr, balance in genesis_accounts.items():
+                if not self.ledger.account_exists(addr):
+                    self.ledger.create_account(addr, balance)
+                else:
+                    acc = self.ledger.get_account(addr)
+                    if acc:
+                        acc.balance = balance
+
+        # ── Persistence: restore from SQLite ─────────────────────
+        if self.config and self.config.storage.enabled:
+            self.store = LedgerStore(self.config.storage.path)
+            if self.store.latest_ledger_seq() > 0:
+                logger.info("Restoring ledger state from database...")
+                self.store.restore_ledger(self.ledger)
+                logger.info(
+                    f"Restored: seq={self.ledger.current_sequence}, "
+                    f"{len(self.ledger.accounts)} accounts, "
+                    f"{len(self.ledger.closed_ledgers)} closed ledgers, "
+                    f"{len(self.ledger.applied_tx_ids)} applied tx IDs, "
+                    f"{len(self.ledger.staking_pool.stakes)} stakes"
+                )
+
         # Fund our own wallet on the ledger
         if not self.ledger.account_exists(self.wallet.address):
             self.ledger.create_account(self.wallet.address, 0.0)
@@ -116,11 +154,29 @@ class NexaFlowNode:
         # Start consensus timer
         self._bg_tasks.append(asyncio.create_task(self._consensus_loop()))
 
+        # ── API server ───────────────────────────────────────────
+        if self.config and self.config.api.enabled:
+            from nexaflow_core.api import APIServer
+            self._api = APIServer(
+                self,
+                host=self.config.api.host,
+                port=self.config.api.port,
+                api_config=self.config.api,
+            )
+            await self._api.start()
+
         logger.info(
             f"Node {self.node_id} started | addr={self.wallet.address} | port={self.port}"
         )
 
     async def stop(self):
+        # Persist state before shutting down
+        if self.store is not None:
+            logger.info("Saving ledger state to database...")
+            self.store.snapshot_ledger(self.ledger)
+            self.store.close()
+        if self._api is not None:
+            await self._api.stop()
         await self.p2p.stop()
 
     async def _connect_with_retry(self, addr: str, max_retries: int = 30):
@@ -140,6 +196,8 @@ class NexaFlowNode:
 
     def _on_peer_connected(self, peer_id: str):
         logger.info(f"Peer connected: {peer_id}")
+        # Request ledger state from new peer for catch-up sync
+        asyncio.ensure_future(self.p2p.request_ledger(peer_id))
 
     def _on_peer_disconnected(self, peer_id: str):
         logger.info(f"Peer disconnected: {peer_id}")
@@ -178,6 +236,72 @@ class NexaFlowNode:
     def _on_consensus_result(self, result_data: dict, from_peer: str):
         """Handle a consensus result from a peer (for catch-up)."""
         logger.info(f"Received consensus result from {from_peer}")
+
+    def _on_ledger_request(self, from_peer: str) -> dict | None:
+        """Serve our ledger state to a peer that needs to sync."""
+        logger.info(f"Serving ledger state to {from_peer}")
+        summary = self.ledger.get_state_summary()
+        accounts = {}
+        for addr, acc in self.ledger.accounts.items():
+            accounts[addr] = {
+                "balance": acc.balance,
+                "sequence": acc.sequence,
+                "is_gateway": bool(acc.is_gateway),
+            }
+        closed = []
+        for h in self.ledger.closed_ledgers:
+            closed.append({
+                "sequence": h.sequence,
+                "hash": h.hash,
+                "previous_hash": h.previous_hash,
+                "timestamp": h.timestamp,
+                "transaction_count": h.transaction_count,
+            })
+        return {
+            "summary": summary,
+            "accounts": accounts,
+            "closed_ledgers": closed,
+            "current_sequence": self.ledger.current_sequence,
+        }
+
+    def _on_ledger_response(self, payload: dict, from_peer: str):
+        """Apply ledger state received from a peer (catch-up sync)."""
+        peer_seq = payload.get("current_sequence", 0)
+        if peer_seq <= self.ledger.current_sequence:
+            logger.info(f"Peer {from_peer} ledger seq {peer_seq} not ahead, ignoring")
+            return
+
+        logger.info(
+            f"Syncing ledger from {from_peer}: peer seq={peer_seq}, "
+            f"ours={self.ledger.current_sequence}"
+        )
+        # Apply accounts
+        for addr, info in payload.get("accounts", {}).items():
+            if not self.ledger.account_exists(addr):
+                self.ledger.create_account(addr, info.get("balance", 0.0))
+            else:
+                acc = self.ledger.get_account(addr)
+                if acc:
+                    acc.balance = info.get("balance", acc.balance)
+                    acc.sequence = info.get("sequence", acc.sequence)
+
+        # Apply closed ledger headers
+        from nexaflow_core.ledger import LedgerHeader
+        our_seqs = {h.sequence for h in self.ledger.closed_ledgers}
+        for hdr in payload.get("closed_ledgers", []):
+            if hdr["sequence"] not in our_seqs:
+                header = LedgerHeader(
+                    hdr["sequence"], hdr["hash"], hdr.get("previous_hash", ""),
+                    hdr.get("timestamp", 0.0), hdr.get("transaction_count", 0),
+                    0.0, 0,
+                )
+                self.ledger.closed_ledgers.append(header)
+
+        self.ledger.closed_ledgers.sort(key=lambda h: h.sequence)
+        self.ledger.current_sequence = max(
+            self.ledger.current_sequence, peer_seq
+        )
+        logger.info(f"Ledger synced to sequence {self.ledger.current_sequence}")
 
     # ---- transaction creation ----
 
@@ -303,6 +427,10 @@ class NexaFlowNode:
                 "agreed_tx_ids": list(agreed_ids),
                 "applied": applied,
             })
+
+            # Persist to SQLite after each consensus round
+            if self.store is not None:
+                self.store.snapshot_ledger(self.ledger)
 
             # Clear pools
             for tx_id in agreed_ids:
@@ -464,6 +592,7 @@ async def interactive_cli(node: NexaFlowNode):
 
 def parse_args():
     p = argparse.ArgumentParser(description="NexaFlow Validator Node")
+    p.add_argument("--config", default=None, help="Path to nexaflow.toml config file")
     p.add_argument("--node-id", default=os.environ.get("NEXAFLOW_NODE_ID", "validator-1"),
                     help="Unique node identifier")
     p.add_argument("--host", default="0.0.0.0", help="Listen host")
@@ -488,20 +617,43 @@ def parse_args():
 async def main():
     args = parse_args()
 
+    # Load config (TOML + env overrides)
+    cfg = load_config(args.config)
+
+    # CLI flags override config
+    if args.node_id != "validator-1" or not cfg.node.node_id:
+        cfg.node.node_id = args.node_id
+    if args.host != "0.0.0.0":
+        cfg.node.host = args.host
+    if args.port != 9001:
+        cfg.node.port = args.port
+    if args.peers:
+        cfg.node.peers = [p for p in args.peers if p]
+
     node = NexaFlowNode(
-        node_id=args.node_id,
-        host=args.host,
-        port=args.port,
-        peers=[p for p in args.peers if p],
+        node_id=cfg.node.node_id,
+        host=cfg.node.host,
+        port=cfg.node.port,
+        peers=cfg.node.peers or [p for p in args.peers if p],
+        config=cfg,
     )
     await node.start()
+
+    # ── BFT safety warning ───────────────────────────────────────
+    if not cfg.consensus.validator_key_file or not cfg.consensus.validator_pubkeys_dir:
+        logger.warning(
+            "⚠  Running in NON-BFT mode — consensus proposals are unsigned. "
+            "Set [consensus] validator_key_file and validator_pubkeys_dir "
+            "in nexaflow.toml for Byzantine fault tolerance."
+        )
 
     # Optional: fund an address from genesis for testing
     if args.fund_address:
         node.fund_local(args.fund_address, args.fund_amount or 10000.0)
 
-    # Always fund own wallet for testing
-    node.fund_local(node.wallet.address, 50000.0)
+    # Always fund own wallet for testing (only in dev mode / no genesis config)
+    if not cfg.genesis.accounts:
+        node.fund_local(node.wallet.address, 50000.0)
 
     if args.no_cli:
         # Run forever without CLI

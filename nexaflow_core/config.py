@@ -45,12 +45,28 @@ class LedgerConfig:
 
 
 @dataclass
+class TLSConfig:
+    """TLS / mutual-TLS settings for the P2P layer."""
+    enabled: bool = False
+    cert_file: str = "certs/node.crt"   # PEM X.509 certificate
+    key_file: str = "certs/node.key"    # PEM private key
+    ca_file: str = "certs/ca.crt"       # CA bundle used to verify peers
+    verify_peer: bool = True             # mutual TLS — require peer certificate
+
+
+@dataclass
 class ConsensusConfig:
-    """Consensus timing."""
+    """Consensus timing and BFT settings."""
     interval_seconds: int = 10
     proposal_wait_seconds: float = 2.0
     initial_threshold: float = 0.50
     final_threshold: float = 0.80
+    # BFT: path to this validator's secp256k1 private key used to sign
+    # proposals.  When empty, proposals are sent unsigned (non-BFT mode).
+    validator_key_file: str = ""
+    # BFT: directory containing <validator_id>.pub files (65-byte hex pubkeys)
+    # used to verify peer proposals.  Empty = no signature verification.
+    validator_pubkeys_dir: str = ""
 
 
 @dataclass
@@ -59,6 +75,10 @@ class APIConfig:
     enabled: bool = False
     host: str = "127.0.0.1"
     port: int = 8080
+    api_key: str = ""                 # require this key on POST endpoints (empty = no auth)
+    rate_limit_rpm: int = 120          # max requests per minute per IP (0 = unlimited)
+    cors_origins: list[str] = field(default_factory=list)  # allowed CORS origins (empty = no CORS)
+    max_body_bytes: int = 1_048_576    # 1 MiB max request body
 
 
 @dataclass
@@ -67,6 +87,19 @@ class StorageConfig:
     enabled: bool = False
     backend: str = "sqlite"
     path: str = "data/nexaflow.db"
+
+
+@dataclass
+class GenesisConfig:
+    """
+    Deterministic genesis state.
+
+    ``accounts`` maps address → initial NXF balance.  Every node must use
+    identical genesis config to converge on the same ledger hash chain.
+    When empty, a single genesis account (``nGenesisNXF``) receives the
+    full supply (backward-compatible behaviour).
+    """
+    accounts: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -83,8 +116,10 @@ class NexaFlowConfig:
     node: NodeConfig = field(default_factory=NodeConfig)
     ledger: LedgerConfig = field(default_factory=LedgerConfig)
     consensus: ConsensusConfig = field(default_factory=ConsensusConfig)
+    tls: TLSConfig = field(default_factory=TLSConfig)
     api: APIConfig = field(default_factory=APIConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
+    genesis: GenesisConfig = field(default_factory=GenesisConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
 
 
@@ -122,8 +157,10 @@ def load_config(path: str | None = None) -> NexaFlowConfig:
                 ("node", cfg.node),
                 ("ledger", cfg.ledger),
                 ("consensus", cfg.consensus),
+                ("tls", cfg.tls),
                 ("api", cfg.api),
                 ("storage", cfg.storage),
+                ("genesis", cfg.genesis),
                 ("logging", cfg.logging),
             ]:
                 if section_name in data:
@@ -148,5 +185,9 @@ def load_config(path: str | None = None) -> NexaFlowConfig:
     if v := os.environ.get("NEXAFLOW_DB_PATH"):
         cfg.storage.path = v
         cfg.storage.enabled = True
+    if v := os.environ.get("NEXAFLOW_API_KEY"):
+        cfg.api.api_key = v
+    if v := os.environ.get("NEXAFLOW_CORS_ORIGINS"):
+        cfg.api.cors_origins = [o.strip() for o in v.split(",") if o.strip()]
 
     return cfg

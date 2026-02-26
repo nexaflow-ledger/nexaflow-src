@@ -16,9 +16,16 @@ import hashlib
 import json
 import struct
 import copy
+import time as _py_time
 
 cimport cython
 from libc.time cimport time as c_time
+
+from nexaflow_core.staking import (
+    StakingPool, StakeTier, TIER_NAMES, StakeRecord,
+    TIER_CONFIG, MIN_STAKE_AMOUNT, SECONDS_PER_YEAR,
+    EARLY_INTEREST_PENALTY, EARLY_PRINCIPAL_PENALTY,
+)
 
 
 # ── GIL-free arithmetic helpers ──────────────────────────────────────────────
@@ -238,6 +245,7 @@ cdef class Ledger:
     cdef public set spent_key_images   # bytes → kept for is_key_image_spent API
     cdef public set applied_tx_ids     # str  → duplicate-TX detection
     cdef public dict confidential_outputs  # stealth_addr_hex → ConfidentialOutput
+    cdef public object staking_pool    # StakingPool instance
 
     def __init__(self, double total_supply=100_000_000_000.0,
                  str genesis_account="nGenesisNXF"):
@@ -251,6 +259,7 @@ cdef class Ledger:
         self.spent_key_images = set()
         self.applied_tx_ids = set()
         self.confidential_outputs = {}  # stealth_addr_hex → ConfidentialOutput
+        self.staking_pool = StakingPool()
 
         # Create genesis account with full supply
         cdef AccountEntry genesis = AccountEntry(genesis_account, total_supply)
@@ -472,15 +481,25 @@ cdef class Ledger:
         """Route a transaction to the correct handler. Returns result code."""
         cdef int tt = tx.tx_type
         cdef int result
+        # Duplicate-TX detection (all types)
+        if tx.tx_id and tx.tx_id in self.applied_tx_ids:
+            tx.result_code = 109  # tecSTAKE_DUPLICATE (reuse for general dup)
+            return 109
         if tt == 0:      # Payment
             result = self.apply_payment(tx)
         elif tt == 20:   # TrustSet
             result = self.apply_trust_set(tx)
+        elif tt == 30:   # Stake
+            result = self.apply_stake(tx)
+        elif tt == 31:   # Unstake (early cancel)
+            result = self.apply_unstake(tx)
         else:
             result = 0   # for simplicity, other types succeed
         tx.result_code = result
         if result == 0:
             self.pending_txns.append(tx)
+            if tx.tx_id:
+                self.applied_tx_ids.add(tx.tx_id)
         return result
 
     # ---- ledger closing ----
@@ -503,6 +522,19 @@ cdef class Ledger:
 
         cdef LedgerHeader header = LedgerHeader(self.current_sequence, parent_hash)
         header.tx_count = len(self.pending_txns)
+
+        # ── Auto-mature stakes ──────────────────────────────────────────
+        # Process all stakes that have reached maturity at this ledger close.
+        # Credits principal + interest back to the staker's account.
+        close_now = header.close_time
+        matured_payouts = self.staking_pool.mature_stakes(now=close_now)
+        for mat_addr, mat_principal, mat_interest in matured_payouts:
+            mat_acc = <AccountEntry>self.accounts.get(mat_addr)
+            if mat_acc is not None:
+                mat_acc.balance += mat_principal + mat_interest
+                # Interest sourced from fee pool when available
+                if self.fee_pool >= mat_interest:
+                    self.fee_pool -= mat_interest
 
         # Transaction merkle hash (simplified: hash of all tx_ids concatenated)
         cdef bytes tx_blob = b""
@@ -533,6 +565,102 @@ cdef class Ledger:
         self.current_sequence += 1
         return header
 
+    # ---- staking: apply / cancel / maturity ----
+
+    cpdef int apply_stake(self, object tx):
+        """
+        Apply a Stake transaction.
+
+        1. Debit principal + fee from the sender.
+        2. Record a StakeRecord in the pool (tx_id == stake_id).
+        """
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101  # tecUNFUNDED
+
+        cdef double amt = tx.amount.value
+        cdef double fee_val = tx.fee.value
+
+        if acc.balance < amt + fee_val:
+            return 101  # tecUNFUNDED
+
+        if tx.sequence != 0 and tx.sequence != acc.sequence:
+            return 105  # tecBAD_SEQ
+
+        tier_val = tx.flags.get("stake_tier", -1)
+        try:
+            StakeTier(tier_val)
+        except (ValueError, KeyError):
+            return 108  # tecSTAKE_LOCKED (invalid tier)
+
+        if amt < MIN_STAKE_AMOUNT:
+            return 101  # tecUNFUNDED (below minimum)
+
+        # Debit
+        acc.balance -= (amt + fee_val)
+        self.fee_pool += fee_val
+
+        # Record in staking pool
+        self.staking_pool.record_stake(
+            tx_id=tx.tx_id,
+            address=src,
+            amount=amt,
+            tier=tier_val,
+            circulating_supply=self.total_supply,
+            now=tx.timestamp if tx.timestamp else None,
+        )
+
+        acc.sequence += 1
+        return 0  # tesSUCCESS
+
+    cpdef int apply_unstake(self, object tx):
+        """
+        Apply an Unstake (early cancellation) transaction.
+
+        Looks up the stake by ``flags["stake_id"]``, computes penalty,
+        credits payout to the account, and burns the principal penalty
+        into the fee pool.
+        """
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101  # tecUNFUNDED
+
+        cdef double fee_val = tx.fee.value
+        if acc.balance < fee_val:
+            return 104  # tecINSUF_FEE
+
+        if tx.sequence != 0 and tx.sequence != acc.sequence:
+            return 105  # tecBAD_SEQ
+
+        stake_id = tx.flags.get("stake_id", "")
+        if not stake_id:
+            return 108  # tecSTAKE_LOCKED (missing id)
+
+        record = self.staking_pool.stakes.get(stake_id)
+        if record is None:
+            return 108
+        if record.address != src:
+            return 108  # not your stake
+        if record.matured or record.cancelled:
+            return 108  # already resolved
+
+        # Debit fee
+        acc.balance -= fee_val
+        self.fee_pool += fee_val
+
+        now_ts = tx.timestamp if tx.timestamp else None
+        address, payout, interest_forfeited, principal_penalty = \
+            self.staking_pool.cancel_stake(stake_id, now=now_ts)
+
+        # Credit payout, burn principal penalty into fee pool
+        acc.balance += payout
+        self.fee_pool += principal_penalty
+
+        acc.sequence += 1
+        return 0  # tesSUCCESS
+
     # ---- queries ----
 
     cpdef double get_balance(self, str address):
@@ -542,6 +670,7 @@ cdef class Ledger:
         return acc.balance
 
     cpdef dict get_state_summary(self):
+        cdef dict pool = self.staking_pool.get_pool_summary()
         return {
             "ledger_sequence": self.current_sequence,
             "closed_ledgers": len(self.closed_ledgers),
@@ -550,6 +679,9 @@ cdef class Ledger:
             "fee_pool": self.fee_pool,
             "confidential_outputs": len(self.confidential_outputs),
             "spent_key_images": len(self.spent_key_images),
+            "total_staked": pool["total_staked"],
+            "active_stakes": pool["active_stakes"],
+            "total_interest_paid": pool["total_interest_paid"],
         }
 
     # ---- confidential UTXO queries ----
@@ -576,3 +708,18 @@ cdef class Ledger:
     cpdef bint is_stealth_address_used(self, str stealth_addr_hex):
         """Return True if a confidential output exists at this stealth address."""
         return stealth_addr_hex in self.confidential_outputs
+
+    # ---- staking operations ----
+
+    def get_staking_summary(self, str address, now=None):
+        """Return staking summary for an address."""
+        active = self.staking_pool.get_active_stakes(address)
+        all_stakes = self.staking_pool.get_all_stakes(address)
+        return {
+            "address": address,
+            "total_staked": self.staking_pool.get_total_staked_for_address(address),
+            "stakes": [s.to_dict(now) for s in all_stakes],
+            "demand_multiplier": self.staking_pool.get_demand_multiplier(
+                self.total_supply
+            ),
+        }
