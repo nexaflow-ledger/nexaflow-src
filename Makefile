@@ -29,11 +29,11 @@ coverage: ## Run tests with coverage report
 # ── Lint / Format ────────────────────────────────────────────
 
 lint: ## Run ruff linter
-	$(PYTHON) -m ruff check nexaflow_core/ tests/ run_node.py
+	$(PYTHON) -m ruff check nexaflow_core/ nexaflow_gui/ tests/ run_node.py
 
 format: ## Auto-format with ruff
-	$(PYTHON) -m ruff format nexaflow_core/ tests/ run_node.py
-	$(PYTHON) -m ruff check --fix nexaflow_core/ tests/ run_node.py
+	$(PYTHON) -m ruff format nexaflow_core/ nexaflow_gui/ tests/ run_node.py
+	$(PYTHON) -m ruff check --fix nexaflow_core/ nexaflow_gui/ tests/ run_node.py
 
 typecheck: ## Run mypy type checker
 	$(PYTHON) -m mypy nexaflow_core/ --ignore-missing-imports
@@ -54,10 +54,15 @@ docker-down: ## Stop docker-compose network
 bench: ## Run benchmark suite
 	$(PYTHON) -m pytest benchmarks/ -v --tb=short
 
+# ── GUI ──────────────────────────────────────────────────────
+
+gui: ## Launch the PyQt6 desktop GUI
+	$(PYTHON) -m nexaflow_gui
+
 # ── Install ──────────────────────────────────────────────────
 
 install: ## Install in editable mode with dev extras
-	pip install -e ".[dev]"
+	pip install -e ".[dev,gui]"
 
 install-deps: ## Install runtime + dev deps from requirements
 	pip install -r requirements-dev.txt

@@ -37,6 +37,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+gui = [
+    "PyQt6>=6.5.0",
+]
 dev = [
     "cython>=3.0.0",
     "pytest>=7.0",
@@ -48,6 +51,9 @@ dev = [
 
 [project.scripts]
 nexaflow-node = "run_node:main_sync"
+
+[project.gui-scripts]
+nexaflow-gui = "nexaflow_gui.main_window:main"
 
 [project.urls]
 Homepage = "https://github.com/nexaflow/nexaflow"
@@ -93,7 +99,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["nexaflow_core"]
+known-first-party = ["nexaflow_core", "nexaflow_gui"]
 
 [tool.coverage.run]
 source = ["nexaflow_core"]
