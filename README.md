@@ -1,7 +1,8 @@
-# NexaFlow – A NexaFlow-like Cryptocurrency
+# NexaFlow
 
-> A fully-featured cryptocurrency built in Python with
-> Cython-optimised core modules.
+> A production-ready cryptocurrency node and protocol library built in Python,
+> with Cython-compiled core modules for high-performance cryptography, consensus,
+> and confidential transactions.
 
 ---
 
@@ -9,15 +10,18 @@
 
 | Area | Description |
 |------|-------------|
-| **Cython-optimised core** | Crypto, transactions, ledger & consensus compiled to C for speed |
-| **ECDSA signatures** | secp256k1 key-pairs, deterministic wallets, transaction signing |
-| **Trust lines & IOUs** | NexaFlow-style credit relationships between accounts |
-| **Payment path finding** | Multi-hop DFS through the trust graph |
-| **RPCA consensus** | Simplified NexaFlow Protocol Consensus Algorithm with threshold escalation |
-| **Native token (NXF)** | 100 billion pre-mined supply with configurable reserves |
+| **Cython-optimised core** | Crypto, transactions, ledger, consensus & privacy primitives compiled to C |
+| **ECDSA / secp256k1** | Key-pair generation, deterministic wallet derivation, transaction signing |
+| **Confidential transactions** | Pedersen commitments, LSAG ring signatures, stealth addresses, range proofs |
+| **Double-spend prevention** | Per-transaction key images tracked on-ledger; tx-id replay detection |
+| **Trust lines & IOUs** | Credit relationships between accounts with configurable limits and transfer rates |
+| **Payment path finding** | Multi-hop DFS through the trust graph for cross-currency settlement |
+| **RPCA consensus** | NexaFlow Protocol Consensus Algorithm with threshold escalation |
+| **Native token (NXF)** | 100 billion fixed supply; fee pool; configurable reserves |
 | **TCP P2P networking** | Async JSON-over-TCP peer discovery, broadcast & keepalive |
 | **REST API** | `aiohttp`-based HTTP API for wallets, transactions & node status |
 | **Order book / DEX** | In-memory limit-order matching engine for cross-currency trades |
+| **Wallet encryption** | PBKDF2-HMAC-SHA256 + AES-256-CBC encrypted wallet export |
 | **SQLite persistence** | Optional durable storage for ledger state |
 | **TOML configuration** | Flexible file-based node configuration |
 | **Structured logging** | JSON or human-readable logs with configurable verbosity |
@@ -25,27 +29,78 @@
 
 ---
 
+## Privacy & Confidential Transactions
+
+NexaFlow supports **fully confidential payments** that hide amounts, sender identity, and recipient identity while remaining cryptographically verifiable on-chain.
+
+| Primitive | Description |
+|-----------|-------------|
+| **Pedersen Commitments** | Homomorphic commitments that hide the payment amount: $C = v \cdot G + b \cdot H$ |
+| **Range Proofs** | Zero-knowledge proof that the committed value is non-negative, without revealing it |
+| **Stealth Addresses** | One-time recipient addresses derived from a view/spend key pair — only the recipient can identify their outputs |
+| **View Tags** | 1-byte scan hint that lets a recipient skip non-matching outputs with minimal computation |
+| **LSAG Ring Signatures** | Linkable spontaneous anonymous group signatures — proves membership in a ring of public keys without revealing which member signed |
+| **Key Images** | Deterministic per-spend tag that enables double-spend detection without revealing the spender |
+
+### Confidential Payment Flow
+
+```
+Sender                                  Recipient
+──────                                  ─────────
+1. Derive one-time stealth address  ──►  Scans ledger outputs against view key
+   from recipient's (view_pub, spend_pub)    + view tag fast-path filter
+2. Commit amount:  C = v·G + b·H    ──►  Discovers output; recovers one-time spend key
+3. Prove C ≥ 0 (range proof)
+4. Sign with LSAG over ring of decoy pubkeys
+5. Publish (C, stealth_addr, range_proof, ring_sig, key_image)
+```
+
+### Python API
+
+```python
+from nexaflow_core.wallet import Wallet
+from nexaflow_core.ledger import Ledger
+
+sender    = Wallet.create()
+recipient = Wallet.create()
+
+ledger = Ledger(total_supply=100_000_000_000.0, genesis_account="rGenesis")
+ledger.create_account(sender.address, 1_000.0)
+
+# Build and submit a confidential payment
+tx = sender.sign_confidential_payment(
+    recipient.view_public_key,
+    recipient.spend_public_key,
+    amount=50.0,
+    fee=0.001,
+)
+ledger.apply_payment(tx)
+
+# Recipient scans for their outputs — nothing else is visible on-chain
+found = recipient.scan_confidential_outputs(ledger)
+# found[0] contains stealth_addr, commitment, ephemeral_pub, one_time_priv, …
+```
+
+---
+
 ## Quick Start
 
 ### Prerequisites
 
-* Python ≥ 3.9
-* A C compiler (for Cython extensions) — Xcode CLI tools on macOS, `build-essential` on Debian/Ubuntu
+- Python ≥ 3.9
+- A C compiler — Xcode Command Line Tools on macOS, `build-essential` on Debian/Ubuntu
 
 ### Install
 
 ```bash
-# Clone the repository
 git clone https://github.com/nexaflow/nexaflow.git
 cd nexaflow
 
-# Create a virtual environment (recommended)
 python -m venv .venv && source .venv/bin/activate
 
-# Install in editable mode with dev dependencies
 pip install -e ".[dev]"
 
-# Build Cython extensions in-place
+# Compile Cython extensions
 python setup.py build_ext --inplace
 ```
 
@@ -58,17 +113,14 @@ python run_node.py --node-id alice --port 9001
 ### Run a Two-Node Test Network
 
 ```bash
-./start_both.sh
+./scripts/start_both.sh
 ```
 
-Or manually:
+Or manually in separate terminals:
 
 ```bash
-# Terminal 1
-./start_node1.sh
-
-# Terminal 2
-./start_node2.sh
+./scripts/start_node1.sh   # Terminal 1
+./scripts/start_node2.sh   # Terminal 2
 ```
 
 ### Run via the Installed CLI
@@ -91,57 +143,57 @@ python run_node.py --node-id alice --port 9001 --api-port 8080
 |--------|----------|-------------|
 | GET | `/status` | Node & ledger status |
 | GET | `/balance/{address}` | Account balance |
-| POST | `/tx/payment` | Submit a payment |
+| POST | `/tx/payment` | Submit a standard payment |
 | POST | `/tx/trust` | Set a trust line |
 | GET | `/peers` | Connected peers |
 | GET | `/ledger` | Latest closed ledger info |
-| POST | `/consensus` | Trigger consensus round |
+| POST | `/consensus` | Trigger a consensus round |
 | GET | `/orderbook/{base}/{counter}` | Order book snapshot |
 
 ---
 
 ## Configuration
 
-Copy the example and customise:
-
 ```bash
 cp nexaflow.example.toml nexaflow.toml
+# Edit nexaflow.toml as needed
 ```
 
-See `nexaflow.example.toml` for all available options.
+See [`nexaflow.example.toml`](nexaflow.example.toml) for all available options.
 
 ---
 
 ## Project Layout
 
 ```
-nexaflow/
-├── nexaflow_core/          # Core library
-│   ├── crypto_utils.pyx  # Hashing, Base58, ECDSA (Cython)
-│   ├── transaction.pyx   # Transaction types & serialisation (Cython)
-│   ├── ledger.pyx        # Ledger state machine (Cython)
-│   ├── consensus.pyx     # RPCA engine (Cython)
-│   ├── wallet.py         # Wallet management & signing
-│   ├── account.py        # High-level account abstraction
-│   ├── trust_line.py     # Trust-line graph
-│   ├── payment_path.py   # Path finding (DFS)
-│   ├── validator.py      # Transaction validation pipeline
-│   ├── network.py        # In-memory network simulation
-│   ├── p2p.py            # Real TCP P2P layer
-│   ├── api.py            # REST/HTTP API server
-│   ├── storage.py        # SQLite ledger persistence
-│   ├── order_book.py     # DEX matching engine
-│   ├── config.py         # TOML configuration loader
-│   └── logging_config.py # Structured logging setup
-├── tests/                # Comprehensive test suite
-├── benchmarks/           # Performance benchmarks
-├── run_node.py           # Full CLI node runner
-├── setup.py              # Build config (Cython fallback)
-├── pyproject.toml        # PEP 517/518 metadata
-├── Makefile              # Common dev commands
-├── Dockerfile            # Container build
-├── docker-compose.yml    # Multi-node deployment
-└── .github/workflows/    # CI pipeline
+nexaflow-src/
+├── nexaflow_core/
+│   ├── crypto_utils.pyx    # Hashing, Base58, ECDSA key ops (Cython)
+│   ├── transaction.pyx     # Transaction types, serialisation & privacy fields (Cython)
+│   ├── ledger.pyx          # Ledger state machine, UTXO tracking, fee logic (Cython)
+│   ├── consensus.pyx       # RPCA consensus engine (Cython)
+│   ├── privacy.pyx         # Pedersen, RingSignature, StealthAddress, RangeProof (Cython)
+│   ├── wallet.py           # HD wallet, signing, confidential payment helpers
+│   ├── account.py          # High-level account abstraction
+│   ├── trust_line.py       # Trust-line graph
+│   ├── payment_path.py     # Multi-hop path finding (DFS)
+│   ├── validator.py        # Transaction validation pipeline
+│   ├── network.py          # In-memory network simulation
+│   ├── p2p.py              # TCP P2P layer
+│   ├── api.py              # aiohttp REST API server
+│   ├── storage.py          # SQLite persistence
+│   ├── order_book.py       # DEX limit-order engine
+│   ├── config.py           # TOML configuration loader
+│   └── logging_config.py   # Structured logging
+├── nexaflow_gui/           # Optional desktop GUI
+├── tests/                  # Test suite (300+ tests)
+├── scripts/                # Node launch helpers
+├── run_node.py             # CLI node runner
+├── setup.py                # Cython build config
+├── pyproject.toml          # PEP 517/518 metadata
+├── Makefile                # Dev workflow shortcuts
+├── Dockerfile              # Container image
+└── docker-compose.yml      # Multi-node deployment
 ```
 
 ---
@@ -149,14 +201,14 @@ nexaflow/
 ## Testing
 
 ```bash
-# Run all tests
+# Full test suite
 make test
 
-# With coverage
+# With line coverage
 make coverage
 
-# Or directly
-pytest -v --tb=short
+# Single module
+pytest tests/test_privacy.py -v
 ```
 
 ---
@@ -164,7 +216,7 @@ pytest -v --tb=short
 ## Docker
 
 ```bash
-# Build and run a two-node network
+# Build and launch a two-node network
 make docker-up
 
 # Tear down
@@ -176,20 +228,12 @@ make docker-down
 ## Development
 
 ```bash
-# Install dev dependencies
 pip install -e ".[dev]"
 
-# Lint
-make lint
-
-# Type check
-make typecheck
-
-# Format
-make format
-
-# Build Cython extensions
-make build
+make lint        # ruff
+make typecheck   # mypy
+make format      # ruff format + fix
+make build       # rebuild Cython extensions
 ```
 
 ---
@@ -198,30 +242,46 @@ make build
 
 ### Consensus
 
-NexaFlow uses a simplified **NexaFlow Protocol Consensus Algorithm (RPCA)**:
+NexaFlow uses the **NexaFlow Protocol Consensus Algorithm (RPCA)**:
 
 1. Each validator proposes its candidate transaction set.
 2. Proposals are exchanged over the P2P network.
 3. Transactions reaching ≥ 50 % support enter the next round.
-4. The threshold escalates by 5 % each round up to 80 %.
-5. Transactions exceeding the final threshold are applied.
+4. The support threshold escalates by 5 % each round up to 80 %.
+5. Transactions exceeding the final threshold are applied to the ledger.
 6. The ledger is closed with a chained SHA-256 hash.
 
-### Ledger
+### Ledger Model
 
-* Account-based model (not UTXO)
-* Native NXF + arbitrary IOU currencies via trust lines
-* Account reserves prevent ledger spam
-* Deterministic hash-chaining across closed ledgers
+- Account-based model for standard payments and trust lines
+- UTXO-style confidential outputs for private payments
+- Native NXF + arbitrary IOU currencies via trust lines
+- Account reserves prevent ledger spam
+- Deterministic hash-chaining across closed ledgers
+- Separate key-image set and applied-tx-id set for double-spend prevention
 
-### Security Notes
+### Cryptographic Primitives
 
-This is an **educational project**.  It is **not audited** for production use.
-Key simplifications include:
+All performance-critical cryptography is implemented in Cython (`privacy.pyx`) and compiled to native C:
 
-* Consensus trusts all connected peers (no Byzantine fault tolerance)
-* No TLS on the P2P layer
-* Simplified key derivation (SHA-256 of seed)
+- **secp256k1 ECDSA** via the `ecdsa` library
+- **Pedersen Commitments** over secp256k1: $C = v \cdot G + b \cdot H$
+- **LSAG Ring Signatures** — linkable, spontaneous, provably secure under the discrete logarithm assumption
+- **Stealth Addresses** — Diffie-Hellman shared secret over ephemeral keypairs
+- **Range Proofs** — deterministic hash-based proofs keyed on the Pedersen blinding factor
+
+---
+
+## Security
+
+- All cryptographic operations use the secp256k1 curve (same as Bitcoin)
+- Wallet private keys are encrypted at rest with PBKDF2-HMAC-SHA256 + AES-256-CBC
+- Confidential transaction amounts are never written in plaintext — only Pedersen commitments appear on-chain
+- Ring signatures provide sender anonymity within a configurable anonymity set
+- Stealth addresses ensure no two outputs are linkable to the same recipient without the recipient's view key
+- Input validation and error handling on all public API surfaces
+
+> **Note:** While NexaFlow's cryptographic design is sound, the codebase has not yet undergone a formal third-party security audit. Use appropriate caution when deploying with real funds until an audit is completed.
 
 ---
 
