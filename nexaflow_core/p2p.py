@@ -7,16 +7,25 @@ Implements an async peer-to-peer protocol where nodes:
   - Exchange consensus proposals
   - Synchronise ledger state
 
-Protocol is JSON-over-TCP with newline-delimited messages.
+Protocol is JSON-over-TCP with newline-delimited messages.  All connections
+are optionally wrapped in TLS (including mutual TLS for validator identity
+verification).
 
 Message types:
-  HELLO        - handshake with node identity
+  HELLO        - handshake with node identity and optional public key
   TX           - broadcast a signed transaction
   PROPOSAL     - consensus proposal for a ledger round
   CONSENSUS_OK - agreed transaction set after consensus
   LEDGER_REQ   - request ledger state
   LEDGER_RES   - ledger state response
   PING / PONG  - keepalive
+
+TLS / mTLS:
+  Build SSLContexts with :func:`build_tls_context` and pass them to
+  :class:`P2PNode` as ``ssl_context`` (server-side) and
+  ``client_ssl_context`` (outbound connections).  When both sides present
+  certificates signed by the same CA the connection is mutually
+  authenticated before the HELLO handshake begins.
 """
 
 from __future__ import annotations
@@ -24,10 +33,65 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import ssl
 import time
 from typing import Callable
 
 logger = logging.getLogger("nexaflow_p2p")
+
+
+# =====================================================================
+# TLS helpers
+# =====================================================================
+
+def build_tls_context(
+    cert_file: str,
+    key_file: str,
+    ca_file: str = "",
+    verify_peer: bool = True,
+    server_side: bool = True,
+) -> ssl.SSLContext:
+    """
+    Build an :class:`ssl.SSLContext` for encrypted P2P connections.
+
+    Parameters
+    ----------
+    cert_file   Path to the node's PEM-encoded X.509 certificate.
+    key_file    Path to the node's PEM-encoded private key.
+    ca_file     Path to the CA bundle used to verify peer certificates.
+                Required when *verify_peer* is True.
+    verify_peer Require a valid peer certificate (mutual TLS).  Set to
+                False for one-way TLS (server-only authentication).
+    server_side True when building the context for the listening server;
+                False when building the context for outbound connections.
+
+    Returns
+    -------
+    ssl.SSLContext ready to be passed to :func:`asyncio.start_server`
+    or :func:`asyncio.open_connection`.
+    """
+    if server_side:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    else:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False  # hostname check is not meaningful for P2P IPs
+
+    # Require TLS 1.3 minimum; reject older protocol versions.
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+
+    # Load node certificate and private key
+    if cert_file and key_file:
+        ctx.load_cert_chain(cert_file, key_file)
+
+    # Peer verification (mutual TLS)
+    if verify_peer:
+        if ca_file:
+            ctx.load_verify_locations(ca_file)
+        ctx.verify_mode = ssl.CERT_REQUIRED
+    else:
+        ctx.verify_mode = ssl.CERT_NONE
+
+    return ctx
 
 
 # =====================================================================
@@ -121,13 +185,30 @@ class P2PNode:
     """
     Async TCP server + client that forms the P2P overlay.
 
-    Usage:
-        node = P2PNode(node_id="validator-1", host="0.0.0.0", port=9001)
+    TLS / mutual TLS
+    ----------------
+    Pass pre-built :class:`ssl.SSLContext` objects created with
+    :func:`build_tls_context` to enable encrypted connections.  When
+    both ``ssl_context`` (server) and ``client_ssl_context`` (client)
+    are provided every byte on the wire is encrypted.  Mutual TLS
+    (mTLS) additionally authenticates each peer's certificate before
+    the HELLO handshake even begins.
+
+    Peer public keys
+    ----------------
+    If ``node_pubkey`` (65-byte uncompressed secp256k1 public key) is
+    set it will be advertised in the HELLO message so peers can use it
+    for consensus proposal signature verification.  Received pubkeys
+    are stored in :attr:`peer_pubkeys`.
+
+    Usage::
+
+        ctx_srv = build_tls_context(cert, key, ca, server_side=True)
+        ctx_cli = build_tls_context(cert, key, ca, server_side=False)
+        node = P2PNode("v1", ssl_context=ctx_srv, client_ssl_context=ctx_cli)
         node.on_transaction = my_tx_handler
-        node.on_proposal = my_proposal_handler
         await node.start()
         await node.connect_to_peer("127.0.0.1", 9002)
-        await node.broadcast_transaction(tx_dict)
     """
 
     def __init__(
@@ -135,6 +216,9 @@ class P2PNode:
         node_id: str,
         host: str = "0.0.0.0",
         port: int = 9001,
+        ssl_context: ssl.SSLContext | None = None,
+        client_ssl_context: ssl.SSLContext | None = None,
+        node_pubkey: bytes | None = None,
     ):
         self.node_id = node_id
         self.host = host
@@ -143,6 +227,16 @@ class P2PNode:
         self._server: asyncio.AbstractServer | None = None
         self._running = False
         self._tasks: list[asyncio.Task] = []
+
+        # TLS contexts — None means plaintext (backward-compatible default)
+        self._ssl_context: ssl.SSLContext | None = ssl_context
+        self._client_ssl_context: ssl.SSLContext | None = client_ssl_context
+
+        # This node's 65-byte uncompressed secp256k1 public key (optional).
+        # Advertised in HELLO so peers can verify signed consensus proposals.
+        self.node_pubkey: bytes | None = node_pubkey
+        # Map peer_id -> their 65-byte public key (populated from HELLO)
+        self.peer_pubkeys: dict[str, bytes] = {}
 
         # Callbacks - set by the node runner
         self.on_transaction: Callable | None = None
@@ -158,13 +252,20 @@ class P2PNode:
     # ---- lifecycle ----
 
     async def start(self):
-        """Start the TCP server and begin accepting connections."""
+        """Start the TCP server and begin accepting connections.
+
+        When an :attr:`_ssl_context` is configured the server accepts only
+        TLS-encrypted connections.  All existing callers that don't set
+        an SSL context continue to get plain TCP (backward-compatible).
+        """
         self._server = await asyncio.start_server(
-            self._handle_inbound, self.host, self.port
+            self._handle_inbound, self.host, self.port,
+            ssl=self._ssl_context,
         )
         self._running = True
         addr = self._server.sockets[0].getsockname()
-        logger.info(f"[{self.node_id}] Listening on {addr[0]}:{addr[1]}")
+        tls_tag = " [TLS]" if self._ssl_context else ""
+        logger.info(f"[{self.node_id}] Listening on {addr[0]}:{addr[1]}{tls_tag}")
         # Start keepalive loop
         self._tasks.append(asyncio.create_task(self._keepalive_loop()))
 
@@ -184,19 +285,35 @@ class P2PNode:
     # ---- connecting ----
 
     async def connect_to_peer(self, host: str, port: int) -> bool:
-        """Initiate an outbound connection to a peer."""
+        """Initiate an outbound connection to a peer.
+
+        When :attr:`_client_ssl_context` is set the connection is TLS-
+        encrypted.  This is backward-compatible: without an SSL context
+        a plain TCP connection is made exactly as before.
+        """
         try:
-            reader, writer = await asyncio.open_connection(host, port)
+            reader, writer = await asyncio.open_connection(
+                host, port, ssl=self._client_ssl_context
+            )
             peer = PeerConnection(reader, writer, direction="outbound")
-            # Send handshake
+            # Send handshake — include our public key so the peer can verify
+            # our consensus proposal signatures.
             await peer.send("HELLO", {
                 "node_id": self.node_id,
                 "port": self.port,
+                "pubkey": self.node_pubkey.hex() if self.node_pubkey else "",
             })
             # Read handshake response
             msg = await peer.readline()
             if msg and msg.get("type") == "HELLO":
                 peer.peer_id = msg["payload"]["node_id"]
+                # Store peer's advertised public key
+                pubkey_hex = msg["payload"].get("pubkey", "")
+                if pubkey_hex:
+                    try:
+                        self.peer_pubkeys[peer.peer_id] = bytes.fromhex(pubkey_hex)
+                    except ValueError:
+                        pass
                 self.peers[peer.peer_id] = peer
                 logger.info(
                     f"[{self.node_id}] Connected to {peer.peer_id} "
@@ -211,14 +328,20 @@ class P2PNode:
             else:
                 await peer.close()
                 return False
-        except (ConnectionError, OSError) as e:
+        except (ConnectionError, OSError, ssl.SSLError) as e:
             logger.warning(f"[{self.node_id}] Failed to connect to {host}:{port}: {e}")
             return False
 
     async def _handle_inbound(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ):
-        """Handle a new inbound connection."""
+        """Handle a new inbound connection.
+
+        When TLS is active the SSL handshake has already completed by the
+        time this callback fires, so the peer is already authenticated at
+        the transport layer.  The HELLO application-layer handshake then
+        exchanges node IDs and public keys.
+        """
         peer = PeerConnection(reader, writer, direction="inbound")
         # Wait for HELLO
         msg = await peer.readline()
@@ -227,10 +350,19 @@ class P2PNode:
             return
 
         peer.peer_id = msg["payload"]["node_id"]
-        # Send our HELLO back
+        # Store peer's advertised public key
+        pubkey_hex = msg["payload"].get("pubkey", "")
+        if pubkey_hex:
+            try:
+                self.peer_pubkeys[peer.peer_id] = bytes.fromhex(pubkey_hex)
+            except ValueError:
+                pass
+
+        # Send our HELLO back — include our public key
         await peer.send("HELLO", {
             "node_id": self.node_id,
             "port": self.port,
+            "pubkey": self.node_pubkey.hex() if self.node_pubkey else "",
         })
 
         self.peers[peer.peer_id] = peer
@@ -364,6 +496,7 @@ class P2PNode:
         return {
             "node_id": self.node_id,
             "listen": f"{self.host}:{self.port}",
+            "tls": self._ssl_context is not None,
             "peers": len(self.peers),
             "peer_list": [p.info() for p in self.peers.values()],
             "running": self._running,
