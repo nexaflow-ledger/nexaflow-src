@@ -13,9 +13,6 @@ a source to a destination for a given currency.
 
 from __future__ import annotations
 
-from collections import deque
-from typing import Dict, List, Optional, Tuple, Set
-
 from nexaflow_core.trust_line import TrustGraph
 
 
@@ -24,7 +21,7 @@ class PaymentPath:
 
     def __init__(
         self,
-        hops: List[Tuple[str, str, str]],
+        hops: list[tuple[str, str, str]],
         max_amount: float,
         source: str,
         destination: str,
@@ -80,7 +77,7 @@ class PathFinder:
         amount: float,
         max_hops: int = 6,
         max_paths: int = 5,
-    ) -> List[PaymentPath]:
+    ) -> list[PaymentPath]:
         """
         Find up to max_paths payment paths from source to destination
         for the given currency and amount.
@@ -88,8 +85,8 @@ class PathFinder:
         if currency == "NXF":
             return self._find_native_path(source, destination, amount)
 
-        paths: List[PaymentPath] = []
-        visited: Set[str] = set()
+        paths: list[PaymentPath] = []
+        visited: set[str] = set()
 
         self._dfs(
             current=source,
@@ -109,7 +106,7 @@ class PathFinder:
 
     def _find_native_path(
         self, source: str, destination: str, amount: float
-    ) -> List[PaymentPath]:
+    ) -> list[PaymentPath]:
         """Native NXF is always direct, no path needed."""
         src_bal = self.ledger.get_balance(source)
         if src_bal >= amount:
@@ -129,9 +126,9 @@ class PathFinder:
         destination: str,
         currency: str,
         amount: float,
-        current_path: List[Tuple[str, str, str]],
-        visited: Set[str],
-        paths: List[PaymentPath],
+        current_path: list[tuple[str, str, str]],
+        visited: set[str],
+        paths: list[PaymentPath],
         max_hops: int,
         max_paths: int,
     ) -> None:
@@ -149,13 +146,8 @@ class PathFinder:
         if current != destination:
             # Can current send to destination via their trust line?
             credit = self.graph.available_credit(destination, current, currency)
-            if credit >= amount or current_path:
-                # Check if destination trusts current as issuer
-                if self.graph.has_trust(destination, current, currency):
-                    full_path = current_path + [
-                        (current, currency, current),
-                        (destination, currency, current),
-                    ]
+            if (credit >= amount or current_path) and self.graph.has_trust(destination, current, currency):
+                    full_path = [*current_path, (current, currency, current), (destination, currency, current)]
                     max_amt = min(credit, amount) if credit > 0 else amount
                     paths.append(
                         PaymentPath(
@@ -168,14 +160,14 @@ class PathFinder:
                     )
 
         # Explore neighbors — accounts that trust current as issuer
-        for holder, cur, limit, balance in self.graph.get_trustees(current):
+        for holder, cur, _limit, _balance in self.graph.get_trustees(current):
             if cur == currency and holder != current:
                 self._dfs(
                     current=holder,
                     destination=destination,
                     currency=currency,
                     amount=amount,
-                    current_path=current_path + [(current, currency, current)],
+                    current_path=[*current_path, (current, currency, current)],
                     visited=visited,
                     paths=paths,
                     max_hops=max_hops,
@@ -190,7 +182,7 @@ class PathFinder:
         destination: str,
         currency: str,
         amount: float,
-    ) -> Optional[PaymentPath]:
+    ) -> PaymentPath | None:
         """Find the single best path (highest liquidity, fewest hops)."""
         paths = self.find_paths(source, destination, currency, amount)
         return paths[0] if paths else None

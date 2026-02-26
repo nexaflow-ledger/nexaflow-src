@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
 
@@ -43,8 +43,8 @@ class APIServer:
         self.node = node
         self.host = host
         self.port = port
-        self._app: Optional[web.Application] = None
-        self._runner: Optional[web.AppRunner] = None
+        self._app: web.Application | None = None
+        self._runner: web.AppRunner | None = None
 
     # ── lifecycle ────────────────────────────────────────────────
 
@@ -94,8 +94,8 @@ class APIServer:
         """
         try:
             body = await request.json()
-        except Exception:
-            raise web.HTTPBadRequest(text="Invalid JSON body")
+        except Exception as exc:
+            raise web.HTTPBadRequest(text="Invalid JSON body") from exc
 
         dest = body.get("destination", "")
         amount = float(body.get("amount", 0))
@@ -121,8 +121,8 @@ class APIServer:
         """
         try:
             body = await request.json()
-        except Exception:
-            raise web.HTTPBadRequest(text="Invalid JSON body")
+        except Exception as exc:
+            raise web.HTTPBadRequest(text="Invalid JSON body") from exc
 
         currency = body.get("currency", "")
         issuer = body.get("issuer", "")

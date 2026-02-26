@@ -8,9 +8,9 @@ Covers:
 
 import unittest
 
-from nexaflow_core.network import ValidatorNode, Network
 from nexaflow_core.ledger import Ledger
-from nexaflow_core.transaction import create_payment, create_trust_set, Amount
+from nexaflow_core.network import Network, ValidatorNode
+from nexaflow_core.transaction import create_payment
 from nexaflow_core.wallet import Wallet
 
 
@@ -33,13 +33,13 @@ class TestValidatorNode(unittest.TestCase):
         self.ledger.create_account(w.address, 500.0)
         tx = create_payment(w.address, "rBob", 10.0)
         w.sign_transaction(tx)
-        accepted, code, msg = self.node.receive_transaction(tx)
+        accepted, _code, _msg = self.node.receive_transaction(tx)
         self.assertTrue(accepted)
         self.assertIn(tx.tx_id, self.node.tx_pool)
 
     def test_receive_invalid_transaction(self):
         tx = create_payment("rGhost", "rBob", 10.0)
-        accepted, code, msg = self.node.receive_transaction(tx)
+        accepted, _code, _msg = self.node.receive_transaction(tx)
         self.assertFalse(accepted)
         self.assertEqual(len(self.node.tx_pool), 0)
 
@@ -103,7 +103,7 @@ class TestNetwork(unittest.TestCase):
         results = self.net.broadcast_transaction(tx)
         self.assertEqual(len(results), 2)
         # Both should accept
-        for nid, (accepted, code, msg) in results.items():
+        for _nid, (accepted, _code, _msg) in results.items():
             self.assertTrue(accepted)
 
     def test_run_consensus_round_empty(self):

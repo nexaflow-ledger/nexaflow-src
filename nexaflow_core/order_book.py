@@ -21,9 +21,10 @@ Usage:
 from __future__ import annotations
 
 import bisect
+import contextlib
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 
 @dataclass(order=True)
@@ -31,7 +32,7 @@ class Order:
     """A single limit order."""
 
     # Fields used for sorting (price-time priority)
-    sort_key: Tuple[float, float] = field(init=False, repr=False)
+    sort_key: tuple[float, float] = field(init=False, repr=False)
 
     order_id: str = ""
     account: str = ""
@@ -97,10 +98,10 @@ class OrderBook:
 
     def __init__(self):
         # pair -> sorted list of Order (asks ascending, bids descending)
-        self._asks: Dict[str, List[Order]] = {}
-        self._bids: Dict[str, List[Order]] = {}
-        self._orders: Dict[str, Order] = {}  # order_id -> Order
-        self._fills: List[Fill] = []
+        self._asks: dict[str, list[Order]] = {}
+        self._bids: dict[str, list[Order]] = {}
+        self._orders: dict[str, Order] = {}  # order_id -> Order
+        self._fills: list[Fill] = []
         self._next_id: int = 1
 
     # ── public API ───────────────────────────────────────────────
@@ -112,8 +113,8 @@ class OrderBook:
         side: str,
         price: float,
         quantity: float,
-        order_id: Optional[str] = None,
-    ) -> List[Fill]:
+        order_id: str | None = None,
+    ) -> list[Fill]:
         """
         Submit a new limit order.  Returns a list of immediate fills
         (may be empty if no match).
@@ -154,13 +155,11 @@ class OrderBook:
         # Remove from book
         book = self._asks if order.side == "sell" else self._bids
         lst = book.get(order.pair, [])
-        try:
+        with contextlib.suppress(ValueError):
             lst.remove(order)
-        except ValueError:
-            pass
         return True
 
-    def get_order(self, order_id: str) -> Optional[Order]:
+    def get_order(self, order_id: str) -> Order | None:
         return self._orders.get(order_id)
 
     def get_book_snapshot(self, pair: str, depth: int = 20) -> dict:
@@ -175,18 +174,18 @@ class OrderBook:
             "bid_count": len(self._bids.get(pair, [])),
         }
 
-    def get_fills(self, limit: int = 50) -> List[dict]:
+    def get_fills(self, limit: int = 50) -> list[dict]:
         return [f.to_dict() for f in self._fills[-limit:]]
 
     @property
-    def pairs(self) -> List[str]:
+    def pairs(self) -> list[str]:
         return sorted(set(list(self._asks.keys()) + list(self._bids.keys())))
 
     # ── matching engine ──────────────────────────────────────────
 
-    def _match(self, taker: Order) -> List[Fill]:
+    def _match(self, taker: Order) -> list[Fill]:
         """Match an incoming order against resting orders."""
-        fills: List[Fill] = []
+        fills: list[Fill] = []
 
         if taker.side == "buy":
             book = self._asks.get(taker.pair, [])
@@ -234,7 +233,7 @@ class OrderBook:
 
     # ── integration helper ───────────────────────────────────────
 
-    def process_offer_create(self, tx: Any) -> List[Fill]:
+    def process_offer_create(self, tx: Any) -> list[Fill]:
         """
         Convenience method to process an OfferCreate transaction.
 

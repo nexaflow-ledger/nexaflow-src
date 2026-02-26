@@ -7,16 +7,14 @@ and convenience methods for interacting with the network.
 
 from __future__ import annotations
 
-from typing import Optional, Dict, List
-
-from nexaflow_core.wallet import Wallet
 from nexaflow_core.transaction import (
-    Transaction,
     Amount,
+    Transaction,
+    create_offer,
     create_payment,
     create_trust_set,
-    create_offer,
 )
+from nexaflow_core.wallet import Wallet
 
 
 class Account:
@@ -28,15 +26,15 @@ class Account:
     def __init__(self, wallet: Wallet):
         self.wallet = wallet
         self.address: str = wallet.address
-        self.tx_history: List[Transaction] = []
+        self.tx_history: list[Transaction] = []
 
     @classmethod
-    def create(cls) -> "Account":
+    def create(cls) -> Account:
         """Create a new account with a fresh wallet."""
         return cls(Wallet.create())
 
     @classmethod
-    def from_seed(cls, seed: str) -> "Account":
+    def from_seed(cls, seed: str) -> Account:
         """Create an account from a deterministic seed."""
         return cls(Wallet.from_seed(seed))
 
@@ -91,7 +89,7 @@ class Account:
         self.tx_history.append(tx)
         return tx
 
-    def get_history(self) -> List[dict]:
+    def get_history(self) -> list[dict]:
         """Return transaction history as list of dicts."""
         return [tx.to_dict() for tx in self.tx_history]
 

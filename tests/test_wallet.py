@@ -10,8 +10,8 @@ Covers:
 
 import unittest
 
+from nexaflow_core.transaction import create_payment
 from nexaflow_core.wallet import Wallet
-from nexaflow_core.transaction import create_payment, Amount
 
 
 class TestWalletCreate(unittest.TestCase):

@@ -2,8 +2,8 @@
 Structured logging configuration for NexaFlow.
 
 Supports two output formats:
-  - **human** – coloured, single-line, readable
-  - **json**  – newline-delimited JSON for log aggregators
+  - **human** - coloured, single-line, readable
+  - **json**  - newline-delimited JSON for log aggregators
 
 Usage:
     from nexaflow_core.logging_config import setup_logging
@@ -17,7 +17,7 @@ import logging
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import ClassVar
 
 
 class _JSONFormatter(logging.Formatter):
@@ -38,7 +38,7 @@ class _JSONFormatter(logging.Formatter):
 class _HumanFormatter(logging.Formatter):
     """Coloured, concise single-line format."""
 
-    COLOURS = {
+    COLOURS: ClassVar[dict[str, str]] = {
         "DEBUG": "\033[36m",     # cyan
         "INFO": "\033[32m",      # green
         "WARNING": "\033[33m",   # yellow
@@ -59,7 +59,7 @@ class _HumanFormatter(logging.Formatter):
 def setup_logging(
     level: str = "INFO",
     fmt: str = "human",
-    log_file: Optional[str] = None,
+    log_file: str | None = None,
 ) -> None:
     """
     Configure the root logger for the entire application.

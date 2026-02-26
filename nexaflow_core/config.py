@@ -15,7 +15,7 @@ import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -32,7 +32,7 @@ class NodeConfig:
     node_id: str = "validator-1"
     host: str = "0.0.0.0"
     port: int = 9001
-    peers: List[str] = field(default_factory=list)
+    peers: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -74,7 +74,7 @@ class LoggingConfig:
     """Logging settings."""
     level: str = "INFO"
     format: str = "human"   # "human" or "json"
-    file: Optional[str] = None
+    file: str | None = None
 
 
 @dataclass
@@ -88,7 +88,7 @@ class NexaFlowConfig:
     logging: LoggingConfig = field(default_factory=LoggingConfig)
 
 
-def _merge(dc: Any, raw: Dict[str, Any]) -> None:
+def _merge(dc: Any, raw: dict[str, Any]) -> None:
     """Merge a raw dict into a dataclass instance (in-place)."""
     for key, value in raw.items():
         key_under = key.replace("-", "_")
@@ -96,7 +96,7 @@ def _merge(dc: Any, raw: Dict[str, Any]) -> None:
             setattr(dc, key_under, value)
 
 
-def load_config(path: Optional[str] = None) -> NexaFlowConfig:
+def load_config(path: str | None = None) -> NexaFlowConfig:
     """
     Load configuration from a TOML file, then overlay environment variables.
 

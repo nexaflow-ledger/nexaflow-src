@@ -10,7 +10,7 @@ Covers:
 import unittest
 
 from nexaflow_core.account import Account
-from nexaflow_core.transaction import Amount, TT_PAYMENT, TT_TRUST_SET, TT_OFFER_CREATE
+from nexaflow_core.transaction import TT_OFFER_CREATE, TT_PAYMENT, TT_TRUST_SET, Amount
 
 
 class TestAccountCreation(unittest.TestCase):

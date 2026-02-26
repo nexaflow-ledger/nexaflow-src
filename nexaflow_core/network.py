@@ -11,17 +11,12 @@ This is a local simulation — no actual sockets are used.
 
 from __future__ import annotations
 
-import copy
-import time
-from typing import Dict, List, Optional, Set
-
-from nexaflow_core.wallet import Wallet
-from nexaflow_core.ledger import Ledger
 from nexaflow_core.consensus import ConsensusEngine, Proposal
-from nexaflow_core.transaction import Transaction
-from nexaflow_core.validator import TransactionValidator
-from nexaflow_core.trust_line import TrustGraph
+from nexaflow_core.ledger import Ledger
 from nexaflow_core.payment_path import PathFinder
+from nexaflow_core.transaction import Transaction
+from nexaflow_core.trust_line import TrustGraph
+from nexaflow_core.validator import TransactionValidator
 
 
 class ValidatorNode:
@@ -32,11 +27,11 @@ class ValidatorNode:
     and participates in consensus rounds.
     """
 
-    def __init__(self, node_id: str, ledger: Ledger, unl: Optional[List[str]] = None):
+    def __init__(self, node_id: str, ledger: Ledger, unl: list[str] | None = None):
         self.node_id = node_id
         self.ledger = ledger
-        self.unl: List[str] = unl or []
-        self.tx_pool: Dict[str, Transaction] = {}  # tx_id -> Transaction
+        self.unl: list[str] = unl or []
+        self.tx_pool: dict[str, Transaction] = {}  # tx_id -> Transaction
         self.validator = TransactionValidator(ledger)
         self.trust_graph = TrustGraph()
         self.closed_count = 0
@@ -56,12 +51,12 @@ class ValidatorNode:
         tx_ids = set(self.tx_pool.keys())
         return Proposal(self.node_id, self.ledger.current_sequence, tx_ids)
 
-    def apply_consensus_result(self, agreed_tx_ids: Set[str]) -> List[Transaction]:
+    def apply_consensus_result(self, agreed_tx_ids: set[str]) -> list[Transaction]:
         """
         Apply the agreed transactions to our ledger and close it.
         Returns list of applied transactions.
         """
-        applied: List[Transaction] = []
+        applied: list[Transaction] = []
         for tx_id in agreed_tx_ids:
             tx = self.tx_pool.get(tx_id)
             if tx is not None:
@@ -107,9 +102,9 @@ class Network:
     """
 
     def __init__(self, total_supply: float = 100_000_000_000.0):
-        self.nodes: Dict[str, ValidatorNode] = {}
+        self.nodes: dict[str, ValidatorNode] = {}
         self.total_supply = total_supply
-        self._base_ledger: Optional[Ledger] = None
+        self._base_ledger: Ledger | None = None
 
     def add_validator(self, node_id: str) -> ValidatorNode:
         """Add a new validator node to the network."""
@@ -134,9 +129,9 @@ class Network:
 
         return node
 
-    def broadcast_transaction(self, tx: Transaction) -> Dict[str, tuple]:
+    def broadcast_transaction(self, tx: Transaction) -> dict[str, tuple]:
         """Send a transaction to all validator nodes."""
-        results: Dict[str, tuple] = {}
+        results: dict[str, tuple] = {}
         for nid, node in self.nodes.items():
             results[nid] = node.receive_transaction(tx)
         return results
@@ -154,15 +149,15 @@ class Network:
             return {"error": "No validators"}
 
         node_list = list(self.nodes.values())
-        all_ids = list(self.nodes.keys())
+        list(self.nodes.keys())
 
         # Step 1: Each node creates a proposal
-        proposals: Dict[str, Proposal] = {}
+        proposals: dict[str, Proposal] = {}
         for node in node_list:
             proposals[node.node_id] = node.create_proposal()
 
         # Step 2-3: Each node runs consensus with all proposals
-        agreed_tx_ids: Optional[Set[str]] = None
+        agreed_tx_ids: set[str] | None = None
 
         for node in node_list:
             engine = ConsensusEngine(
@@ -176,10 +171,9 @@ class Network:
                     engine.add_proposal(prop)
 
             result = engine.run_rounds()
-            if result is not None:
+            if result is not None and agreed_tx_ids is None:
                 # Use the first successful consensus result
-                if agreed_tx_ids is None:
-                    agreed_tx_ids = result.agreed_tx_ids
+                agreed_tx_ids = result.agreed_tx_ids
 
         if agreed_tx_ids is None:
             return {"status": "no_consensus", "agreed": 0}
@@ -213,10 +207,9 @@ class Network:
                 node.ledger.create_account(address, 0.0)
             genesis = node.ledger.get_account(node.ledger.genesis_account)
             dest = node.ledger.get_account(address)
-            if genesis is not None and dest is not None:
-                if genesis.balance >= amount:
-                    genesis.balance -= amount
-                    dest.balance += amount
+            if genesis is not None and dest is not None and genesis.balance >= amount:
+                genesis.balance -= amount
+                dest.balance += amount
 
     def network_status(self) -> dict:
         return {

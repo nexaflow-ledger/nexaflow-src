@@ -10,9 +10,9 @@ Covers:
 
 import unittest
 
-from nexaflow_core.payment_path import PaymentPath, PathFinder
-from nexaflow_core.trust_line import TrustGraph
 from nexaflow_core.ledger import Ledger
+from nexaflow_core.payment_path import PathFinder, PaymentPath
+from nexaflow_core.trust_line import TrustGraph
 
 
 class TestPaymentPath(unittest.TestCase):

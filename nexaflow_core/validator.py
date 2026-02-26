@@ -12,18 +12,14 @@ Validates transactions before they enter the consensus pool:
 
 from __future__ import annotations
 
-from typing import Tuple
-
 from nexaflow_core.transaction import (
-    Transaction,
-    Amount,
-    TEC_UNFUNDED,
-    TEC_NO_LINE,
-    TEC_INSUF_FEE,
     TEC_BAD_SEQ,
     TEC_BAD_SIG,
+    TEC_INSUF_FEE,
+    TEC_NO_LINE,
+    TEC_UNFUNDED,
     TES_SUCCESS,
-    RESULT_NAMES,
+    Transaction,
 )
 
 # Minimum fee in NXF
@@ -39,15 +35,14 @@ class TransactionValidator:
     def __init__(self, ledger):
         self.ledger = ledger
 
-    def validate(self, tx: Transaction) -> Tuple[bool, int, str]:
+    def validate(self, tx: Transaction) -> tuple[bool, int, str]:
         """
         Full validation pipeline.
         Returns (is_valid, result_code, human_message).
         """
         # 1. Signature
-        if tx.signature and tx.signing_pub_key:
-            if not tx.verify_signature():
-                return False, TEC_BAD_SIG, "Invalid signature"
+        if tx.signature and tx.signing_pub_key and not tx.verify_signature():
+            return False, TEC_BAD_SIG, "Invalid signature"
 
         # 2. Source account exists
         src_acc = self.ledger.get_account(tx.account)

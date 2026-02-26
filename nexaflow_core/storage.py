@@ -14,11 +14,10 @@ Usage:
 
 from __future__ import annotations
 
-import json
 import logging
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 logger = logging.getLogger("nexaflow_storage")
 
@@ -102,11 +101,11 @@ class LedgerStore:
         )
         self._conn.commit()
 
-    def load_accounts(self) -> List[Dict[str, Any]]:
+    def load_accounts(self) -> list[dict[str, Any]]:
         rows = self._conn.execute("SELECT * FROM accounts").fetchall()
         return [dict(r) for r in rows]
 
-    def get_account(self, address: str) -> Optional[Dict[str, Any]]:
+    def get_account(self, address: str) -> dict[str, Any] | None:
         row = self._conn.execute(
             "SELECT * FROM accounts WHERE address = ?", (address,)
         ).fetchone()
@@ -130,7 +129,7 @@ class LedgerStore:
         )
         self._conn.commit()
 
-    def load_trust_lines(self) -> List[Dict[str, Any]]:
+    def load_trust_lines(self) -> list[dict[str, Any]]:
         rows = self._conn.execute("SELECT * FROM trust_lines").fetchall()
         return [dict(r) for r in rows]
 
@@ -156,7 +155,7 @@ class LedgerStore:
         )
         self._conn.commit()
 
-    def load_closed_ledgers(self) -> List[Dict[str, Any]]:
+    def load_closed_ledgers(self) -> list[dict[str, Any]]:
         rows = self._conn.execute(
             "SELECT * FROM closed_ledgers ORDER BY sequence"
         ).fetchall()
@@ -192,7 +191,7 @@ class LedgerStore:
         )
         self._conn.commit()
 
-    def load_transactions(self, ledger_seq: Optional[int] = None) -> List[Dict[str, Any]]:
+    def load_transactions(self, ledger_seq: int | None = None) -> list[dict[str, Any]]:
         if ledger_seq is not None:
             rows = self._conn.execute(
                 "SELECT * FROM transactions WHERE ledger_seq = ? ORDER BY rowid",

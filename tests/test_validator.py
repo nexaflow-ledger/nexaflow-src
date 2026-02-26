@@ -14,22 +14,18 @@ Covers:
 
 import unittest
 
-from nexaflow_core.validator import TransactionValidator, MIN_FEE, ACCOUNT_RESERVE, OWNER_RESERVE
 from nexaflow_core.ledger import Ledger
 from nexaflow_core.transaction import (
-    Amount,
-    Transaction,
-    create_payment,
-    create_trust_set,
-    TT_PAYMENT,
-    TT_TRUST_SET,
-    TES_SUCCESS,
-    TEC_UNFUNDED,
-    TEC_NO_LINE,
-    TEC_INSUF_FEE,
     TEC_BAD_SEQ,
     TEC_BAD_SIG,
+    TEC_INSUF_FEE,
+    TEC_NO_LINE,
+    TEC_UNFUNDED,
+    TES_SUCCESS,
+    create_payment,
+    create_trust_set,
 )
+from nexaflow_core.validator import ACCOUNT_RESERVE, MIN_FEE, TransactionValidator
 from nexaflow_core.wallet import Wallet
 
 
@@ -52,7 +48,7 @@ class TestValidatorSignature(ValidatorTestBase):
         self.wallet.sign_transaction(tx)
         # Need the wallet address to exist in ledger
         self.ledger.create_account(self.wallet.address, 1000.0)
-        ok, code, msg = self.validator.validate(tx)
+        ok, code, _msg = self.validator.validate(tx)
         self.assertTrue(ok)
         self.assertEqual(code, TES_SUCCESS)
 
@@ -65,14 +61,14 @@ class TestValidatorSignature(ValidatorTestBase):
         w1.sign_transaction(tx)
         # Replace the pubkey with w2's key — signature won't match
         tx.signing_pub_key = w2.public_key
-        ok, code, msg = self.validator.validate(tx)
+        ok, code, _msg = self.validator.validate(tx)
         self.assertFalse(ok)
         self.assertEqual(code, TEC_BAD_SIG)
 
     def test_no_signature_skips_check(self):
         """Without signature/pubkey, the check is skipped — not a failure."""
         tx = create_payment("rAlice", "rBob", 1.0)
-        ok, code, msg = self.validator.validate(tx)
+        ok, _code, _msg = self.validator.validate(tx)
         self.assertTrue(ok)
 
 
@@ -80,13 +76,13 @@ class TestValidatorAccountExists(ValidatorTestBase):
 
     def test_nonexistent_source_fails(self):
         tx = create_payment("rGhost", "rBob", 1.0)
-        ok, code, msg = self.validator.validate(tx)
+        ok, code, _msg = self.validator.validate(tx)
         self.assertFalse(ok)
         self.assertEqual(code, TEC_UNFUNDED)
 
     def test_existing_source_passes(self):
         tx = create_payment("rAlice", "rBob", 1.0)
-        ok, code, _ = self.validator.validate(tx)
+        ok, _code, _ = self.validator.validate(tx)
         self.assertTrue(ok)
 
 
@@ -100,12 +96,12 @@ class TestValidatorFee(ValidatorTestBase):
 
     def test_fee_at_minimum_passes(self):
         tx = create_payment("rAlice", "rBob", 1.0, fee=MIN_FEE)
-        ok, code, _ = self.validator.validate(tx)
+        ok, _code, _ = self.validator.validate(tx)
         self.assertTrue(ok)
 
     def test_fee_above_minimum_passes(self):
         tx = create_payment("rAlice", "rBob", 1.0, fee=1.0)
-        ok, code, _ = self.validator.validate(tx)
+        ok, _code, _ = self.validator.validate(tx)
         self.assertTrue(ok)
 
 
@@ -114,12 +110,12 @@ class TestValidatorSequence(ValidatorTestBase):
     def test_correct_sequence_passes(self):
         acc = self.ledger.get_account("rAlice")
         tx = create_payment("rAlice", "rBob", 1.0, sequence=acc.sequence)
-        ok, code, _ = self.validator.validate(tx)
+        ok, _code, _ = self.validator.validate(tx)
         self.assertTrue(ok)
 
     def test_zero_sequence_skips_check(self):
         tx = create_payment("rAlice", "rBob", 1.0, sequence=0)
-        ok, code, _ = self.validator.validate(tx)
+        ok, _code, _ = self.validator.validate(tx)
         self.assertTrue(ok)
 
     def test_wrong_sequence_fails(self):
@@ -134,7 +130,7 @@ class TestValidatorBalance(ValidatorTestBase):
     def test_sufficient_balance_passes(self):
         # rAlice has 1000, reserve = 20 + 0*5 = 20, payment 1 + fee 0.00001
         tx = create_payment("rAlice", "rBob", 1.0)
-        ok, code, _ = self.validator.validate(tx)
+        ok, _code, _ = self.validator.validate(tx)
         self.assertTrue(ok)
 
     def test_insufficient_balance_after_reserve_fails(self):
@@ -149,7 +145,7 @@ class TestValidatorBalance(ValidatorTestBase):
         # balance = 1000, reserve = 20, max_send = 1000 - 20 - fee
         max_send = 1000.0 - ACCOUNT_RESERVE - 0.00001
         tx = create_payment("rAlice", "rBob", max_send)
-        ok, code, _ = self.validator.validate(tx)
+        ok, _code, _ = self.validator.validate(tx)
         self.assertTrue(ok)
 
 
@@ -162,7 +158,7 @@ class TestValidatorIOU(ValidatorTestBase):
 
     def test_iou_with_trust_line_passes(self):
         tx = create_payment("rAlice", "rBob", 10.0, "USD", "rGW")
-        ok, code, _ = self.validator.validate(tx)
+        ok, _code, _ = self.validator.validate(tx)
         self.assertTrue(ok)
 
     def test_iou_without_trust_line_fails(self):
@@ -173,7 +169,7 @@ class TestValidatorIOU(ValidatorTestBase):
 
     def test_iou_issuer_can_send_without_trust_line(self):
         tx = create_payment("rGW", "rAlice", 10.0, "USD", "rGW")
-        ok, code, _ = self.validator.validate(tx)
+        ok, _code, _ = self.validator.validate(tx)
         self.assertTrue(ok)
 
     def test_iou_no_native_for_fee(self):
@@ -190,7 +186,7 @@ class TestValidatorTrustSet(ValidatorTestBase):
 
     def test_trust_set_valid(self):
         tx = create_trust_set("rAlice", "EUR", "rBank", 500.0)
-        ok, code, _ = self.validator.validate(tx)
+        ok, _code, _ = self.validator.validate(tx)
         self.assertTrue(ok)
 
     def test_trust_set_no_balance_for_fee(self):

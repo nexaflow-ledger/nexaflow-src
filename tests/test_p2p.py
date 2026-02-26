@@ -10,7 +10,7 @@ Covers:
 import asyncio
 import unittest
 
-from nexaflow_core.p2p import P2PNode, encode_message, decode_message
+from nexaflow_core.p2p import P2PNode, decode_message, encode_message
 
 
 class TestMessageEncoding(unittest.TestCase):

@@ -19,13 +19,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
-import signal
 import sys
-import time
-from typing import Dict, List, Optional, Set
 
 # ---------------------------------------------------------------------------
 # Ensure the project root is in sys.path so imports work before pip install
@@ -34,20 +32,13 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from nexaflow_core.p2p import P2PNode
-from nexaflow_core.ledger import Ledger
-from nexaflow_core.consensus import ConsensusEngine, Proposal
-from nexaflow_core.transaction import Transaction, Amount, create_payment, create_trust_set
-from nexaflow_core.crypto_utils import (
-    generate_keypair,
-    sign,
-    derive_address,
-    sha256,
-    generate_tx_id,
-)
-from nexaflow_core.wallet import Wallet
-from nexaflow_core.validator import TransactionValidator
-from nexaflow_core.trust_line import TrustGraph
+from nexaflow_core.consensus import ConsensusEngine, Proposal  # noqa: E402
+from nexaflow_core.ledger import Ledger  # noqa: E402
+from nexaflow_core.p2p import P2PNode  # noqa: E402
+from nexaflow_core.transaction import Amount, Transaction, create_payment  # noqa: E402
+from nexaflow_core.trust_line import TrustGraph  # noqa: E402
+from nexaflow_core.validator import TransactionValidator  # noqa: E402
+from nexaflow_core.wallet import Wallet  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -78,7 +69,7 @@ class NexaFlowNode:
         node_id: str,
         host: str = "0.0.0.0",
         port: int = 9001,
-        peers: Optional[List[str]] = None,
+        peers: list[str] | None = None,
     ):
         self.node_id = node_id
         self.port = port
@@ -92,11 +83,14 @@ class NexaFlowNode:
         self.trust_graph = TrustGraph()
 
         # Transaction pool (tx_id -> tx dict from network, or Transaction obj)
-        self.tx_pool: Dict[str, dict] = {}
-        self.tx_objects: Dict[str, Transaction] = {}
+        self.tx_pool: dict[str, dict] = {}
+        self.tx_objects: dict[str, Transaction] = {}
 
         # Consensus state
-        self.peer_proposals: Dict[str, dict] = {}
+        self.peer_proposals: dict[str, dict] = {}
+
+        # Background task references (prevent GC)
+        self._bg_tasks: list[asyncio.Task] = []
 
         # Wire up P2P callbacks
         self.p2p.on_transaction = self._on_tx_received
@@ -117,10 +111,10 @@ class NexaFlowNode:
 
         # Connect to seed peers (with retry)
         for peer_addr in self.peers_to_connect:
-            asyncio.create_task(self._connect_with_retry(peer_addr))
+            self._bg_tasks.append(asyncio.create_task(self._connect_with_retry(peer_addr)))
 
         # Start consensus timer
-        asyncio.create_task(self._consensus_loop())
+        self._bg_tasks.append(asyncio.create_task(self._consensus_loop()))
 
         logger.info(
             f"Node {self.node_id} started | addr={self.wallet.address} | port={self.port}"
@@ -162,7 +156,7 @@ class NexaFlowNode:
         try:
             tx = self._reconstruct_tx(tx_data)
             # Validate
-            valid, code, msg = self.validator.validate(tx)
+            valid, _code, msg = self.validator.validate(tx)
             if valid:
                 self.tx_pool[tx_id] = tx_data
                 self.tx_objects[tx_id] = tx
@@ -212,7 +206,7 @@ class NexaFlowNode:
         self.wallet.sign_transaction(tx)
 
         # Validate locally
-        valid, code, msg = self.validator.validate(tx)
+        valid, _code, msg = self.validator.validate(tx)
         if not valid:
             logger.error(f"Local validation failed: {msg}")
             return None
@@ -521,15 +515,11 @@ async def main():
 
 
 if __name__ == "__main__":
-    try:
+    with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
 
 
 def main_sync():
     """Synchronous entry point for console_scripts."""
-    try:
+    with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(main())
-    except KeyboardInterrupt:
-        pass

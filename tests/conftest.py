@@ -4,11 +4,11 @@ Shared pytest fixtures for the NexaFlow test suite.
 
 import pytest
 
-from nexaflow_core.ledger import Ledger
-from nexaflow_core.wallet import Wallet
 from nexaflow_core.account import Account
+from nexaflow_core.ledger import Ledger
 from nexaflow_core.trust_line import TrustGraph
 from nexaflow_core.validator import TransactionValidator
+from nexaflow_core.wallet import Wallet
 
 
 @pytest.fixture

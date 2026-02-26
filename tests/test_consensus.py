@@ -12,12 +12,11 @@ Covers:
 import unittest
 
 from nexaflow_core.consensus import (
-    Proposal,
+    PHASE_NAMES,
     ConsensusEngine,
     ConsensusResult,
-    PHASE_NAMES,
+    Proposal,
 )
-
 
 # ===================================================================
 #  Proposal

@@ -10,13 +10,13 @@ Implements an async peer-to-peer protocol where nodes:
 Protocol is JSON-over-TCP with newline-delimited messages.
 
 Message types:
-  HELLO        – handshake with node identity
-  TX           – broadcast a signed transaction
-  PROPOSAL     – consensus proposal for a ledger round
-  CONSENSUS_OK – agreed transaction set after consensus
-  LEDGER_REQ   – request ledger state
-  LEDGER_RES   – ledger state response
-  PING / PONG  – keepalive
+  HELLO        - handshake with node identity
+  TX           - broadcast a signed transaction
+  PROPOSAL     - consensus proposal for a ledger round
+  CONSENSUS_OK - agreed transaction set after consensus
+  LEDGER_REQ   - request ledger state
+  LEDGER_RES   - ledger state response
+  PING / PONG  - keepalive
 """
 
 from __future__ import annotations
@@ -25,8 +25,7 @@ import asyncio
 import json
 import logging
 import time
-import traceback
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Callable
 
 logger = logging.getLogger("nexaflow_p2p")
 
@@ -41,7 +40,7 @@ def encode_message(msg_type: str, payload: dict) -> bytes:
     return (json.dumps(msg, default=str) + "\n").encode("utf-8")
 
 
-def decode_message(data: bytes) -> Optional[dict]:
+def decode_message(data: bytes) -> dict | None:
     """Decode a newline-terminated JSON message."""
     try:
         return json.loads(data.strip())
@@ -84,7 +83,7 @@ class PeerConnection:
         except (ConnectionError, OSError):
             return False
 
-    async def readline(self) -> Optional[dict]:
+    async def readline(self) -> dict | None:
         """Read one newline-delimited JSON message."""
         try:
             data = await asyncio.wait_for(self.reader.readline(), timeout=60.0)
@@ -140,20 +139,20 @@ class P2PNode:
         self.node_id = node_id
         self.host = host
         self.port = port
-        self.peers: Dict[str, PeerConnection] = {}   # peer_id -> connection
-        self._server: Optional[asyncio.AbstractServer] = None
+        self.peers: dict[str, PeerConnection] = {}   # peer_id -> connection
+        self._server: asyncio.AbstractServer | None = None
         self._running = False
-        self._tasks: List[asyncio.Task] = []
+        self._tasks: list[asyncio.Task] = []
 
-        # Callbacks – set by the node runner
-        self.on_transaction: Optional[Callable] = None
-        self.on_proposal: Optional[Callable] = None
-        self.on_consensus_result: Optional[Callable] = None
-        self.on_peer_connected: Optional[Callable] = None
-        self.on_peer_disconnected: Optional[Callable] = None
+        # Callbacks - set by the node runner
+        self.on_transaction: Callable | None = None
+        self.on_proposal: Callable | None = None
+        self.on_consensus_result: Callable | None = None
+        self.on_peer_connected: Callable | None = None
+        self.on_peer_disconnected: Callable | None = None
 
-        # Dedup – track seen message hashes to avoid rebroadcasts
-        self._seen_ids: Set[str] = set()
+        # Dedup - track seen message hashes to avoid rebroadcasts
+        self._seen_ids: set[str] = set()
         self._max_seen = 10_000
 
     # ---- lifecycle ----
@@ -358,7 +357,7 @@ class P2PNode:
     def peer_count(self) -> int:
         return len(self.peers)
 
-    def peer_ids(self) -> List[str]:
+    def peer_ids(self) -> list[str]:
         return list(self.peers.keys())
 
     def status(self) -> dict:

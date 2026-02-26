@@ -9,19 +9,15 @@ A wallet wraps an ECDSA key-pair and provides:
 
 from __future__ import annotations
 
-import json
 import hashlib
 import os
-from typing import Optional
 
 from nexaflow_core.crypto_utils import (
-    generate_keypair,
-    sign,
-    verify,
     derive_address,
-    sha256,
-    sha256d,
+    generate_keypair,
     generate_tx_id,
+    sha256,
+    sign,
 )
 from nexaflow_core.transaction import Transaction
 
@@ -33,7 +29,7 @@ class Wallet:
         self,
         private_key: bytes,
         public_key: bytes,
-        address: Optional[str] = None,
+        address: str | None = None,
     ):
         self.private_key = private_key
         self.public_key = public_key
@@ -43,18 +39,18 @@ class Wallet:
     # ---- factory methods ----
 
     @classmethod
-    def create(cls) -> "Wallet":
+    def create(cls) -> Wallet:
         """Generate a brand-new wallet."""
         priv, pub = generate_keypair()
         return cls(priv, pub)
 
     @classmethod
-    def from_seed(cls, seed: str) -> "Wallet":
+    def from_seed(cls, seed: str) -> Wallet:
         """
         Derive a wallet deterministically from a seed phrase.
         (Simplified: seed is SHA-256 hashed to get a 32-byte private key.)
         """
-        from ecdsa import SigningKey, SECP256k1
+        from ecdsa import SECP256k1, SigningKey
 
         priv_bytes = sha256(seed.encode("utf-8"))
         sk = SigningKey.from_string(priv_bytes, curve=SECP256k1)
@@ -113,7 +109,7 @@ class Wallet:
         }
 
     @classmethod
-    def import_encrypted(cls, data: dict, passphrase: str) -> "Wallet":
+    def import_encrypted(cls, data: dict, passphrase: str) -> Wallet:
         """Import from an encrypted export."""
         version = data.get("version", 1)
         salt = bytes.fromhex(data["salt"])
