@@ -287,9 +287,9 @@ class LedgerStore:
 
         for header in ledger.closed_ledgers:
             self.save_closed_ledger(
-                header.sequence, header.hash, header.previous_hash,
-                header.timestamp, header.transaction_count,
-                header.total_nxf, header.account_count,
+                header.sequence, header.hash, header.parent_hash,
+                header.close_time, header.tx_count,
+                header.total_nxf, 0,
             )
 
         # Persist staking pool
@@ -335,11 +335,11 @@ class LedgerStore:
         # Closed ledgers
         from nexaflow_core.ledger import LedgerHeader
         for row in self.load_closed_ledgers():
-            header = LedgerHeader(
-                row["sequence"], row["hash"], row["previous_hash"],
-                row["timestamp"], row["transaction_count"],
-                row["total_nxf"], row["account_count"],
-            )
+            header = LedgerHeader(row["sequence"], row["previous_hash"])
+            header.hash = row["hash"]
+            header.close_time = int(row["timestamp"])
+            header.tx_count = row["transaction_count"]
+            header.total_nxf = row["total_nxf"]
             ledger.closed_ledgers.append(header)
         if ledger.closed_ledgers:
             ledger.current_sequence = ledger.closed_ledgers[-1].sequence + 1
