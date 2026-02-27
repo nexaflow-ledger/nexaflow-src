@@ -206,7 +206,7 @@ cdef class LedgerHeader:
         blob += struct.pack(">q", self.close_time)
         blob += struct.pack(">q", self.tx_count)
         blob += struct.pack(">d", self.total_nxf)
-        self.hash = hashlib.sha256(blob).hexdigest()
+        self.hash = hashlib.blake2b(blob, digest_size=32).hexdigest()
 
     cpdef dict to_dict(self):
         return {
@@ -240,7 +240,8 @@ cdef class Ledger:
     cdef public list pending_txns     # txns in current open ledger
     cdef public long long current_sequence
     cdef public double total_supply
-    cdef public double fee_pool        # accumulated fees
+    cdef public double total_burned     # cumulative fees & penalties burned
+    cdef public double total_minted    # cumulative interest minted
     cdef public str genesis_account
     cdef public set spent_key_images   # bytes → kept for is_key_image_spent API
     cdef public set applied_tx_ids     # str  → duplicate-TX detection
@@ -254,7 +255,8 @@ cdef class Ledger:
         self.pending_txns = []
         self.current_sequence = 1
         self.total_supply = total_supply
-        self.fee_pool = 0.0
+        self.total_burned = 0.0
+        self.total_minted = 0.0
         self.genesis_account = genesis_account
         self.spent_key_images = set()
         self.applied_tx_ids = set()
@@ -355,7 +357,9 @@ cdef class Ledger:
                 return 101  # tecUNFUNDED
             src_acc.balance -= (amt + fee_val)
             dst_acc.balance += amt
-            self.fee_pool += fee_val
+            # Burn the fee — permanently remove from circulation
+            self.total_supply -= fee_val
+            self.total_burned += fee_val
         else:
             # IOU payment — requires trust lines
             cur = amount.currency
@@ -365,7 +369,9 @@ cdef class Ledger:
             if src_acc.balance < fee_val:
                 return 104  # tecINSUF_FEE
             src_acc.balance -= fee_val
-            self.fee_pool += fee_val
+            # Burn the fee — permanently remove from circulation
+            self.total_supply -= fee_val
+            self.total_burned += fee_val
 
             # Check sender's trust line (or sender is issuer)
             if src != iss:
@@ -431,7 +437,9 @@ cdef class Ledger:
             if src_acc.balance < fee_val:
                 return 104  # tecINSUF_FEE
             src_acc.balance -= fee_val
-            self.fee_pool += fee_val
+            # Burn the fee — permanently remove from circulation
+            self.total_supply -= fee_val
+            self.total_burned += fee_val
         # Advance sequence so the tx cannot be replayed
         if src_acc is not None:
             if tx.sequence != 0 and tx.sequence != src_acc.sequence:
@@ -467,7 +475,9 @@ cdef class Ledger:
         if src_acc.balance < fee_val:
             return 104
         src_acc.balance -= fee_val
-        self.fee_pool += fee_val
+        # Burn the fee — permanently remove from circulation
+        self.total_supply -= fee_val
+        self.total_burned += fee_val
 
         if tx.sequence != 0 and tx.sequence != src_acc.sequence:
             return 105
@@ -532,15 +542,15 @@ cdef class Ledger:
             mat_acc = <AccountEntry>self.accounts.get(mat_addr)
             if mat_acc is not None:
                 mat_acc.balance += mat_principal + mat_interest
-                # Interest sourced from fee pool when available
-                if self.fee_pool >= mat_interest:
-                    self.fee_pool -= mat_interest
+                # Interest is newly minted — adds to circulating supply
+                self.total_supply += mat_interest
+                self.total_minted += mat_interest
 
         # Transaction merkle hash (simplified: hash of all tx_ids concatenated)
         cdef bytes tx_blob = b""
         for tx in self.pending_txns:
             tx_blob += tx.tx_id.encode("utf-8")
-        header.tx_hash = hashlib.sha256(tx_blob).hexdigest() if tx_blob else "0" * 64
+        header.tx_hash = hashlib.blake2b(tx_blob, digest_size=32).hexdigest() if tx_blob else "0" * 64
 
         # State hash (simplified: hash of all account balances + confidential state)
         cdef bytes state_blob = b""
@@ -555,7 +565,7 @@ cdef class Ledger:
         for sa_hex in sorted(self.confidential_outputs.keys()):
             out = self.confidential_outputs[sa_hex]
             state_blob += out.commitment
-        header.state_hash = hashlib.sha256(state_blob).hexdigest()
+        header.state_hash = hashlib.blake2b(state_blob, digest_size=32).hexdigest()
 
         header.total_nxf = self.total_supply
         header.compute_hash()
@@ -599,7 +609,9 @@ cdef class Ledger:
 
         # Debit
         acc.balance -= (amt + fee_val)
-        self.fee_pool += fee_val
+        # Burn the fee — permanently remove from circulation
+        self.total_supply -= fee_val
+        self.total_burned += fee_val
 
         # Record in staking pool
         self.staking_pool.record_stake(
@@ -648,15 +660,18 @@ cdef class Ledger:
 
         # Debit fee
         acc.balance -= fee_val
-        self.fee_pool += fee_val
+        # Burn the fee — permanently remove from circulation
+        self.total_supply -= fee_val
+        self.total_burned += fee_val
 
         now_ts = tx.timestamp if tx.timestamp else None
         address, payout, interest_forfeited, principal_penalty = \
             self.staking_pool.cancel_stake(stake_id, now=now_ts)
 
-        # Credit payout, burn principal penalty into fee pool
+        # Credit payout; burn the principal penalty permanently
         acc.balance += payout
-        self.fee_pool += principal_penalty
+        self.total_supply -= principal_penalty
+        self.total_burned += principal_penalty
 
         acc.sequence += 1
         return 0  # tesSUCCESS
@@ -676,7 +691,8 @@ cdef class Ledger:
             "closed_ledgers": len(self.closed_ledgers),
             "total_accounts": len(self.accounts),
             "total_supply": self.total_supply,
-            "fee_pool": self.fee_pool,
+            "total_burned": self.total_burned,
+            "total_minted": self.total_minted,
             "confidential_outputs": len(self.confidential_outputs),
             "spent_key_images": len(self.spent_key_images),
             "total_staked": pool["total_staked"],

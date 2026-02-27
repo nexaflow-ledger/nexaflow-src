@@ -96,20 +96,20 @@ cdef class Proposal:
         self.signature = signature
 
     cpdef str compute_hash(self):
-        """Deterministic hash of the proposal content (hex SHA-256)."""
+        """Deterministic hash of the proposal content (hex BLAKE2b-256)."""
         cdef str blob = (
             f"{self.validator_id}:{self.ledger_seq}:{self.round_number}:"
             + ",".join(sorted(self.tx_ids))
         )
-        return hashlib.sha256(blob.encode()).hexdigest()
+        return hashlib.blake2b(blob.encode(), digest_size=32).hexdigest()
 
     cpdef bytes signing_digest(self):
-        """Raw 32-byte SHA-256 digest over the canonical proposal blob."""
+        """Raw 32-byte BLAKE2b-256 digest over the canonical proposal blob."""
         cdef str blob = (
             f"{self.validator_id}:{self.ledger_seq}:{self.round_number}:"
             + ",".join(sorted(self.tx_ids))
         )
-        return hashlib.sha256(blob.encode()).digest()
+        return hashlib.blake2b(blob.encode(), digest_size=32).digest()
 
     cpdef bint verify_signature(self, bytes pubkey_bytes):
         """

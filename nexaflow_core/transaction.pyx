@@ -244,9 +244,9 @@ cdef class Transaction:
         return bytes(buf)
 
     cpdef bytes hash_for_signing(self):
-        """SHA-256 hash of the serialised blob — this is what gets signed."""
+        """BLAKE2b-256 hash of the serialised blob — this is what gets signed."""
         import hashlib
-        return hashlib.sha256(self.serialize_for_signing()).digest()
+        return hashlib.blake2b(self.serialize_for_signing(), digest_size=32).digest()
 
     cpdef void apply_signature(self, bytes pub_key, bytes sig, str tx_id):
         """Attach a computed signature and tx_id."""

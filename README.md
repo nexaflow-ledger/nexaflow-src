@@ -17,12 +17,12 @@
 | **Trust lines & IOUs** | Credit relationships between accounts with configurable limits and transfer rates |
 | **Payment path finding** | Multi-hop DFS through the trust graph for cross-currency settlement |
 | **RPCA consensus** | NexaFlow Protocol Consensus Algorithm with threshold escalation |
-| **Native token (NXF)** | 100 billion fixed supply; fee pool; configurable reserves |
+| **Native token (NXF)** | 100 billion initial supply; deflationary fee burning; interest minting from staking |
 | **TCP P2P networking** | Async JSON-over-TCP peer discovery, broadcast & keepalive |
 | **REST API** | `aiohttp`-based HTTP API for wallets, transactions & node status |
 | **Order book / DEX** | In-memory limit-order matching engine for cross-currency trades |
 | **Staking with interest** | Tiered lock-up staking (Flexible–365 days) with dynamic APY and early-cancel penalties |
-| **Wallet encryption** | PBKDF2-HMAC-SHA256 + AES-256-CBC encrypted wallet export |
+| **Wallet encryption** | PBKDF2-HMAC-SHA256 + BLAKE2b-CTR encrypted wallet export |
 | **SQLite persistence** | Optional durable storage for ledger state |
 | **TOML configuration** | Flexible file-based node configuration |
 | **Structured logging** | JSON or human-readable logs with configurable verbosity |
@@ -115,6 +115,29 @@ Locked-tier stakes can be cancelled before maturity at a penalty:
 - **Time decay** — penalties decrease linearly as the stake approaches maturity
 
 Flexible-tier stakes have zero penalty.
+
+---
+
+## Tokenomics
+
+NexaFlow uses a **deflationary fee-burning** model with **interest-based minting** as the only source of new coins after genesis.
+
+### Supply Rules
+
+| Rule | Detail |
+|------|--------|
+| **Initial supply** | 100 billion NXF minted to the genesis account at network launch |
+| **Fee burning** | Every transaction fee is permanently destroyed — removed from `total_supply` |
+| **Interest minting** | When a staked position matures, the earned interest is newly minted — added to `total_supply` |
+| **Early-cancel burn** | Principal penalties from early stake cancellation are also permanently burned |
+| **No other minting** | Coins can **only** enter circulation from the genesis allocation or staking interest — there is no block reward, no inflation schedule, and no admin mint |
+
+### Economic Dynamics
+
+- **Deflationary pressure** — every transaction shrinks the supply
+- **Inflationary pressure** — staking interest grows the supply
+- **Equilibrium** — the dynamic APY multiplier adjusts interest rates based on the staking ratio, creating a self-balancing feedback loop between burning and minting
+- **Net effect** — under normal activity the burn rate exceeds interest minting, making NXF structurally deflationary over time
 
 ### API Examples
 
@@ -246,9 +269,10 @@ nexaflow-src/
 │   ├── config.py           # TOML configuration loader
 │   └── logging_config.py   # Structured logging
 ├── nexaflow_gui/           # Optional desktop GUI
-├── tests/                  # Test suite (300+ tests)
+├── tests/                  # Test suite (670+ tests)
 ├── scripts/                # Node launch helpers
 ├── run_node.py             # CLI node runner
+├── run_tests.py            # Python test runner (builds + runs all tests)
 ├── setup.py                # Cython build config
 ├── pyproject.toml          # PEP 517/518 metadata
 ├── Makefile                # Dev workflow shortcuts
@@ -261,7 +285,16 @@ nexaflow-src/
 ## Testing
 
 ```bash
-# Full test suite
+# Full test suite (build + run)
+python run_tests.py
+
+# Skip Cython rebuild
+python run_tests.py --no-build
+
+# Filter by keyword
+python run_tests.py -k staking
+
+# Via make
 make test
 
 # With line coverage
@@ -270,6 +303,8 @@ make coverage
 # Single module
 pytest tests/test_privacy.py -v
 ```
+
+The `run_tests.py` script automatically detects and skips test modules with missing optional dependencies (e.g. `aiohttp`).
 
 ---
 
@@ -309,7 +344,7 @@ NexaFlow uses the **NexaFlow Protocol Consensus Algorithm (RPCA)**:
 3. Transactions reaching ≥ 50 % support enter the next round.
 4. The support threshold escalates by 5 % each round up to 80 %.
 5. Transactions exceeding the final threshold are applied to the ledger.
-6. The ledger is closed with a chained SHA-256 hash.
+6. The ledger is closed with a chained BLAKE2b-256 hash.
 
 ### Ledger Model
 
@@ -324,6 +359,7 @@ NexaFlow uses the **NexaFlow Protocol Consensus Algorithm (RPCA)**:
 
 All performance-critical cryptography is implemented in Cython (`privacy.pyx`) and compiled to native C:
 
+- **BLAKE2b-256** — used for all hashing (transaction IDs, ledger headers, proposal digests, checksums)
 - **secp256k1 ECDSA** via the `ecdsa` library
 - **Pedersen Commitments** over secp256k1: $C = v \cdot G + b \cdot H$
 - **LSAG Ring Signatures** — linkable, spontaneous, provably secure under the discrete logarithm assumption
@@ -335,7 +371,7 @@ All performance-critical cryptography is implemented in Cython (`privacy.pyx`) a
 ## Security
 
 - All cryptographic operations use the secp256k1 curve (same as Bitcoin)
-- Wallet private keys are encrypted at rest with PBKDF2-HMAC-SHA256 + AES-256-CBC
+- Wallet private keys are encrypted at rest with PBKDF2-HMAC-SHA256 + BLAKE2b-CTR
 - Confidential transaction amounts are never written in plaintext — only Pedersen commitments appear on-chain
 - Ring signatures provide sender anonymity within a configurable anonymity set
 - Stealth addresses ensure no two outputs are linkable to the same recipient without the recipient's view key

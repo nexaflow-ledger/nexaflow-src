@@ -142,7 +142,8 @@ class DashboardTab(QWidget):
             f"Total Accounts: {status.get('total_accounts', 0)}\n"
             f"Closed Ledgers: {status.get('closed_ledgers', 0)}\n"
             f"Total Supply: {status.get('total_supply', 0):,.0f} NXF\n"
-            f"Fee Pool: {status.get('fee_pool', 0):,.6f} NXF"
+            f"Total Burned: {status.get('total_burned', 0):,.6f} NXF\n"
+            f"Total Minted (Interest): {status.get('total_minted', 0):,.6f} NXF"
         )
 
     def _on_log(self, msg: str):

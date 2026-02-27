@@ -249,10 +249,10 @@ class TestLedgerPaymentNative(unittest.TestCase):
         self.ledger.apply_payment(tx)
         self.assertAlmostEqual(self.ledger.get_balance("rAlice"), 489.0, places=3)
 
-    def test_payment_adds_to_fee_pool(self):
+    def test_payment_burns_fee(self):
         tx = self._make_payment("rAlice", "rBob", 10.0, fee=5.0)
         self.ledger.apply_payment(tx)
-        self.assertAlmostEqual(self.ledger.fee_pool, 5.0, places=3)
+        self.assertAlmostEqual(self.ledger.total_burned, 5.0, places=3)
 
     def test_payment_insufficient_funds(self):
         tx = self._make_payment("rAlice", "rBob", 999.0)
@@ -474,7 +474,7 @@ class TestLedgerStateSummary(unittest.TestCase):
         self.assertIn("closed_ledgers", summary)
         self.assertIn("total_accounts", summary)
         self.assertIn("total_supply", summary)
-        self.assertIn("fee_pool", summary)
+        self.assertIn("total_burned", summary)
 
     def test_summary_account_count(self):
         ledger = Ledger(total_supply=1000.0)

@@ -46,7 +46,6 @@ def staking_ledger():
     from nexaflow_core.ledger import Ledger
     ledger = Ledger(total_supply=10_000.0, genesis_account="rGen")
     ledger.create_account("rStaker", 5000.0)
-    ledger.fee_pool = 1000.0
     return ledger
 
 
@@ -506,18 +505,18 @@ class TestLedgerStaking:
         i_365 = pool.stakes["stk16"].accrued_interest(future)
         assert i_365 > i_flex
 
-    def test_penalty_burns_into_fee_pool(self, staking_ledger):
+    def test_penalty_burns_from_supply(self, staking_ledger):
         ledger = staking_ledger
         now = time.time()
         tx = _make_stake_tx("rStaker", 1000, int(StakeTier.DAYS_365),
                             tx_id="stk17", ts=now)
         ledger.apply_transaction(tx)
-        fee_after_stake = ledger.fee_pool
+        burned_after_stake = ledger.total_burned
         tx_u = _make_unstake_tx("rStaker", "stk17",
                                 tx_id="ustk17", ts=now + 86400)
         ledger.apply_transaction(tx_u)
-        fee_after_cancel = ledger.fee_pool
-        assert fee_after_cancel > fee_after_stake
+        burned_after_cancel = ledger.total_burned
+        assert burned_after_cancel > burned_after_stake
 
     def test_longer_held_reduces_penalty_integration(self, staking_ledger):
         ledger = staking_ledger

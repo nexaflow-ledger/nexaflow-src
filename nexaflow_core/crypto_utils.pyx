@@ -23,16 +23,16 @@ cdef dict _ALPHA_MAP = {c: i for i, c in enumerate(ALPHABET)}
 
 
 # ===================================================================
-#  Fast SHA-256 / SHA-512 / RIPEMD-160 helpers
+#  Fast BLAKE2b / SHA-512 / RIPEMD-160 helpers
 # ===================================================================
 
 cpdef bytes sha256(bytes data):
-    """Single SHA-256 hash."""
-    return hashlib.sha256(data).digest()
+    """BLAKE2b-256 hash (replaces SHA-256 throughout NexaFlow)."""
+    return hashlib.blake2b(data, digest_size=32).digest()
 
 cpdef bytes sha256d(bytes data):
-    """Double SHA-256 hash (used for checksums)."""
-    return hashlib.sha256(hashlib.sha256(data).digest()).digest()
+    """Double BLAKE2b-256 hash (used for checksums)."""
+    return hashlib.blake2b(hashlib.blake2b(data, digest_size=32).digest(), digest_size=32).digest()
 
 cpdef bytes sha512_half(bytes data):
     """SHA-512 first 32 bytes — used for transaction hashing."""

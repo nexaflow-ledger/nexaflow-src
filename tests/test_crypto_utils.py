@@ -41,19 +41,19 @@ class TestHashFunctions(unittest.TestCase):
     """Tests for hashing primitives."""
 
     def test_sha256_known_vector(self):
-        expected = hashlib.sha256(b"hello").digest()
+        expected = hashlib.blake2b(b"hello", digest_size=32).digest()
         self.assertEqual(sha256(b"hello"), expected)
 
     def test_sha256_empty(self):
-        expected = hashlib.sha256(b"").digest()
+        expected = hashlib.blake2b(b"", digest_size=32).digest()
         self.assertEqual(sha256(b""), expected)
 
     def test_sha256_returns_32_bytes(self):
         self.assertEqual(len(sha256(b"test")), 32)
 
     def test_sha256d_double_hash(self):
-        single = hashlib.sha256(b"data").digest()
-        expected = hashlib.sha256(single).digest()
+        single = hashlib.blake2b(b"data", digest_size=32).digest()
+        expected = hashlib.blake2b(single, digest_size=32).digest()
         self.assertEqual(sha256d(b"data"), expected)
 
     def test_sha256d_differs_from_single(self):
@@ -77,7 +77,7 @@ class TestHashFunctions(unittest.TestCase):
 
     def test_hash160_composition(self):
         data = b"public_key_bytes"
-        expected = hashlib.new("ripemd160", hashlib.sha256(data).digest()).digest()
+        expected = hashlib.new("ripemd160", hashlib.blake2b(data, digest_size=32).digest()).digest()
         self.assertEqual(hash160(data), expected)
 
     def test_hash160_returns_20_bytes(self):

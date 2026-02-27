@@ -220,7 +220,7 @@ class Wallet:
     def export_encrypted(self, passphrase: str) -> dict:
         """
         Export wallet as an encrypted JSON-compatible dict.
-        Uses PBKDF2-HMAC-SHA256 key derivation + AES-256-CBC encryption.
+        Uses PBKDF2-HMAC-SHA256 key derivation + BLAKE2b-CTR encryption.
         Falls back to a simpler scheme if the `cryptography` package is
         not installed.
         """
@@ -286,16 +286,16 @@ class Wallet:
     @staticmethod
     def _aes_ctr_encrypt(key: bytes, iv: bytes, data: bytes) -> bytes:
         """
-        Simple CTR-mode stream cipher built on SHA-256.
+        Simple CTR-mode stream cipher built on BLAKE2b.
         Not as fast as OpenSSL AES, but avoids any external dependency
         while being far stronger than plain XOR.
         """
         out = bytearray()
-        block_size = 32  # SHA-256 digest length
+        block_size = 32  # BLAKE2b-256 digest length
         counter = int.from_bytes(iv, "big")
         for offset in range(0, len(data), block_size):
             counter_bytes = counter.to_bytes(16, "big")
-            keystream = hashlib.sha256(key + counter_bytes).digest()
+            keystream = hashlib.blake2b(key + counter_bytes, digest_size=32).digest()
             chunk = data[offset : offset + block_size]
             out.extend(a ^ b for a, b in zip(chunk, keystream))
             counter += 1

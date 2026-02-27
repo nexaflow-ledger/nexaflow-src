@@ -120,22 +120,26 @@ class TestBalanceEnforcement(LedgerSecBase):
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  Fee pool
+#  Fee burning
 # ═══════════════════════════════════════════════════════════════════
 
-class TestFeePool(LedgerSecBase):
+class TestFeeBurning(LedgerSecBase):
 
-    def test_fee_goes_to_pool(self):
-        self.assertEqual(self.ledger.fee_pool, 0.0)
+    def test_fee_is_burned(self):
+        self.assertEqual(self.ledger.total_burned, 0.0)
+        initial_supply = self.ledger.total_supply
         tx = create_payment("rAlice", "rBob", 1.0, fee=0.5)
         self.ledger.apply_payment(tx)
-        self.assertAlmostEqual(self.ledger.fee_pool, 0.5, places=5)
+        self.assertAlmostEqual(self.ledger.total_burned, 0.5, places=5)
+        self.assertAlmostEqual(self.ledger.total_supply, initial_supply - 0.5, places=5)
 
-    def test_multiple_txs_accumulate_fee(self):
+    def test_multiple_txs_accumulate_burned(self):
+        initial_supply = self.ledger.total_supply
         for _ in range(10):
             tx = create_payment("rAlice", "rBob", 1.0, fee=0.1)
             self.ledger.apply_payment(tx)
-        self.assertAlmostEqual(self.ledger.fee_pool, 1.0, places=5)
+        self.assertAlmostEqual(self.ledger.total_burned, 1.0, places=5)
+        self.assertAlmostEqual(self.ledger.total_supply, initial_supply - 1.0, places=5)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -213,7 +217,7 @@ class TestLedgerClose(LedgerSecBase):
         summary = self.ledger.get_state_summary()
         expected_keys = {
             "ledger_sequence", "closed_ledgers", "total_accounts",
-            "total_supply", "fee_pool", "total_staked", "active_stakes",
+            "total_supply", "total_burned", "total_staked", "active_stakes",
         }
         for k in expected_keys:
             self.assertIn(k, summary)

@@ -136,7 +136,7 @@ class LedgerTab(QWidget):
         self._lbl_accounts.setText(str(status.get("total_accounts", 0)))
         supply = status.get("total_supply", 0)
         self._lbl_supply.setText(f"{supply:,.0f}")
-        fees = status.get("fee_pool", 0)
+        fees = status.get("total_burned", 0)
         self._lbl_fees.setText(f"{fees:,.6f}")
 
     def _refresh(self):

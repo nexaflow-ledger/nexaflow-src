@@ -11,7 +11,7 @@ Implements Monero-like privacy features over secp256k1:
   RangeProof          -- ZKP that committed value is non-negative
   KeyImage            -- I = x*Hp(P)  for per-output double-spend prevention
 
-PRODUCTION NOTE: RangeProof uses a simplified SHA-256 ZKP placeholder.
+PRODUCTION NOTE: RangeProof uses a simplified BLAKE2b ZKP placeholder.
 Replace with a proper Bulletproof before handling real user funds.
 """
 
@@ -74,7 +74,7 @@ cdef object _hp_point(bytes pub_bytes):
 
 cdef object _ring_hash(bytes message, list ring_pubs, object I, object L, object R):
     """H(m, pubs, I, L, R) -> integer scalar for LSAG."""
-    h = hashlib.sha256()
+    h = hashlib.blake2b(digest_size=32)
     h.update(message)
     for p in ring_pubs:
         h.update(p)
@@ -350,7 +350,7 @@ cdef class RangeProof:
     """
     Proves committed value v >= 0.
 
-    Placeholder implementation: SHA-256(blinding || value || domain).
+    Placeholder implementation: BLAKE2b(blinding || value || domain).
     Replace with Bulletproofs for full ZK range proofs in production.
     """
     cdef public bytes proof
@@ -476,7 +476,7 @@ cpdef object create_confidential_payment(
     ring_sig          = RingSignature.sign(tx.hash_for_signing(), sender_priv, ring, 0)
     tx.ring_signature = ring_sig.sig
 
-    # tx_id: sha256 of the full serialized blob + ring_signature
+    # tx_id: blake2b of the full serialized blob + ring_signature
     tx.tx_id = sha256(tx.hash_for_signing() + tx.ring_signature).hex()
 
     return tx
