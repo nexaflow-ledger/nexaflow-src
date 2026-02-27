@@ -240,6 +240,7 @@ cdef class Ledger:
     cdef public list pending_txns     # txns in current open ledger
     cdef public long long current_sequence
     cdef public double total_supply
+    cdef public double initial_supply   # snapshot of genesis supply (immutable)
     cdef public double total_burned     # cumulative fees & penalties burned
     cdef public double total_minted    # cumulative interest minted
     cdef public str genesis_account
@@ -255,6 +256,7 @@ cdef class Ledger:
         self.pending_txns = []
         self.current_sequence = 1
         self.total_supply = total_supply
+        self.initial_supply = total_supply
         self.total_burned = 0.0
         self.total_minted = 0.0
         self.genesis_account = genesis_account
@@ -691,6 +693,7 @@ cdef class Ledger:
             "closed_ledgers": len(self.closed_ledgers),
             "total_accounts": len(self.accounts),
             "total_supply": self.total_supply,
+            "initial_supply": self.initial_supply,
             "total_burned": self.total_burned,
             "total_minted": self.total_minted,
             "confidential_outputs": len(self.confidential_outputs),

@@ -26,7 +26,6 @@ from PyQt6.QtWidgets import (
 
 from nexaflow_gui.widgets import (
     make_primary_button,
-    make_success_button,
 )
 
 if TYPE_CHECKING:
@@ -81,28 +80,6 @@ class _ImportSeedDialog(QDialog):
         lay.addWidget(buttons)
 
 
-class _FundDialog(QDialog):
-    def __init__(self, address: str, parent: QWidget | None = None):
-        super().__init__(parent)
-        self.setWindowTitle("Fund Wallet")
-        self.setMinimumWidth(400)
-        lay = QVBoxLayout(self)
-
-        lay.addWidget(QLabel(f"Address: {address}"))
-
-        form = QFormLayout()
-        self.amount_edit = QLineEdit("1000")
-        form.addRow("Amount (NXF):", self.amount_edit)
-        lay.addLayout(form)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        lay.addWidget(buttons)
-
-
 # ── Main Tab ────────────────────────────────────────────────────────────
 
 class WalletTab(QWidget):
@@ -135,12 +112,11 @@ class WalletTab(QWidget):
 
         # Wallet table
         self._table = QTableWidget()
-        self._table.setColumnCount(4)
-        self._table.setHorizontalHeaderLabels(["Name", "Address", "Balance (NXF)", "Actions"])
+        self._table.setColumnCount(3)
+        self._table.setHorizontalHeaderLabels(["Name", "Address", "Balance (NXF)"])
         self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._table.setAlternatingRowColors(True)
         self._table.verticalHeader().setVisible(False)
@@ -183,15 +159,6 @@ class WalletTab(QWidget):
                 return
             self.backend.import_wallet_from_seed(seed, dlg.name_edit.text().strip())
 
-    def _on_fund(self, address: str):
-        dlg = _FundDialog(address, self)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            try:
-                amt = float(dlg.amount_edit.text())
-                self.backend.fund_wallet(address, amt)
-            except ValueError:
-                QMessageBox.warning(self, "Error", "Invalid amount.")
-
     def _on_selection(self, row: int, _col: int, _prev_row: int, _prev_col: int):
         wallets = self.backend.get_wallets()
         if 0 <= row < len(wallets):
@@ -229,11 +196,6 @@ class WalletTab(QWidget):
             bal_item = QTableWidgetItem(f"{w['balance']:,.6f}")
             bal_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self._table.setItem(i, 2, bal_item)
-
-            btn = make_success_button("Fund")
-            btn.setMinimumHeight(28)
-            btn.clicked.connect(lambda checked, a=w["address"]: self._on_fund(a))
-            self._table.setCellWidget(i, 3, btn)
 
     def get_selected_address(self) -> str | None:
         """Return the address of the currently selected wallet, if any."""

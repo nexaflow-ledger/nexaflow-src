@@ -12,7 +12,6 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPlainTextEdit,
-    QPushButton,
     QVBoxLayout,
     QWidget,
 )
@@ -83,10 +82,6 @@ class DashboardTab(QWidget):
         self._btn_consensus = make_primary_button("⚡ Run Consensus")
         qa_lay.addWidget(self._btn_consensus)
 
-        self._btn_fund = QPushButton("💰  Fund Selected Wallet")
-        self._btn_fund.setMinimumHeight(36)
-        qa_lay.addWidget(self._btn_fund)
-
         qa_lay.addStretch()
         mid.addWidget(qa_box, 1)
 
@@ -122,7 +117,6 @@ class DashboardTab(QWidget):
 
         self._btn_new_wallet.clicked.connect(self._create_wallet)
         self._btn_consensus.clicked.connect(self._run_consensus)
-        self._btn_fund.clicked.connect(self._fund_wallet)
 
     # ── Slots ───────────────────────────────────────────────────────────
 
@@ -167,8 +161,3 @@ class DashboardTab(QWidget):
 
     def _run_consensus(self):
         self.backend.run_consensus()
-
-    def _fund_wallet(self):
-        wallets = self.backend.get_wallets()
-        if wallets:
-            self.backend.fund_wallet(wallets[0]["address"], 5000.0)

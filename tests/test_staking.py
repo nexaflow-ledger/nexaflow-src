@@ -538,3 +538,73 @@ class TestLedgerStaking:
         ledger.apply_transaction(tx_u2)
         returned_late = ledger.get_balance("rStaker") - bal2
         assert returned_late > returned_early
+
+    def test_interest_minting_can_exceed_initial_supply(self):
+        """
+        Verify that staking interest is allowed to push total_supply
+        above initial_supply.  This is the *only* mechanism that may
+        increase supply; fees and penalties only ever decrease it.
+        """
+        from nexaflow_core.ledger import Ledger
+
+        initial = 10_000.0
+        ledger = Ledger(total_supply=initial, genesis_account="rGen")
+        ledger.create_account("rStaker", 9_500.0)
+
+        # Confirm initial_supply is recorded
+        assert ledger.initial_supply == initial
+        assert ledger.total_supply == initial
+
+        now = time.time()
+        # Stake a large amount at the highest tier (365 days, ~8 % APY base)
+        tx = _make_stake_tx("rStaker", 9_000, int(StakeTier.DAYS_365),
+                            tx_id="stk_exceed", ts=now)
+        result = ledger.apply_transaction(tx)
+        assert result == 0, f"Stake TX should succeed, got error {result}"
+
+        # Fast-forward the stake record so it is mature
+        record = ledger.staking_pool.stakes["stk_exceed"]
+        record.maturity_time = now - 1     # already past maturity
+        record.matured = False
+
+        # Close the ledger — interest will be minted
+        ledger.close_ledger()
+
+        # total_supply must now exceed the original initial_supply
+        assert ledger.total_supply > initial
+        assert ledger.total_supply > ledger.initial_supply
+
+        # The excess should equal minted minus burned (staking fee was burned)
+        excess = ledger.total_supply - initial
+        assert excess == pytest.approx(
+            ledger.total_minted - ledger.total_burned, rel=1e-9
+        )
+
+        # initial_supply must remain unchanged
+        assert ledger.initial_supply == initial
+
+        # Sanity: the staker received principal + interest
+        assert ledger.get_balance("rStaker") > 9_000.0
+
+    def test_fees_cannot_push_supply_above_initial(self):
+        """
+        Confirm that normal transactions (fees) only *decrease* supply,
+        never increase it.  Only interest minting may raise supply.
+        """
+        from nexaflow_core.ledger import Ledger
+        from nexaflow_core.transaction import create_payment
+
+        initial = 10_000.0
+        ledger = Ledger(total_supply=initial, genesis_account="rGen")
+        ledger.create_account("rAlice", 1_000.0)
+        ledger.create_account("rBob", 0.0)
+
+        tx = create_payment("rAlice", "rBob", 100.0, sequence=0)
+        tx.tx_id = "pay1"
+        ledger.apply_transaction(tx)
+
+        # Supply must be strictly less after the fee burn
+        assert ledger.total_supply < initial
+        assert ledger.total_burned > 0
+        # No interest minted
+        assert ledger.total_minted == 0.0

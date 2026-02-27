@@ -90,16 +90,23 @@ class NodeBackend(QObject):
     # ── Wallet operations ───────────────────────────────────────────────
 
     def create_wallet(self, name: str = "") -> dict:
-        """Create a new wallet and fund it from genesis."""
+        """Create a new wallet with zero balance.
+
+        The wallet must receive funds through a legitimate payment
+        from the genesis account or another funded account.
+        """
         wallet = Wallet.create()
         self.wallets[wallet.address] = wallet
         self.wallet_names[wallet.address] = name or f"Wallet-{len(self.wallets)}"
-        # Fund on all nodes
-        self.network.fund_account(wallet.address, 1000.0)
+        # Register the address on every validator ledger with 0 balance
+        for node in self.network.nodes.values():
+            if not node.ledger.account_exists(wallet.address):
+                node.ledger.create_account(wallet.address, 0.0)
+        bal = self._primary_node.ledger.get_balance(wallet.address)
         info = {
             "address": wallet.address,
             "name": self.wallet_names[wallet.address],
-            "balance": 1000.0,
+            "balance": bal,
             "public_key": wallet.public_key.hex(),
         }
         self.wallet_created.emit(info)
@@ -108,12 +115,18 @@ class NodeBackend(QObject):
         return info
 
     def import_wallet_from_seed(self, seed: str, name: str = "") -> dict:
-        """Import a wallet from a deterministic seed."""
+        """Import a wallet from a deterministic seed.
+
+        The wallet is registered with zero balance.  Funds must come
+        from a legitimate payment originating at the genesis account.
+        """
         wallet = Wallet.from_seed(seed)
         self.wallets[wallet.address] = wallet
         self.wallet_names[wallet.address] = name or f"Seed-{seed[:8]}"
-        if not self._primary_node.ledger.account_exists(wallet.address):
-            self.network.fund_account(wallet.address, 1000.0)
+        # Register with 0 balance if new
+        for node in self.network.nodes.values():
+            if not node.ledger.account_exists(wallet.address):
+                node.ledger.create_account(wallet.address, 0.0)
         bal = self._primary_node.ledger.get_balance(wallet.address)
         info = {
             "address": wallet.address,
@@ -138,14 +151,6 @@ class NodeBackend(QObject):
                 "public_key": w.public_key.hex(),
             })
         return result
-
-    def fund_wallet(self, address: str, amount: float) -> None:
-        """Fund a wallet from genesis."""
-        self.network.fund_account(address, amount)
-        bal = self._primary_node.ledger.get_balance(address)
-        self.balance_updated.emit(address, bal)
-        self.accounts_changed.emit()
-        self._log(f"Funded {address[:16]}… with {amount:,.2f} NXF")
 
     # ── Transaction operations ──────────────────────────────────────────
 
