@@ -5,7 +5,9 @@ exposes a signal-based API that Qt widgets can safely connect to.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
@@ -50,6 +52,11 @@ class NodeBackend(QObject):
     order_book_changed = pyqtSignal()              # DEX state changed
     wallet_created = pyqtSignal(dict)              # wallet info
     staking_changed = pyqtSignal()                 # any staking state change
+    p2p_status_updated = pyqtSignal(dict)            # real-time P2P snapshot
+    ledger_reset = pyqtSignal()                      # ledger data wiped
+
+    # Dev mode: enabled via NEXAFLOW_DEV_MODE=1 env var
+    DEV_MODE: bool = os.environ.get("NEXAFLOW_DEV_MODE", "0") == "1"
 
     def __init__(self, parent: QObject | None = None):
         super().__init__(parent)
@@ -74,17 +81,25 @@ class NodeBackend(QObject):
         self._poll_timer.setInterval(3000)
         self._poll_timer.timeout.connect(self._emit_status)
 
+        # Fast P2P status timer (1 s)
+        self._p2p_timer = QTimer(self)
+        self._p2p_timer.setInterval(1000)
+        self._p2p_timer.timeout.connect(self._emit_p2p_status)
+
         self._log("Backend initialised with 3 validators")
 
     # ── Lifecycle ───────────────────────────────────────────────────────
 
     def start(self) -> None:
         self._poll_timer.start()
+        self._p2p_timer.start()
         self._emit_status()
+        self._emit_p2p_status()
         self._log("Node network started")
 
     def stop(self) -> None:
         self._poll_timer.stop()
+        self._p2p_timer.stop()
         self._log("Node network stopped")
 
     # ── Wallet operations ───────────────────────────────────────────────
@@ -151,6 +166,44 @@ class NodeBackend(QObject):
                 "public_key": w.public_key.hex(),
             })
         return result
+
+    def export_wallet(self, address: str, passphrase: str) -> str:
+        """Export wallet as encrypted JSON string."""
+        wallet = self.wallets.get(address)
+        if not wallet:
+            raise ValueError(f"No wallet found for {address}")
+        data = wallet.export_encrypted(passphrase)
+        data["name"] = self.wallet_names.get(address, "")
+        return json.dumps(data, indent=2)
+
+    def get_wallet_keys(self, address: str) -> dict:
+        """Return raw key material for a wallet (DANGEROUS — guard in UI)."""
+        wallet = self.wallets.get(address)
+        if not wallet:
+            raise ValueError(f"No wallet found for {address}")
+        return wallet.to_dict()
+
+    def import_wallet_from_file(self, data_str: str, passphrase: str) -> dict:
+        """Import a wallet from an encrypted JSON export."""
+        data = json.loads(data_str)
+        wallet = Wallet.import_encrypted(data, passphrase)
+        name = data.get("name", "")
+        self.wallets[wallet.address] = wallet
+        self.wallet_names[wallet.address] = name or f"Import-{wallet.address[:8]}"
+        for node in self.network.nodes.values():
+            if not node.ledger.account_exists(wallet.address):
+                node.ledger.create_account(wallet.address, 0.0)
+        bal = self._primary_node.ledger.get_balance(wallet.address)
+        info = {
+            "address": wallet.address,
+            "name": self.wallet_names[wallet.address],
+            "balance": bal,
+            "public_key": wallet.public_key.hex(),
+        }
+        self.wallet_created.emit(info)
+        self.accounts_changed.emit()
+        self._log(f"Imported wallet from file → {wallet.address[:16]}…")
+        return info
 
     # ── Transaction operations ──────────────────────────────────────────
 
@@ -512,6 +565,60 @@ class NodeBackend(QObject):
             for node in self.network.nodes.values()
         ]
 
+    # ── Ledger reset (dev mode only) ─────────────────────────────────
+
+    def reset_ledger(self) -> None:
+        """Wipe all ledger state and reinitialise.  DEV MODE ONLY."""
+        if not self.DEV_MODE:
+            self.error_occurred.emit("Ledger reset is only available in dev mode")
+            return
+        # Rebuild network from scratch
+        old_supply = self.network.total_supply
+        self.network = Network(old_supply)
+        self.network.add_validator("validator-1")
+        self.network.add_validator("validator-2")
+        self.network.add_validator("validator-3")
+        self._primary_node = self.network.nodes["validator-1"]
+        # Re-register existing wallets with 0 balance
+        for addr in self.wallets:
+            for node in self.network.nodes.values():
+                if not node.ledger.account_exists(addr):
+                    node.ledger.create_account(addr, 0.0)
+        self.tx_history.clear()
+        self.order_book = OrderBook()
+        self.ledger_reset.emit()
+        self.accounts_changed.emit()
+        self.staking_changed.emit()
+        self.trust_lines_changed.emit()
+        self.order_book_changed.emit()
+        self._emit_status()
+        self._log("⚠ Ledger data reset (dev mode)")
+
+    # ── P2P status ──────────────────────────────────────────────────────
+
+    def get_p2p_status(self) -> dict:
+        """Build a snapshot of the P2P / network simulation state."""
+        nodes = self.network.nodes
+        total_tx_pool = sum(len(n.tx_pool) for n in nodes.values())
+        per_node = []
+        for nid, node in nodes.items():
+            per_node.append({
+                "node_id": nid,
+                "accounts": len(node.ledger.accounts),
+                "tx_pool": len(node.tx_pool),
+                "ledger_seq": node.ledger.current_sequence,
+                "closed_ledgers": len(node.ledger.closed_ledgers),
+                "unl_size": len(node.unl),
+                "peers": node.unl,  # in simulation, UNL = peers
+            })
+        return {
+            "mode": "local_simulation",
+            "validator_count": len(nodes),
+            "total_tx_pool": total_tx_pool,
+            "nodes": per_node,
+            "dev_mode": self.DEV_MODE,
+        }
+
     # ── Internal ────────────────────────────────────────────────────────
 
     def _emit_status(self) -> None:
@@ -524,6 +631,13 @@ class NodeBackend(QObject):
             )
             summary["validator_count"] = len(self.network.nodes)
             self.status_updated.emit(summary)
+        except Exception:
+            pass
+
+    def _emit_p2p_status(self) -> None:
+        """Push a P2P status snapshot every second."""
+        try:
+            self.p2p_status_updated.emit(self.get_p2p_status())
         except Exception:
             pass
 

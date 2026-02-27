@@ -83,6 +83,14 @@ class MainWindow(QMainWindow):
         )
         banner_lay.addWidget(self._banner_status)
 
+        if self.backend.DEV_MODE:
+            dev_badge = QLabel("  DEV MODE")
+            dev_badge.setStyleSheet(
+                "font-size: 11px; color: #f85149; font-weight: 800;"
+                "background: #3d1d20; border-radius: 4px; padding: 2px 8px;"
+            )
+            banner_lay.addWidget(dev_badge)
+
         root_layout.addWidget(banner)
 
         # ── Tab widget ──────────────────────────────────────────────────
@@ -145,6 +153,13 @@ class MainWindow(QMainWindow):
         consensus.triggered.connect(lambda: self.backend.run_consensus())
         node_menu.addAction(consensus)
 
+        # Dev-mode only: reset ledger
+        if self.backend.DEV_MODE:
+            node_menu.addSeparator()
+            reset_action = QAction("⚠ Reset All Ledger Data", self)
+            reset_action.triggered.connect(self._confirm_reset_ledger)
+            node_menu.addAction(reset_action)
+
         # Help
         help_menu = menu.addMenu("Help")
         about = QAction("About NexaFlow", self)
@@ -181,6 +196,25 @@ class MainWindow(QMainWindow):
             '<p><a href="https://github.com/nexaflow/nexaflow">'
             "github.com/nexaflow/nexaflow</a></p>",
         )
+
+    def _confirm_reset_ledger(self):
+        """Prompt for confirmation, then wipe all ledger data."""
+        reply = QMessageBox.critical(
+            self,
+            "Reset All Ledger Data",
+            "⚠  This will permanently delete ALL ledger data:\n\n"
+            "  •  All account balances\n"
+            "  •  All transaction history\n"
+            "  •  All trust lines and DEX orders\n"
+            "  •  All staking positions\n"
+            "  •  All closed ledger headers\n\n"
+            "Wallets will be preserved but balances will be zero.\n\n"
+            "This cannot be undone.  Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.backend.reset_ledger()
 
     def closeEvent(self, event):
         self.backend.stop()

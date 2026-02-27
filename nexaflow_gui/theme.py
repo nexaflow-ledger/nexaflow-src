@@ -88,7 +88,7 @@ def build_stylesheet() -> str:
         border: 1px solid {c["border"]};
         border-radius: 10px;
         margin-top: 16px;
-        padding: 20px 16px 16px 16px;
+        padding: 28px 16px 16px 16px;
         font-weight: 600;
         font-size: 14px;
         color: {c["text_primary"]};
@@ -140,7 +140,7 @@ def build_stylesheet() -> str:
         border: 1px solid {c["border"]};
         border-radius: 6px;
         padding: 8px 12px;
-        min-height: 20px;
+        min-height: 28px;
         color: {c["text_primary"]};
         font-size: 13px;
         font-family: {MONO_FONT};

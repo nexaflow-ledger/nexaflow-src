@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QScrollArea,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -55,6 +56,8 @@ class TransactionTab(QWidget):
 
         pay_box = QGroupBox("Send Payment")
         pay_form = QFormLayout(pay_box)
+        pay_form.setSpacing(14)
+        pay_form.setContentsMargins(16, 28, 16, 16)
 
         self._combo_from = QComboBox()
         self._combo_from.setMinimumHeight(34)
@@ -62,6 +65,7 @@ class TransactionTab(QWidget):
 
         self._edit_to = QLineEdit()
         self._edit_to.setPlaceholderText("Destination address (rXXX…)")
+        self._edit_to.setMinimumHeight(36)
         pay_form.addRow("To:", self._edit_to)
 
         self._spin_amount = QDoubleSpinBox()
@@ -79,13 +83,15 @@ class TransactionTab(QWidget):
 
         self._edit_issuer = QLineEdit()
         self._edit_issuer.setPlaceholderText("Issuer address (for IOUs only)")
+        self._edit_issuer.setMinimumHeight(36)
         pay_form.addRow("Issuer:", self._edit_issuer)
 
         self._edit_memo = QLineEdit()
         self._edit_memo.setPlaceholderText("Optional memo")
+        self._edit_memo.setMinimumHeight(36)
         pay_form.addRow("Memo:", self._edit_memo)
 
-        self._check_confidential = QCheckBox("Confidential Transaction (Monero-like privacy)")
+        self._check_confidential = QCheckBox("Confidential Transaction (shielded on-chain)")
         pay_form.addRow(self._check_confidential)
 
         self._btn_send = make_primary_button("🚀  Send Payment")
@@ -96,6 +102,8 @@ class TransactionTab(QWidget):
         # ── Trust Line ──────────────────────────────────────────────────
         trust_box = QGroupBox("Set Trust Line")
         trust_form = QFormLayout(trust_box)
+        trust_form.setSpacing(14)
+        trust_form.setContentsMargins(16, 28, 16, 16)
 
         self._combo_trust_from = QComboBox()
         self._combo_trust_from.setMinimumHeight(34)
@@ -103,10 +111,12 @@ class TransactionTab(QWidget):
 
         self._edit_trust_currency = QLineEdit()
         self._edit_trust_currency.setPlaceholderText("e.g. USD")
+        self._edit_trust_currency.setMinimumHeight(36)
         trust_form.addRow("Currency:", self._edit_trust_currency)
 
         self._edit_trust_issuer = QLineEdit()
         self._edit_trust_issuer.setPlaceholderText("Issuer address")
+        self._edit_trust_issuer.setMinimumHeight(36)
         trust_form.addRow("Issuer:", self._edit_trust_issuer)
 
         self._spin_trust_limit = QDoubleSpinBox()
@@ -121,7 +131,13 @@ class TransactionTab(QWidget):
 
         left_lay.addWidget(trust_box)
         left_lay.addStretch()
-        splitter.addWidget(left)
+
+        # Wrap left panel in a scroll area so forms never compress
+        scroll = QScrollArea()
+        scroll.setWidget(left)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        splitter.addWidget(scroll)
 
         # ── Right: TX History ───────────────────────────────────────────
         right = QWidget()

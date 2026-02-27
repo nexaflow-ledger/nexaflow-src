@@ -70,7 +70,7 @@ class _StakeDialog(QDialog):
         self.tier_combo = QComboBox()
         for t in tiers:
             self.tier_combo.addItem(
-                f"{t['name']}  —  {t['apy_pct']} APY"
+                f"{t['name']}  —  {t['effective_apy_pct']} APY"
                 + (f"  ({t['lock_days']}d lock)" if t["lock_days"] > 0 else "  (no lock)"),
                 t["tier"],
             )
