@@ -200,11 +200,34 @@ Or manually in separate terminals:
 ./scripts/start_node2.sh   # Terminal 2
 ```
 
+### Launch the Desktop GUI
+
+```bash
+python -m nexaflow_gui
+# or
+make gui
+```
+
 ### Run via the Installed CLI
 
 ```bash
 nexaflow-node --node-id alice --port 9001
 ```
+
+### CLI Options
+
+| Flag | Default | Env Var | Description |
+|------|---------|---------|-------------|
+| `--config` | — | — | Path to `nexaflow.toml` config file |
+| `--node-id` | `validator-1` | `NEXAFLOW_NODE_ID` | Unique node identifier |
+| `--host` | `0.0.0.0` | — | Listen host |
+| `--port` | `9001` | `NEXAFLOW_PORT` | P2P listen port |
+| `--peers` | `[]` | `NEXAFLOW_PEERS` | Seed peers (`host:port`, space-separated) |
+| `--fund-address` | — | `NEXAFLOW_FUND_ADDR` | Fund this address on startup |
+| `--fund-amount` | `0` | `NEXAFLOW_FUND_AMT` | Amount to fund |
+| `--no-cli` | `false` | — | Run headless (no interactive prompt) |
+
+Additional environment variables: `NEXAFLOW_API_PORT`, `NEXAFLOW_LOG_LEVEL`, `NEXAFLOW_API_KEY`.
 
 ---
 
@@ -232,6 +255,8 @@ python run_node.py --node-id alice --port 9001 --api-port 8080
 | GET | `/staking` | Global staking pool stats & tier info |
 | GET | `/health` | Deep health check |
 
+POST endpoints require API-key authentication (`X-API-Key` header). The server also enforces per-IP rate limiting (token-bucket), CORS, and a request body size cap — all configurable via TOML.
+
 ---
 
 ## Configuration
@@ -242,6 +267,19 @@ cp nexaflow.example.toml nexaflow.toml
 ```
 
 See [`nexaflow.example.toml`](nexaflow.example.toml) for all available options.
+
+### Configuration Sections
+
+| Section | Key Settings |
+|---------|-------------|
+| `[node]` | `node_id`, `host`, `port`, `peers` |
+| `[ledger]` | `total_supply`, `account_reserve`, `owner_reserve`, `min_fee` |
+| `[consensus]` | `interval_seconds`, thresholds, `validator_key_file`, `validator_pubkeys_dir` |
+| `[tls]` | `enabled`, `cert_file`, `key_file`, `ca_file`, `verify_peer` (mTLS) |
+| `[api]` | `enabled`, `host`, `port`, `api_key`, `rate_limit_rpm`, `cors_origins`, `max_body_bytes` |
+| `[storage]` | `enabled`, `backend` (sqlite), `path` |
+| `[genesis.accounts]` | Deterministic genesis account balances |
+| `[logging]` | `level`, `format` (human / json), optional `file` |
 
 ---
 
@@ -268,8 +306,8 @@ nexaflow-src/
 │   ├── staking.py          # Tiered staking pool with dynamic APY
 │   ├── config.py           # TOML configuration loader
 │   └── logging_config.py   # Structured logging
-├── nexaflow_gui/           # Optional desktop GUI
-├── tests/                  # Test suite (670+ tests)
+├── nexaflow_gui/           # PyQt6 desktop GUI (7 tabs)
+├── tests/                  # Test suite (940+ tests, 31 modules)
 ├── scripts/                # Node launch helpers
 ├── run_node.py             # CLI node runner
 ├── run_tests.py            # Python test runner (builds + runs all tests)
@@ -310,8 +348,19 @@ The `run_tests.py` script automatically detects and skips test modules with miss
 
 ## Docker
 
+The `docker-compose.yml` defines a **three-node** validator network:
+
+| Node | P2P Port | API Port | Node ID |
+|------|----------|----------|---------|
+| node1 | 9001 | 8080 | validator-1 |
+| node2 | 9002 | 8081 | validator-2 |
+| node3 | 9003 | 8082 | validator-3 |
+
 ```bash
-# Build and launch a two-node network
+# Build the Docker image
+make docker-build
+
+# Launch the three-node network
 make docker-up
 
 # Tear down
@@ -320,15 +369,47 @@ make docker-down
 
 ---
 
+## Desktop GUI
+
+NexaFlow ships with an optional **PyQt6-based desktop interface** (`nexaflow_gui`).
+
+```bash
+pip install -e ".[gui]"    # install the GUI extra
+python -m nexaflow_gui     # launch
+```
+
+The GUI provides seven tabs:
+
+| Tab | Description |
+|-----|-------------|
+| Dashboard | Network overview & key metrics |
+| Ledger | Ledger explorer |
+| Network | Peer connections & topology |
+| Staking | Stake management & pool stats |
+| Transactions | Send, inspect & track transactions |
+| Trust / DEX | Trust lines & order-book trading |
+| Wallets | Create, import & manage wallets |
+
+Window defaults to 1440 × 900 (min 1200 × 780) with a custom dark theme.
+
+---
+
 ## Development
 
 ```bash
 pip install -e ".[dev]"
 
-make lint        # ruff
-make typecheck   # mypy
-make format      # ruff format + fix
 make build       # rebuild Cython extensions
+make test        # run full test suite
+make coverage    # tests + coverage report
+make lint        # ruff linter
+make format      # ruff format + fix
+make typecheck   # mypy
+make bench       # run benchmark suite
+make gui         # launch the desktop GUI
+make clean       # remove build artefacts
+make install     # editable install with dev extras
+make help        # show all targets
 ```
 
 ---
