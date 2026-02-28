@@ -193,8 +193,8 @@ class MainWindow(QMainWindow):
             "<p>A cryptocurrency implementation with consensus, "
             "trust lines, DEX, and P2P networking.</p>"
             "<p>Built with Python, Cython, and PyQt6.</p>"
-            '<p><a href="https://github.com/nexaflow/nexaflow">'
-            "github.com/nexaflow/nexaflow</a></p>",
+            '<p><a href="https://github.com/nexaflow-ledger/nexaflow-src">'
+            "github.com/nexaflow-ledger/nexaflow-src</a></p>",
         )
 
     def _confirm_reset_ledger(self):

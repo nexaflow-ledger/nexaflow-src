@@ -1,0 +1,33 @@
+# NexaFlow Node Configuration for Exchange Development
+
+[node]
+node_id = "validator-1"
+host = "0.0.0.0"
+port = 9001
+peers = []
+
+[ledger]
+total_supply = 100_000_000_000.0
+account_reserve = 20.0
+owner_reserve = 5.0
+min_fee = 0.000010
+
+[consensus]
+interval_seconds = 10
+
+[api]
+enabled = true
+host = "127.0.0.1"
+port = 8080
+api_key = ""
+rate_limit_rpm = 300
+cors_origins = ["http://localhost:8000"]
+
+[storage]
+enabled = false
+
+[genesis.accounts]
+
+[logging]
+level = "INFO"
+format = "human"

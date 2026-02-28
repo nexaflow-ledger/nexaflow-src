@@ -67,10 +67,10 @@ setup(
     long_description_content_type="text/markdown",
     author="NexaFlow Contributors",
     license="MIT",
-    url="https://github.com/nexaflow/nexaflow",
+    url="https://github.com/nexaflow-ledger/nexaflow-src",
     project_urls={
-        "Bug Tracker": "https://github.com/nexaflow/nexaflow/issues",
-        "Changelog": "https://github.com/nexaflow/nexaflow/blob/main/CHANGELOG.md",
+        "Bug Tracker": "https://github.com/nexaflow-ledger/nexaflow-src/issues",
+        "Changelog": "https://github.com/nexaflow-ledger/nexaflow-src/blob/main/CHANGELOG.md",
     },
     packages=find_packages(exclude=["tests", "tests.*", "benchmarks", "benchmarks.*"]),
     ext_modules=ext_modules,

@@ -170,8 +170,8 @@ curl -X POST http://localhost:8080/tx/unstake \
 ### Install
 
 ```bash
-git clone https://github.com/nexaflow/nexaflow.git
-cd nexaflow
+git clone https://github.com/nexaflow-ledger/nexaflow-src.git
+cd nexaflow-src
 
 python -m venv .venv && source .venv/bin/activate
 

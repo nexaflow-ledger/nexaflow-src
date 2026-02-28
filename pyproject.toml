@@ -56,10 +56,10 @@ nexaflow-node = "run_node:main_sync"
 nexaflow-gui = "nexaflow_gui.main_window:main"
 
 [project.urls]
-Homepage = "https://github.com/nexaflow/nexaflow"
-Repository = "https://github.com/nexaflow/nexaflow"
-Issues = "https://github.com/nexaflow/nexaflow/issues"
-Changelog = "https://github.com/nexaflow/nexaflow/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/nexaflow-ledger/nexaflow-src"
+Repository = "https://github.com/nexaflow-ledger/nexaflow-src"
+Issues = "https://github.com/nexaflow-ledger/nexaflow-src/issues"
+Changelog = "https://github.com/nexaflow-ledger/nexaflow-src/blob/main/CHANGELOG.md"
 
 # ── Tool configuration ──────────────────────────────────────
 
