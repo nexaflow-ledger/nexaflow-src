@@ -247,7 +247,7 @@ class NodeBackend(QObject):
             if accepted:
                 self._log(
                     f"Payment {tx.tx_id[:12]}… | {from_address[:10]}… → "
-                    f"{destination[:10]}… | {amount:,.4f} {currency}"
+                    f"{destination[:10]}… | {amount:,.8f} {currency}"
                 )
             else:
                 msgs = [msg for _ok, _code, msg in results.values()]
@@ -289,7 +289,7 @@ class NodeBackend(QObject):
             self.tx_history.append(tx_dict)
             self.tx_submitted.emit(tx_dict)
             self.trust_lines_changed.emit()
-            self._log(f"TrustSet {currency}/{issuer[:10]}… limit={limit:,.2f}")
+            self._log(f"TrustSet {currency}/{issuer[:10]}… limit={limit:,.8f}")
             return tx_dict
 
         except Exception as exc:
@@ -442,7 +442,7 @@ class NodeBackend(QObject):
                 bal = self._primary_node.ledger.get_balance(address)
                 self.balance_updated.emit(address, bal)
                 self._log(
-                    f"Staked {amount:,.2f} NXF | {address[:16]}… | "
+                    f"Staked {amount:,.8f} NXF | {address[:16]}… | "
                     f"tier={tier_name} | tx={tx.tx_id[:12]}…"
                 )
             else:
@@ -494,7 +494,7 @@ class NodeBackend(QObject):
                 self.balance_updated.emit(address, bal)
                 self._log(
                     f"Cancelled stake {stake_id[:12]}… | "
-                    f"payout={record.payout_amount:,.4f} NXF"
+                    f"payout={record.payout_amount:,.8f} NXF"
                 )
             else:
                 msgs = [msg for _ok, _code, msg in results.values()]

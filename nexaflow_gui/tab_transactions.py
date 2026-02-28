@@ -251,7 +251,7 @@ class TransactionTab(QWidget):
 
             amt = tx.get("amount", {})
             if isinstance(amt, dict):
-                val = f"{amt.get('value', 0):,.4f} {amt.get('currency', '')}"
+                val = f"{amt.get('value', 0):,.8f} {amt.get('currency', '')}"
             else:
                 val = str(amt)
             self._tx_table.setItem(i, 4, QTableWidgetItem(val))

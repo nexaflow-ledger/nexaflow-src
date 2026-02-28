@@ -41,7 +41,7 @@ class LedgerConfig:
     total_supply: float = 100_000_000_000.0
     account_reserve: float = 20.0
     owner_reserve: float = 5.0
-    min_fee: float = 0.000010
+    min_fee: float = 0.00001000
 
 
 @dataclass

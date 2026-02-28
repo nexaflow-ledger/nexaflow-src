@@ -126,8 +126,8 @@ cdef class Amount:
 
     def __repr__(self):
         if self.is_native():
-            return f"{self.value:.6f} NXF"
-        return f"{self.value:.6f} {self.currency}/{self.issuer[:8]}..."
+            return f"{self.value:.8f} NXF"
+        return f"{self.value:.8f} {self.currency}/{self.issuer[:8]}..."
 
 
 # ===================================================================

@@ -57,7 +57,7 @@ class _StakeDialog(QDialog):
             addr = w["address"]
             bal = w.get("balance", 0.0)
             self.wallet_combo.addItem(
-                f"{name}  ({addr[:12]}…)  —  {bal:,.2f} NXF", addr
+                f"{name}  ({addr[:12]}…)  —  {bal:,.8f} NXF", addr
             )
         form.addRow("Wallet:", self.wallet_combo)
 
@@ -110,7 +110,7 @@ class _StakeDialog(QDialog):
         yearly = amount * apy
         monthly = yearly / 12
         self._info.setText(
-            f"Estimated rewards: ~{monthly:,.4f} NXF/month  |  ~{yearly:,.4f} NXF/year"
+            f"Estimated rewards: ~{monthly:,.8f} NXF/month  |  ~{yearly:,.8f} NXF/year"
         )
 
     def get_values(self) -> tuple[str, float, int]:
@@ -300,13 +300,13 @@ class StakingTab(QWidget):
     def _refresh(self) -> None:
         pool = self.backend.get_staking_pool_summary()
 
-        self._lbl_total_staked.setText(f"{pool.get('total_staked', 0):,.2f}")
+        self._lbl_total_staked.setText(f"{pool.get('total_staked', 0):,.8f}")
         self._lbl_active_stakes.setText(str(pool.get("active_stakes", 0)))
         self._lbl_pending_interest.setText(
-            f"{pool.get('total_pending_interest', 0):,.4f}"
+            f"{pool.get('total_pending_interest', 0):,.8f}"
         )
         self._lbl_total_paid.setText(
-            f"{pool.get('total_interest_paid', 0):,.4f}"
+            f"{pool.get('total_interest_paid', 0):,.8f}"
         )
 
         # Populate table with all active stakes from tracked wallets
@@ -321,12 +321,12 @@ class StakingTab(QWidget):
             self._table.setItem(i, 1, QTableWidgetItem(name))
 
             self._table.setItem(
-                i, 2, QTableWidgetItem(f"{s['amount']:,.2f}")
+                i, 2, QTableWidgetItem(f"{s['amount']:,.8f}")
             )
             self._table.setItem(i, 3, QTableWidgetItem(s["tier_name"]))
             self._table.setItem(i, 4, QTableWidgetItem(s["apy_pct"]))
             self._table.setItem(
-                i, 5, QTableWidgetItem(f"{s['total_interest']:,.4f}")
+                i, 5, QTableWidgetItem(f"{s['total_interest']:,.8f}")
             )
 
             if not s["is_active"]:

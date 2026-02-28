@@ -383,7 +383,7 @@ class WalletTab(QWidget):
                 f"Name:       {w['name']}\n"
                 f"Address:    {w['address']}\n"
                 f"Public Key: {w['public_key']}\n"
-                f"Balance:    {w['balance']:,.6f} NXF\n"
+                f"Balance:    {w['balance']:,.8f} NXF\n"
             )
             if acct:
                 detail += (
@@ -408,7 +408,7 @@ class WalletTab(QWidget):
             addr_item.setFont(_mono_font())
             self._table.setItem(i, 1, addr_item)
 
-            bal_item = QTableWidgetItem(f"{w['balance']:,.6f}")
+            bal_item = QTableWidgetItem(f"{w['balance']:,.8f}")
             bal_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self._table.setItem(i, 2, bal_item)
 

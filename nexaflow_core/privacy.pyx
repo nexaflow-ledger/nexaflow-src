@@ -109,13 +109,13 @@ cdef class PedersenCommitment:
         """
         Create C = v*G + b*H.
 
-        value    -- NXF amount (stored with 6 decimal places of precision)
+        value    -- NXF amount (stored with 8 decimal places of precision)
         blinding -- optional 32-byte scalar; generated randomly when omitted
         """
         if blinding is None:
             blinding = os.urandom(32)
 
-        v_int = int(round(value * 1_000_000))
+        v_int = int(round(value * 100_000_000))
         b_int = int.from_bytes(blinding, "big") % _ORDER
 
         c_point = v_int * _G + b_int * _H
@@ -454,7 +454,7 @@ cpdef object create_confidential_payment(
 
     # Range proof
     range_proof = RangeProof.prove(
-        int(round(amount * 1_000_000)), commitment.blinding
+        int(round(amount * 100_000_000)), commitment.blinding
     )
 
     # Transaction (amount field zeroed; real value is in commitment)

@@ -137,7 +137,7 @@ class LedgerTab(QWidget):
         supply = status.get("total_supply", 0)
         self._lbl_supply.setText(f"{supply:,.0f}")
         fees = status.get("total_burned", 0)
-        self._lbl_fees.setText(f"{fees:,.6f}")
+        self._lbl_fees.setText(f"{fees:,.8f}")
 
     def _refresh(self):
         self._refresh_accounts()
@@ -155,7 +155,7 @@ class LedgerTab(QWidget):
             self._acct_table.setItem(i, 0, QTableWidgetItem(addr))
 
             bal = acct.get("balance", 0)
-            bal_item = QTableWidgetItem(f"{bal:,.6f}")
+            bal_item = QTableWidgetItem(f"{bal:,.8f}")
             bal_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self._acct_table.setItem(i, 1, bal_item)
 

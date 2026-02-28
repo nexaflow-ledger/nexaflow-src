@@ -46,7 +46,7 @@ class Account:
         amount: float,
         currency: str = "NXF",
         issuer: str = "",
-        fee: float = 0.00001,
+        fee: float = 0.00001000,
         memo: str = "",
     ) -> Transaction:
         """Build and sign a Payment transaction."""
@@ -69,7 +69,7 @@ class Account:
         currency: str,
         issuer: str,
         limit: float,
-        fee: float = 0.00001,
+        fee: float = 0.00001000,
     ) -> Transaction:
         """Build and sign a TrustSet transaction."""
         tx = create_trust_set(self.address, currency, issuer, limit, fee)
@@ -81,7 +81,7 @@ class Account:
         self,
         taker_pays: Amount,
         taker_gets: Amount,
-        fee: float = 0.00001,
+        fee: float = 0.00001000,
     ) -> Transaction:
         """Build and sign an OfferCreate transaction."""
         tx = create_offer(self.address, taker_pays, taker_gets, fee)

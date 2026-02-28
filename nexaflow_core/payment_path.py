@@ -52,7 +52,7 @@ class PaymentPath:
         path_str = " -> ".join(
             f"{a[:8]}({c})" for a, c, _ in self.hops
         )
-        return f"Path({self.source[:8]} -> {path_str} -> {self.destination[:8]}, max={self.max_amount:.4f})"
+        return f"Path({self.source[:8]} -> {path_str} -> {self.destination[:8]}, max={self.max_amount:.8f})"
 
 
 class PathFinder:

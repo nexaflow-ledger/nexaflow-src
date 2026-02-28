@@ -124,7 +124,7 @@ class DashboardTab(QWidget):
         total_bal = sum(
             self.backend.get_balance(a) for a in self.backend.wallets
         )
-        self._lbl_balance.setText(f"{total_bal:,.2f}")
+        self._lbl_balance.setText(f"{total_bal:,.8f}")
         self._lbl_wallets.setText(str(status.get("wallet_count", 0)))
         self._lbl_ledger_seq.setText(str(status.get("ledger_sequence", 0)))
         self._lbl_tx_pool.setText(str(status.get("tx_pool", 0)))
@@ -136,8 +136,8 @@ class DashboardTab(QWidget):
             f"Total Accounts: {status.get('total_accounts', 0)}\n"
             f"Closed Ledgers: {status.get('closed_ledgers', 0)}\n"
             f"Total Supply: {status.get('total_supply', 0):,.0f} NXF\n"
-            f"Total Burned: {status.get('total_burned', 0):,.6f} NXF\n"
-            f"Total Minted (Interest): {status.get('total_minted', 0):,.6f} NXF"
+            f"Total Burned: {status.get('total_burned', 0):,.8f} NXF\n"
+            f"Total Minted (Interest): {status.get('total_minted', 0):,.8f} NXF"
         )
 
     def _on_log(self, msg: str):

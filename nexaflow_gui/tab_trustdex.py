@@ -153,12 +153,12 @@ class TrustDexTab(QWidget):
             self._tl_table.setItem(i, 2, QTableWidgetItem(truncate_addr(tl.get("issuer", ""))))
 
             bal = tl.get("balance", 0)
-            bal_item = QTableWidgetItem(f"{bal:,.6f}")
+            bal_item = QTableWidgetItem(f"{bal:,.8f}")
             bal_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self._tl_table.setItem(i, 3, bal_item)
 
             lim = tl.get("limit", 0)
-            lim_item = QTableWidgetItem(f"{lim:,.2f}")
+            lim_item = QTableWidgetItem(f"{lim:,.8f}")
             lim_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self._tl_table.setItem(i, 4, lim_item)
 
@@ -172,21 +172,21 @@ class TrustDexTab(QWidget):
         bids = snap.get("bids", [])
         self._bid_table.setRowCount(len(bids))
         for i, b in enumerate(bids):
-            self._bid_table.setItem(i, 0, QTableWidgetItem(f"{b.get('price', 0):,.6f}"))
-            self._bid_table.setItem(i, 1, QTableWidgetItem(f"{b.get('remaining', 0):,.4f}"))
+            self._bid_table.setItem(i, 0, QTableWidgetItem(f"{b.get('price', 0):,.8f}"))
+            self._bid_table.setItem(i, 1, QTableWidgetItem(f"{b.get('remaining', 0):,.8f}"))
             self._bid_table.setItem(i, 2, QTableWidgetItem(truncate_addr(b.get("account", ""))))
 
         asks = snap.get("asks", [])
         self._ask_table.setRowCount(len(asks))
         for i, a in enumerate(asks):
-            self._ask_table.setItem(i, 0, QTableWidgetItem(f"{a.get('price', 0):,.6f}"))
-            self._ask_table.setItem(i, 1, QTableWidgetItem(f"{a.get('remaining', 0):,.4f}"))
+            self._ask_table.setItem(i, 0, QTableWidgetItem(f"{a.get('price', 0):,.8f}"))
+            self._ask_table.setItem(i, 1, QTableWidgetItem(f"{a.get('remaining', 0):,.8f}"))
             self._ask_table.setItem(i, 2, QTableWidgetItem(truncate_addr(a.get("account", ""))))
 
         fills = self.backend.get_recent_fills()
         self._fills_table.setRowCount(len(fills))
         for i, f in enumerate(fills):
             self._fills_table.setItem(i, 0, QTableWidgetItem(f.get("pair", "")))
-            self._fills_table.setItem(i, 1, QTableWidgetItem(f"{f.get('price', 0):,.6f}"))
-            self._fills_table.setItem(i, 2, QTableWidgetItem(f"{f.get('quantity', 0):,.4f}"))
+            self._fills_table.setItem(i, 1, QTableWidgetItem(f"{f.get('price', 0):,.8f}"))
+            self._fills_table.setItem(i, 2, QTableWidgetItem(f"{f.get('quantity', 0):,.8f}"))
             self._fills_table.setItem(i, 3, QTableWidgetItem(str(f.get("timestamp", ""))))

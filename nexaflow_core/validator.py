@@ -28,8 +28,8 @@ from nexaflow_core.transaction import (
 )
 from nexaflow_core.staking import MIN_STAKE_AMOUNT, StakeTier, TIER_CONFIG
 
-# Minimum fee in NXF
-MIN_FEE = 0.000010
+# Minimum fee in NXF (8 decimal places)
+MIN_FEE = 0.00001000
 # Minimum reserve to keep an account alive
 ACCOUNT_RESERVE = 20.0
 OWNER_RESERVE = 5.0
