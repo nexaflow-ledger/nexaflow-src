@@ -499,6 +499,10 @@ cdef class Ledger:
             return 109
         if tt == 0:      # Payment
             result = self.apply_payment(tx)
+        elif tt == 7:    # OfferCreate
+            result = self.apply_offer_create(tx)
+        elif tt == 8:    # OfferCancel
+            result = self.apply_offer_cancel(tx)
         elif tt == 20:   # TrustSet
             result = self.apply_trust_set(tx)
         elif tt == 30:   # Stake
@@ -576,6 +580,74 @@ cdef class Ledger:
         self.pending_txns = []
         self.current_sequence += 1
         return header
+
+    # ---- DEX offers ----
+
+    cpdef int apply_offer_create(self, object tx):
+        """Apply an OfferCreate transaction.
+
+        Validates sequence, deducts fee, records the offer, and
+        increments the account sequence.
+        """
+        cdef str src = tx.account
+        cdef AccountEntry src_acc = self.accounts.get(src)
+        if src_acc is None:
+            return 101  # tecUNFUNDED
+
+        cdef double fee_val = tx.fee.value
+        if src_acc.balance < fee_val:
+            return 104  # tecINSUF_FEE
+        src_acc.balance -= fee_val
+        # Burn the fee
+        self.total_supply -= fee_val
+        self.total_burned += fee_val
+
+        if tx.sequence != 0 and tx.sequence != src_acc.sequence:
+            return 105  # tecBAD_SEQ
+
+        # Record the open offer on the account
+        src_acc.open_offers.append({
+            "taker_pays": tx.taker_pays,
+            "taker_gets": tx.taker_gets,
+            "tx_id": tx.tx_id,
+        })
+        src_acc.owner_count += 1
+
+        src_acc.sequence += 1
+        return 0  # tesSUCCESS
+
+    cpdef int apply_offer_cancel(self, object tx):
+        """Apply an OfferCancel transaction.
+
+        Validates sequence, deducts fee, removes the matching offer,
+        and increments the account sequence.
+        """
+        cdef str src = tx.account
+        cdef AccountEntry src_acc = self.accounts.get(src)
+        if src_acc is None:
+            return 101  # tecUNFUNDED
+
+        cdef double fee_val = tx.fee.value
+        if src_acc.balance < fee_val:
+            return 104  # tecINSUF_FEE
+        src_acc.balance -= fee_val
+        # Burn the fee
+        self.total_supply -= fee_val
+        self.total_burned += fee_val
+
+        if tx.sequence != 0 and tx.sequence != src_acc.sequence:
+            return 105  # tecBAD_SEQ
+
+        # Remove the offer (best-effort, no error if not found)
+        offer_id = tx.flags.get("offer_id", "") if tx.flags else ""
+        if offer_id:
+            src_acc.open_offers = [
+                o for o in src_acc.open_offers if o.get("tx_id") != offer_id
+            ]
+            src_acc.owner_count = max(0, src_acc.owner_count - 1)
+
+        src_acc.sequence += 1
+        return 0  # tesSUCCESS
 
     # ---- staking: apply / cancel / maturity ----
 
