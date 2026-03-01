@@ -5,7 +5,8 @@
 node_id = "validator-1"
 host = "0.0.0.0"
 port = 9001
-peers = []                # e.g. ["127.0.0.1:9002", "127.0.0.1:9003"]
+peers = []                # e.g. ["127.0.0.1:9002", "192.168.1.3:9001"]
+                          # each peer = one other validator in the network
 
 [ledger]
 total_supply = 100_000_000_000.0

@@ -738,7 +738,8 @@ async def interactive_cli(node: NexaFlowNode):
 
 def parse_args():
     p = argparse.ArgumentParser(description="NexaFlow Validator Node")
-    p.add_argument("--config", default=None, help="Path to nexaflow.toml config file")
+    p.add_argument("--config", default="nexaflow.toml",
+                    help="Path to TOML config file (default: nexaflow.toml)")
     p.add_argument("--node-id", default=os.environ.get("NEXAFLOW_NODE_ID", "validator-1"),
                     help="Unique node identifier")
     p.add_argument("--host", default="0.0.0.0", help="Listen host")

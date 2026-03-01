@@ -13,6 +13,7 @@ import os
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
 # ── NexaFlow imports ────────────────────────────────────────────────────
+from nexaflow_core.config import load_config
 from nexaflow_core.network import Network, ValidatorNode
 from nexaflow_core.order_book import OrderBook
 from nexaflow_core.staking import TIER_NAMES, StakeTier
@@ -62,20 +63,27 @@ class NodeBackend(QObject):
     def __init__(self, parent: QObject | None = None):
         super().__init__(parent)
 
+        # ── Load configuration ──────────────────────────────────────────
+        self.config = load_config("nexaflow.toml")
+
         # ── Core objects ────────────────────────────────────────────────
-        self.network = Network()
+        genesis_accounts = self.config.genesis.accounts or None
+        self.network = Network(
+            total_supply=self.config.ledger.total_supply,
+            genesis_accounts=genesis_accounts,
+        )
         self.order_book = OrderBook()
         self.wallets: dict[str, Wallet] = {}       # address → Wallet
         self.wallet_names: dict[str, str] = {}     # address → friendly name
         self.tx_history: list[dict] = []
 
-        # Add a default validator so consensus works
-        self.network.add_validator("validator-1")
-        self.network.add_validator("validator-2")
-        self.network.add_validator("validator-3")
+        # Derive validator set: this node + one per peer
+        self._validators = self._build_validator_list()
+        for vid in self._validators:
+            self.network.add_validator(vid)
 
-        # Primary node reference
-        self._primary_node: ValidatorNode = self.network.nodes["validator-1"]
+        # Primary node reference (this node is first)
+        self._primary_node: ValidatorNode = self.network.nodes[self._validators[0]]
 
         # Poll timer for periodic status refresh
         self._poll_timer = QTimer(self)
@@ -87,8 +95,20 @@ class NodeBackend(QObject):
         self._p2p_timer.setInterval(1000)
         self._p2p_timer.timeout.connect(self._emit_p2p_status)
 
-        self._log("Backend initialised with 3 validators")
-
+        self._log(f"Backend initialised with {len(self._validators)} validator(s): {', '.join(self._validators)}")
+    def _build_validator_list(self) -> list[str]:
+        """Derive the validator set from config: this node + one per peer."""
+        validators = [self.config.node.node_id]
+        for i, peer in enumerate(self.config.node.peers, start=2):
+            # Use hostname from peer address as ID, fallback to peer-N
+            host = peer.rsplit(":", 1)[0] if ":" in peer else peer
+            # If it looks like a raw IP or generic hostname, generate a name
+            if host.replace(".", "").isdigit() or host in ("localhost", "127.0.0.1", "0.0.0.0"):
+                vid = f"validator-{i}"
+            else:
+                vid = host
+            validators.append(vid)
+        return validators
     # ── Lifecycle ───────────────────────────────────────────────────────
 
     def start(self) -> None:
@@ -312,6 +332,19 @@ class NodeBackend(QObject):
 
     # ── Transaction operations ──────────────────────────────────────────
 
+    def _account_seq(self, address: str) -> int:
+        """Return the current sequence number for *address* from the ledger."""
+        acc = self._primary_node.ledger.get_account(address)
+        return acc.sequence if acc is not None else 1
+
+    def _apply_immediately(self) -> None:
+        """Run a consensus round so that pending TXs are applied right away.
+
+        In the GUI simulation there is no async consensus loop, so we
+        trigger it after every broadcast to keep the ledger up-to-date.
+        """
+        self.run_consensus()
+
     def send_payment(
         self,
         from_address: str,
@@ -328,6 +361,7 @@ class NodeBackend(QObject):
             return None
 
         try:
+            seq = self._account_seq(from_address)
             tx = create_payment(
                 account=from_address,
                 destination=destination,
@@ -335,14 +369,17 @@ class NodeBackend(QObject):
                 currency=currency,
                 issuer=issuer,
                 memo=memo,
-                sequence=wallet.sequence,
+                sequence=seq,
             )
             wallet.sign_transaction(tx)
-            wallet.sequence += 1  # type: ignore[operator]
 
             # Broadcast to all validators
             results = self.network.broadcast_transaction(tx)
             accepted = any(ok for ok, _code, _msg in results.values())
+
+            # Apply immediately so the ledger sequence stays in sync
+            if accepted:
+                self._apply_immediately()
 
             tx_dict = tx.to_dict()
             tx_dict["_accepted"] = accepted
@@ -379,17 +416,18 @@ class NodeBackend(QObject):
             return None
 
         try:
+            seq = self._account_seq(from_address)
             tx = create_trust_set(
                 account=from_address,
                 currency=currency,
                 issuer=issuer,
                 limit=limit,
-                sequence=wallet.sequence,
+                sequence=seq,
             )
             wallet.sign_transaction(tx)
-            wallet.sequence += 1  # type: ignore[operator]
 
             self.network.broadcast_transaction(tx)
+            self._apply_immediately()
             tx_dict = tx.to_dict()
             self.tx_history.append(tx_dict)
             self.tx_submitted.emit(tx_dict)
@@ -420,16 +458,17 @@ class NodeBackend(QObject):
         try:
             taker_pays = Amount(pays_amount, pays_currency, pays_issuer)
             taker_gets = Amount(gets_amount, gets_currency, gets_issuer)
+            seq = self._account_seq(from_address)
             tx = create_offer(
                 account=from_address,
                 taker_pays=taker_pays,
                 taker_gets=taker_gets,
-                sequence=wallet.sequence,
+                sequence=seq,
             )
             wallet.sign_transaction(tx)
-            wallet.sequence += 1  # type: ignore[operator]
 
             self.network.broadcast_transaction(tx)
+            self._apply_immediately()
             fills = self.order_book.process_offer_create(tx)
 
             tx_dict = tx.to_dict()
@@ -528,19 +567,20 @@ class NodeBackend(QObject):
             return None
 
         try:
+            seq = self._account_seq(address)
             tx = create_stake(
                 account=address,
                 amount=amount,
                 stake_tier=tier,
-                sequence=wallet.sequence,
+                sequence=seq,
             )
             wallet.sign_transaction(tx)
-            wallet.sequence += 1
 
             results = self.network.broadcast_transaction(tx)
             accepted = any(ok for ok, _code, _msg in results.values())
 
             if accepted:
+                self._apply_immediately()
                 tier_name = TIER_NAMES.get(StakeTier(tier), "Unknown")
                 self.staking_changed.emit()
                 self.accounts_changed.emit()
@@ -581,18 +621,19 @@ class NodeBackend(QObject):
             return None
 
         try:
+            seq = self._account_seq(address)
             tx = create_unstake(
                 account=address,
                 stake_id=stake_id,
-                sequence=wallet.sequence,
+                sequence=seq,
             )
             wallet.sign_transaction(tx)
-            wallet.sequence += 1
 
             results = self.network.broadcast_transaction(tx)
             accepted = any(ok for ok, _code, _msg in results.values())
 
             if accepted:
+                self._apply_immediately()
                 self.staking_changed.emit()
                 self.accounts_changed.emit()
                 bal = self._primary_node.ledger.get_balance(address)
@@ -670,6 +711,145 @@ class NodeBackend(QObject):
             for node in self.network.nodes.values()
         ]
 
+    # ── Cache management ────────────────────────────────────────────
+
+    def clear_cache(self) -> str:
+        """Remove on-disk caches and in-memory transient state.
+
+        Clears:
+          - __pycache__ directories
+          - .pytest_cache / .mypy_cache directories
+          - In-memory transaction history
+          - In-memory order book
+
+        Does NOT touch wallet keys, ledger state, or balances.
+        Returns a human-readable summary.
+        """
+        import shutil
+        from pathlib import Path
+
+        project_root = Path(__file__).resolve().parent.parent
+        removed: list[str] = []
+
+        # Disk caches
+        for pattern, label in [
+            ("**/__pycache__", "__pycache__"),
+            (".pytest_cache", ".pytest_cache"),
+            (".mypy_cache", ".mypy_cache"),
+        ]:
+            for p in project_root.glob(pattern):
+                if p.is_dir():
+                    shutil.rmtree(p, ignore_errors=True)
+                    removed.append(str(p.relative_to(project_root)))
+
+        # In-memory caches
+        mem_cleared: list[str] = []
+        if self.tx_history:
+            count = len(self.tx_history)
+            self.tx_history.clear()
+            mem_cleared.append(f"{count} transaction(s) from history")
+
+        if self.order_book._orders:
+            self.order_book = OrderBook()
+            self.order_book_changed.emit()
+            mem_cleared.append("order book")
+
+        self._log(
+            f"Cache cleared: {len(removed)} dir(s) on disk, "
+            f"{len(mem_cleared)} in-memory cache(s)"
+        )
+
+        lines = []
+        if removed:
+            lines.append(f"Removed {len(removed)} cache director{'y' if len(removed) == 1 else 'ies'}:")
+            for r in removed[:15]:
+                lines.append(f"  • {r}")
+            if len(removed) > 15:
+                lines.append(f"  … and {len(removed) - 15} more")
+        else:
+            lines.append("No on-disk caches found.")
+        if mem_cleared:
+            lines.append("")
+            lines.append("Cleared in-memory:")
+            for m in mem_cleared:
+                lines.append(f"  • {m}")
+        else:
+            lines.append("No in-memory caches to clear.")
+
+        return "\n".join(lines)
+
+    # ── Full data wipe ──────────────────────────────────────────────────
+
+    def clear_all_data(self) -> str:
+        """Wipe ALL data: ledger, wallets, tx history, caches, on-disk files.
+
+        Returns a human-readable summary.
+        """
+        import shutil
+        from pathlib import Path
+
+        project_root = Path(__file__).resolve().parent.parent
+        removed_dirs: list[str] = []
+        removed_files: list[str] = []
+
+        # 1. On-disk caches
+        for pattern in ["**/__pycache__", ".pytest_cache", ".mypy_cache"]:
+            for p in project_root.glob(pattern):
+                if p.is_dir():
+                    shutil.rmtree(p, ignore_errors=True)
+                    removed_dirs.append(str(p.relative_to(project_root)))
+
+        # 2. On-disk data directory (wallet.json, SQLite DB)
+        data_dir = project_root / "data"
+        if data_dir.is_dir():
+            for f in data_dir.iterdir():
+                if f.is_file():
+                    removed_files.append(str(f.relative_to(project_root)))
+                    f.unlink()
+            removed_dirs.append("data/ (contents)")
+
+        # 3. On-disk certs directory (auto-generated keys)
+        certs_dir = project_root / "certs"
+        if certs_dir.is_dir():
+            shutil.rmtree(certs_dir, ignore_errors=True)
+            removed_dirs.append("certs/")
+
+        # 4. Rebuild network from scratch
+        old_supply = self.network.total_supply
+        genesis_accounts = self.config.genesis.accounts or None
+        self.network = Network(old_supply, genesis_accounts=genesis_accounts)
+        for vid in self._validators:
+            self.network.add_validator(vid)
+        self._primary_node = self.network.nodes[self._validators[0]]
+
+        # 5. Clear all in-memory state
+        self.wallets.clear()
+        self.wallet_names.clear()
+        self.tx_history.clear()
+        self.order_book = OrderBook()
+
+        # 6. Emit signals so every tab refreshes
+        self.ledger_reset.emit()
+        self.accounts_changed.emit()
+        self.staking_changed.emit()
+        self.trust_lines_changed.emit()
+        self.order_book_changed.emit()
+        self._emit_status()
+
+        self._log("\u26a0 ALL data cleared (wallets, ledger, caches, keys)")
+
+        lines = ["All data has been cleared:\n"]
+        lines.append(f"  \u2022  {len(self.wallets)} wallets remaining (was purged)")
+        lines.append("  \u2022  Ledger reset to empty")
+        lines.append("  \u2022  Transaction history cleared")
+        lines.append("  \u2022  Order book cleared")
+        if removed_files:
+            lines.append(f"  \u2022  {len(removed_files)} file(s) deleted from disk")
+        if removed_dirs:
+            lines.append(f"  \u2022  {len(removed_dirs)} director(ies) removed")
+        lines.append("\nYou will need to create a new wallet to continue.")
+        return "\n".join(lines)
+
     # ── Ledger reset (dev mode only) ─────────────────────────────────
 
     def reset_ledger(self) -> None:
@@ -679,11 +859,11 @@ class NodeBackend(QObject):
             return
         # Rebuild network from scratch
         old_supply = self.network.total_supply
-        self.network = Network(old_supply)
-        self.network.add_validator("validator-1")
-        self.network.add_validator("validator-2")
-        self.network.add_validator("validator-3")
-        self._primary_node = self.network.nodes["validator-1"]
+        genesis_accounts = self.config.genesis.accounts or None
+        self.network = Network(old_supply, genesis_accounts=genesis_accounts)
+        for vid in self._validators:
+            self.network.add_validator(vid)
+        self._primary_node = self.network.nodes[self._validators[0]]
         # Re-register existing wallets with 0 balance
         for addr in self.wallets:
             for node in self.network.nodes.values():

@@ -101,19 +101,42 @@ class Network:
     and orchestrates consensus rounds.
     """
 
-    def __init__(self, total_supply: float = 100_000_000_000.0):
+    def __init__(
+        self,
+        total_supply: float = 100_000_000_000.0,
+        genesis_accounts: dict[str, float] | None = None,
+    ):
         self.nodes: dict[str, ValidatorNode] = {}
         self.total_supply = total_supply
+        # Address → balance mapping from config.  When empty the Ledger
+        # falls back to its built-in default ("nGenesisNXF" with full supply).
+        self._genesis_accounts = genesis_accounts or {}
         self._base_ledger: Ledger | None = None
+
+    def _make_ledger(self) -> Ledger:
+        """Create a fresh ledger initialised from the genesis config."""
+        if self._genesis_accounts:
+            # Use the first entry as the Ledger's primary genesis account.
+            primary_addr = next(iter(self._genesis_accounts))
+            primary_bal = self._genesis_accounts[primary_addr]
+            ledger = Ledger(primary_bal, primary_addr)
+            # Add any remaining genesis accounts.
+            for addr, bal in self._genesis_accounts.items():
+                if addr != primary_addr:
+                    acc = ledger.create_account(addr, bal)
+                    acc.is_gateway = True
+        else:
+            ledger = Ledger(self.total_supply)
+        return ledger
 
     def add_validator(self, node_id: str) -> ValidatorNode:
         """Add a new validator node to the network."""
         if self._base_ledger is None:
-            self._base_ledger = Ledger(self.total_supply)
+            self._base_ledger = self._make_ledger()
 
         # Each node gets a deep copy of the ledger so they're independent
-        ledger = Ledger(self.total_supply)
-        # Copy genesis state
+        ledger = self._make_ledger()
+        # Copy any extra state that may have been added to the base ledger
         for addr, acc in self._base_ledger.accounts.items():
             if addr not in ledger.accounts:
                 ledger.create_account(addr, acc.balance)

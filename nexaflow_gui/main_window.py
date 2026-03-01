@@ -160,6 +160,17 @@ class MainWindow(QMainWindow):
             reset_action.triggered.connect(self._confirm_reset_ledger)
             node_menu.addAction(reset_action)
 
+        # Tools
+        tools_menu = menu.addMenu("Tools")
+        clear_cache_action = QAction("Clear All Cache", self)
+        clear_cache_action.triggered.connect(self._confirm_clear_cache)
+        tools_menu.addAction(clear_cache_action)
+
+        tools_menu.addSeparator()
+        clear_all_action = QAction("\u26a0 Clear All Data", self)
+        clear_all_action.triggered.connect(self._confirm_clear_all_data)
+        tools_menu.addAction(clear_all_action)
+
         # Help
         help_menu = menu.addMenu("Help")
         about = QAction("About NexaFlow", self)
@@ -196,6 +207,58 @@ class MainWindow(QMainWindow):
             '<p><a href="https://github.com/nexaflow-ledger/nexaflow-src">'
             "github.com/nexaflow-ledger/nexaflow-src</a></p>",
         )
+
+    def _confirm_clear_cache(self):
+        """Prompt for confirmation, then clear all caches."""
+        reply = QMessageBox.question(
+            self,
+            "Clear All Cache",
+            "This will remove:\n\n"
+            "  •  Python byte-code caches (__pycache__)\n"
+            "  •  Test caches (.pytest_cache)\n"
+            "  •  Type-check caches (.mypy_cache)\n"
+            "  •  In-memory transaction history\n"
+            "  •  In-memory order book state\n\n"
+            "Wallets, ledger data, and balances are NOT affected.\n\n"
+            "Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            summary = self.backend.clear_cache()
+            QMessageBox.information(self, "Cache Cleared", summary)
+
+    def _confirm_clear_all_data(self):
+        """Prompt for confirmation, then wipe ALL data."""
+        reply = QMessageBox.critical(
+            self,
+            "\u26a0 Clear All Data",
+            "\u26a0  This will PERMANENTLY DELETE everything:\n\n"
+            "  \u2022  All wallets and private keys\n"
+            "  \u2022  All account balances\n"
+            "  \u2022  All transaction history\n"
+            "  \u2022  All trust lines and DEX orders\n"
+            "  \u2022  All staking positions\n"
+            "  \u2022  All validator certificates\n"
+            "  \u2022  All caches and database files\n\n"
+            "This cannot be undone.  Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            # Double-confirm for safety
+            reply2 = QMessageBox.warning(
+                self,
+                "Final Confirmation",
+                "Are you absolutely sure?\n\n"
+                "All wallets and keys will be permanently lost\n"
+                "unless you have a backup.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply2 == QMessageBox.StandardButton.Yes:
+                summary = self.backend.clear_all_data()
+                QMessageBox.information(self, "Data Cleared", summary)
 
     def _confirm_reset_ledger(self):
         """Prompt for confirmation, then wipe all ledger data."""
