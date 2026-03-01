@@ -20,6 +20,7 @@ __all__ = [
     "payment_path",
     "precision",
     "staking",
+    "sync",
     "transaction",
     "trust_line",
     "validator",

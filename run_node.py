@@ -37,6 +37,7 @@ from nexaflow_core.config import load_config  # noqa: E402
 from nexaflow_core.ledger import Ledger  # noqa: E402
 from nexaflow_core.p2p import P2PNode  # noqa: E402
 from nexaflow_core.storage import LedgerStore  # noqa: E402
+from nexaflow_core.sync import LedgerSyncManager, STATUS_TIMEOUT, DATA_TIMEOUT  # noqa: E402
 from nexaflow_core.transaction import Amount, Transaction, create_payment  # noqa: E402
 from nexaflow_core.trust_line import TrustGraph  # noqa: E402
 from nexaflow_core.validator import TransactionValidator  # noqa: E402
@@ -89,6 +90,9 @@ class NexaFlowNode:
         # Persistence
         self.store: LedgerStore | None = None
 
+        # Efficient ledger sync manager
+        self.sync_manager = LedgerSyncManager(self.p2p, self.ledger)
+
         # Transaction pool (tx_id -> tx dict from network, or Transaction obj)
         self.tx_pool: dict[str, dict] = {}
         self.tx_objects: dict[str, Transaction] = {}
@@ -108,8 +112,15 @@ class NexaFlowNode:
         self.p2p.on_consensus_result = self._on_consensus_result
         self.p2p.on_peer_connected = self._on_peer_connected
         self.p2p.on_peer_disconnected = self._on_peer_disconnected
-        self.p2p.on_ledger_request = self._on_ledger_request
-        self.p2p.on_ledger_response = self._on_ledger_response
+        self.p2p.on_ledger_request = self.sync_manager.handle_ledger_request
+        self.p2p.on_ledger_response = self.sync_manager.handle_ledger_response
+
+        # Efficient sync protocol callbacks
+        self.p2p.on_sync_status_req = self.sync_manager.handle_sync_status_req
+        self.p2p.on_sync_status_res = self.sync_manager.handle_sync_status_res
+        self.p2p.on_sync_delta_req = self.sync_manager.handle_sync_delta_req
+        self.p2p.on_sync_snap_req = self.sync_manager.handle_sync_snap_req
+        self.p2p.on_sync_data_res = self.sync_manager.handle_sync_data_res
 
     # ---- lifecycle ----
 
@@ -153,7 +164,8 @@ class NexaFlowNode:
 
         # Start consensus timer
         self._bg_tasks.append(asyncio.create_task(self._consensus_loop()))
-
+        # Start the ledger sync manager
+        await self.sync_manager.start()
         # ── API server ───────────────────────────────────────────
         if self.config and self.config.api.enabled:
             from nexaflow_core.api import APIServer
@@ -175,6 +187,7 @@ class NexaFlowNode:
             logger.info("Saving ledger state to database...")
             self.store.snapshot_ledger(self.ledger)
             self.store.close()
+        await self.sync_manager.stop()
         if self._api is not None:
             await self._api.stop()
         await self.p2p.stop()
@@ -196,8 +209,8 @@ class NexaFlowNode:
 
     def _on_peer_connected(self, peer_id: str):
         logger.info(f"Peer connected: {peer_id}")
-        # Request ledger state from new peer for catch-up sync
-        asyncio.ensure_future(self.p2p.request_ledger(peer_id))
+        # Trigger an efficient sync cycle (status → delta/snap as needed)
+        asyncio.ensure_future(self.sync_manager.request_sync())
 
     def _on_peer_disconnected(self, peer_id: str):
         logger.info(f"Peer disconnected: {peer_id}")
@@ -236,72 +249,6 @@ class NexaFlowNode:
     def _on_consensus_result(self, result_data: dict, from_peer: str):
         """Handle a consensus result from a peer (for catch-up)."""
         logger.info(f"Received consensus result from {from_peer}")
-
-    def _on_ledger_request(self, from_peer: str) -> dict | None:
-        """Serve our ledger state to a peer that needs to sync."""
-        logger.info(f"Serving ledger state to {from_peer}")
-        summary = self.ledger.get_state_summary()
-        accounts = {}
-        for addr, acc in self.ledger.accounts.items():
-            accounts[addr] = {
-                "balance": acc.balance,
-                "sequence": acc.sequence,
-                "is_gateway": bool(acc.is_gateway),
-            }
-        closed = []
-        for h in self.ledger.closed_ledgers:
-            closed.append({
-                "sequence": h.sequence,
-                "hash": h.hash,
-                "previous_hash": h.previous_hash,
-                "timestamp": h.timestamp,
-                "transaction_count": h.transaction_count,
-            })
-        return {
-            "summary": summary,
-            "accounts": accounts,
-            "closed_ledgers": closed,
-            "current_sequence": self.ledger.current_sequence,
-        }
-
-    def _on_ledger_response(self, payload: dict, from_peer: str):
-        """Apply ledger state received from a peer (catch-up sync)."""
-        peer_seq = payload.get("current_sequence", 0)
-        if peer_seq <= self.ledger.current_sequence:
-            logger.info(f"Peer {from_peer} ledger seq {peer_seq} not ahead, ignoring")
-            return
-
-        logger.info(
-            f"Syncing ledger from {from_peer}: peer seq={peer_seq}, "
-            f"ours={self.ledger.current_sequence}"
-        )
-        # Apply accounts
-        for addr, info in payload.get("accounts", {}).items():
-            if not self.ledger.account_exists(addr):
-                self.ledger.create_account(addr, info.get("balance", 0.0))
-            else:
-                acc = self.ledger.get_account(addr)
-                if acc:
-                    acc.balance = info.get("balance", acc.balance)
-                    acc.sequence = info.get("sequence", acc.sequence)
-
-        # Apply closed ledger headers
-        from nexaflow_core.ledger import LedgerHeader
-        our_seqs = {h.sequence for h in self.ledger.closed_ledgers}
-        for hdr in payload.get("closed_ledgers", []):
-            if hdr["sequence"] not in our_seqs:
-                header = LedgerHeader(
-                    hdr["sequence"], hdr["hash"], hdr.get("previous_hash", ""),
-                    hdr.get("timestamp", 0.0), hdr.get("transaction_count", 0),
-                    0.0, 0,
-                )
-                self.ledger.closed_ledgers.append(header)
-
-        self.ledger.closed_ledgers.sort(key=lambda h: h.sequence)
-        self.ledger.current_sequence = max(
-            self.ledger.current_sequence, peer_seq
-        )
-        logger.info(f"Ledger synced to sequence {self.ledger.current_sequence}")
 
     # ---- transaction creation ----
 
@@ -482,6 +429,7 @@ class NexaFlowNode:
             "ledger": self.ledger.get_state_summary(),
             "balance": self.ledger.get_balance(self.wallet.address),
             "tx_pool": len(self.tx_pool),
+            "sync": self.sync_manager.status(),
             "p2p": self.p2p.status(),
         }
 
@@ -504,6 +452,7 @@ async def interactive_cli(node: NexaFlowNode):
 ║  send <to> <amt> - Send NXF payment                          ║
 ║  peers           - List connected peers                      ║
 ║  ledger          - Show ledger info                           ║
+║  sync            - Trigger ledger sync with peers             ║
 ║  consensus       - Trigger consensus now                      ║
 ║  fund <addr> <n> - Fund address from genesis (test)           ║
 ║  help            - Show this help                             ║
@@ -560,6 +509,18 @@ async def interactive_cli(node: NexaFlowNode):
                 if node.ledger.closed_ledgers:
                     last = node.ledger.closed_ledgers[-1]
                     print(f"  Last closed: seq={last.sequence} hash={last.hash[:16]}...")
+
+            elif cmd == "sync":
+                print("  Triggering ledger sync...")
+                ok = await node.sync_manager.request_sync()
+                if ok:
+                    # Give it a moment to complete
+                    await asyncio.sleep(DATA_TIMEOUT + STATUS_TIMEOUT + 1)
+                    ss = node.sync_manager.status()
+                    print(f"  Sync complete. Ledger seq={ss['local_sequence']}")
+                    print(json.dumps(ss, indent=2, default=str))
+                else:
+                    print("  Sync already in progress or on cooldown")
 
             elif cmd == "consensus":
                 await node.run_consensus()

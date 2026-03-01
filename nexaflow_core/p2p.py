@@ -247,6 +247,13 @@ class P2PNode:
         self.on_ledger_request: Callable | None = None   # (peer_id) -> dict
         self.on_ledger_response: Callable | None = None  # (payload, peer_id) -> None
 
+        # Efficient sync callbacks (used by LedgerSyncManager)
+        self.on_sync_status_req: Callable | None = None   # (payload, peer_id) -> dict
+        self.on_sync_status_res: Callable | None = None   # (payload, peer_id) -> None
+        self.on_sync_delta_req: Callable | None = None    # (payload, peer_id) -> dict
+        self.on_sync_snap_req: Callable | None = None     # (payload, peer_id) -> dict
+        self.on_sync_data_res: Callable | None = None     # (payload, peer_id) -> None
+
         # Known peer addresses for gossip-based discovery
         # {  "host:port": last_seen_timestamp  }
         self._known_addrs: dict[str, float] = {}
@@ -438,7 +445,7 @@ class P2PNode:
                     self._known_addrs[addr] = time.time()
 
         elif msg_type == "LEDGER_REQ":
-            # Peer is requesting our ledger state
+            # Peer is requesting our ledger state (legacy)
             if self.on_ledger_request:
                 state = self.on_ledger_request(peer.peer_id)
                 if state:
@@ -447,6 +454,33 @@ class P2PNode:
         elif msg_type == "LEDGER_RES":
             if self.on_ledger_response:
                 self.on_ledger_response(payload, peer.peer_id)
+
+        # ── Efficient sync protocol messages ──────────────────────
+        elif msg_type == "SYNC_STATUS_REQ":
+            if self.on_sync_status_req:
+                response = self.on_sync_status_req(payload, peer.peer_id)
+                if response:
+                    await peer.send("SYNC_STATUS_RES", response)
+
+        elif msg_type == "SYNC_STATUS_RES":
+            if self.on_sync_status_res:
+                self.on_sync_status_res(payload, peer.peer_id)
+
+        elif msg_type == "SYNC_DELTA_REQ":
+            if self.on_sync_delta_req:
+                delta = self.on_sync_delta_req(payload, peer.peer_id)
+                if delta:
+                    await peer.send("SYNC_DELTA_RES", delta)
+
+        elif msg_type == "SYNC_SNAP_REQ":
+            if self.on_sync_snap_req:
+                snap = self.on_sync_snap_req(payload, peer.peer_id)
+                if snap:
+                    await peer.send("SYNC_SNAP_RES", snap)
+
+        elif msg_type in ("SYNC_DELTA_RES", "SYNC_SNAP_RES"):
+            if self.on_sync_data_res:
+                self.on_sync_data_res(payload, peer.peer_id)
 
     # ---- broadcasting ----
 

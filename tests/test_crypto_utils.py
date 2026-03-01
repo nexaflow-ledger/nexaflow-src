@@ -72,12 +72,21 @@ class TestHashFunctions(unittest.TestCase):
         self.assertEqual(len(result), 20)
 
     def test_ripemd160_known_value(self):
-        expected = hashlib.new("ripemd160", b"hello").digest()
+        try:
+            expected = hashlib.new("ripemd160", b"hello", usedforsecurity=False).digest()
+        except (ValueError, TypeError):
+            from Crypto.Hash import RIPEMD160
+            expected = RIPEMD160.new(b"hello").digest()
         self.assertEqual(ripemd160(b"hello"), expected)
 
     def test_hash160_composition(self):
         data = b"public_key_bytes"
-        expected = hashlib.new("ripemd160", hashlib.blake2b(data, digest_size=32).digest()).digest()
+        h = hashlib.blake2b(data, digest_size=32).digest()
+        try:
+            expected = hashlib.new("ripemd160", h, usedforsecurity=False).digest()
+        except (ValueError, TypeError):
+            from Crypto.Hash import RIPEMD160
+            expected = RIPEMD160.new(h).digest()
         self.assertEqual(hash160(data), expected)
 
     def test_hash160_returns_20_bytes(self):

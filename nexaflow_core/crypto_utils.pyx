@@ -39,8 +39,12 @@ cpdef bytes sha512_half(bytes data):
     return hashlib.sha512(data).digest()[:32]
 
 cpdef bytes ripemd160(bytes data):
-    """RIPEMD-160 hash."""
-    return hashlib.new("ripemd160", data).digest()
+    """RIPEMD-160 hash – falls back to pycryptodome on OpenSSL 3.0+."""
+    try:
+        return hashlib.new("ripemd160", data, usedforsecurity=False).digest()
+    except (ValueError, TypeError):
+        from Crypto.Hash import RIPEMD160
+        return RIPEMD160.new(data).digest()
 
 cpdef bytes hash160(bytes data):
     """SHA-256 then RIPEMD-160 — standard address hash."""
