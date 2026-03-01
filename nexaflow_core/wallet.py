@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from typing import Any
 
 from nexaflow_core.crypto_utils import (
     derive_address,
@@ -149,7 +150,7 @@ class Wallet:
             sequence=seq,
         )
 
-    def scan_confidential_outputs(self, ledger: object) -> list[dict]:
+    def scan_confidential_outputs(self, ledger: Any) -> list[dict]:
         """
         Scan all confidential UTXOs in *ledger* and return those belonging
         to this wallet.

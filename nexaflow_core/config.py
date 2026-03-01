@@ -36,6 +36,19 @@ class NodeConfig:
 
 
 @dataclass
+class WalletConfig:
+    """Node wallet auto-generation and persistence.
+
+    On first run the node automatically generates a secure wallet and saves
+    it to ``wallet_file``.  On subsequent runs the wallet is loaded from that
+    file.  When ``auto_genesis`` is True *and* ``[genesis.accounts]`` is empty
+    the newly-created wallet address receives the full supply.
+    """
+    wallet_file: str = "data/wallet.json"
+    auto_genesis: bool = True
+
+
+@dataclass
 class LedgerConfig:
     """Ledger / economics settings."""
     total_supply: float = 100_000_000_000.0
@@ -114,6 +127,7 @@ class LoggingConfig:
 class NexaFlowConfig:
     """Top-level configuration container."""
     node: NodeConfig = field(default_factory=NodeConfig)
+    wallet: WalletConfig = field(default_factory=WalletConfig)
     ledger: LedgerConfig = field(default_factory=LedgerConfig)
     consensus: ConsensusConfig = field(default_factory=ConsensusConfig)
     tls: TLSConfig = field(default_factory=TLSConfig)
@@ -155,6 +169,7 @@ def load_config(path: str | None = None) -> NexaFlowConfig:
                 data = tomllib.load(f)
             for section_name, section_dc in [
                 ("node", cfg.node),
+                ("wallet", cfg.wallet),
                 ("ledger", cfg.ledger),
                 ("consensus", cfg.consensus),
                 ("tls", cfg.tls),

@@ -108,7 +108,8 @@ def encode_message(msg_type: str, payload: dict) -> bytes:
 def decode_message(data: bytes) -> dict | None:
     """Decode a newline-terminated JSON message."""
     try:
-        return json.loads(data.strip())
+        result: dict = json.loads(data.strip())
+        return result
     except (json.JSONDecodeError, UnicodeDecodeError):
         return None
 

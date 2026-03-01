@@ -498,6 +498,7 @@ class LedgerSyncManager:
 
     async def _sync_loop(self) -> None:
         """Periodically check peers and sync when behind."""
+        assert self._sync_event is not None
         while self._running:
             try:
                 # Wait for a trigger or timeout
@@ -524,7 +525,9 @@ class LedgerSyncManager:
                 await asyncio.sleep(5.0)
 
     async def _run_sync_cycle(self) -> None:
-        """Execute one full sync cycle: status → choose peer → fetch data."""
+        """Execute one full sync cycle: status -> choose peer -> fetch data."""
+        assert self._status_received is not None
+        assert self._data_received is not None
         if not self.p2p.peers:
             return
 
@@ -675,7 +678,8 @@ class LedgerSyncManager:
     def handle_sync_data_res(self, payload: dict, from_peer: str) -> None:
         """Handle an incoming SYNC_DELTA_RES or SYNC_SNAP_RES."""
         self._received_snapshot = payload
-        self._data_received.set()
+        if self._data_received is not None:
+            self._data_received.set()
 
     # ── Legacy LEDGER_REQ/RES compat ─────────────────────────────────
 

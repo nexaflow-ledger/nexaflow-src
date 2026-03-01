@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import sys
+from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Ensure the project root is in sys.path so imports work before pip install
@@ -83,7 +84,7 @@ class NexaFlowNode:
         # Core components
         self.ledger = Ledger()
         self.p2p = P2PNode(node_id, host, port)
-        self.wallet = Wallet.from_seed(node_id)
+        self.wallet = self._load_or_create_wallet()
         self.validator = TransactionValidator(self.ledger)
         self.trust_graph = TrustGraph()
 
@@ -122,11 +123,73 @@ class NexaFlowNode:
         self.p2p.on_sync_snap_req = self.sync_manager.handle_sync_snap_req
         self.p2p.on_sync_data_res = self.sync_manager.handle_sync_data_res
 
+    # ---- wallet persistence ----
+
+    def _load_or_create_wallet(self) -> Wallet:
+        """Load wallet from file if it exists, otherwise generate and save a new one."""
+        wallet_path = self._wallet_path()
+        if wallet_path and wallet_path.exists():
+            return self._load_wallet(wallet_path)
+        wallet = Wallet.create()
+        if wallet_path:
+            self._save_wallet(wallet, wallet_path)
+        else:
+            logger.warning(
+                "No wallet file configured — generated an ephemeral wallet. "
+                "Set [wallet] wallet_file in nexaflow.toml to persist keys."
+            )
+        return wallet
+
+    def _wallet_path(self) -> Path | None:
+        if self.config and self.config.wallet.wallet_file:
+            return Path(self.config.wallet.wallet_file)
+        return Path("data/wallet.json")
+
+    def _save_wallet(self, wallet: Wallet, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = wallet.to_dict()
+        path.write_text(json.dumps(data, indent=2) + "\n")
+        os.chmod(path, 0o600)
+        logger.info(
+            f"Wallet created and saved to {path}\n"
+            f"  Address:    {wallet.address}\n"
+            f"  Public key: {wallet.public_key.hex()[:32]}...\n"
+            f"  ⚠  Back up {path} — this file holds your private keys!"
+        )
+
+    @staticmethod
+    def _load_wallet(path: Path) -> Wallet:
+        data = json.loads(path.read_text())
+        priv = bytes.fromhex(data["private_key"])
+        pub = bytes.fromhex(data["public_key"])
+        view_priv = bytes.fromhex(data["view_private_key"]) if data.get("view_private_key") else None
+        view_pub = bytes.fromhex(data["view_public_key"]) if data.get("view_public_key") else None
+        spend_priv = bytes.fromhex(data["spend_private_key"]) if data.get("spend_private_key") else None
+        spend_pub = bytes.fromhex(data["spend_public_key"]) if data.get("spend_public_key") else None
+        wallet = Wallet(
+            priv, pub, data.get("address"),
+            view_private_key=view_priv, view_public_key=view_pub,
+            spend_private_key=spend_priv, spend_public_key=spend_pub,
+        )
+        logger.info(f"Wallet loaded from {path} | {wallet.address}")
+        return wallet
+
     # ---- lifecycle ----
 
     async def start(self):
         """Start networking, persistence, API, and periodic consensus."""
         # ── Deterministic genesis ────────────────────────────────
+        # If no genesis accounts are configured and auto_genesis is
+        # enabled, assign the full supply to this node's wallet.
+        if self.config and not self.config.genesis.accounts and self.config.wallet.auto_genesis:
+                logger.info(
+                    f"Auto-genesis: assigning full supply to "
+                    f"{self.wallet.address}"
+                )
+                self.config.genesis.accounts[self.wallet.address] = (
+                    self.ledger.total_supply
+                )
+
         if self.config and self.config.genesis.accounts:
             genesis_accounts = self.config.genesis.accounts
             logger.info(f"Applying deterministic genesis ({len(genesis_accounts)} accounts)")
@@ -611,10 +674,6 @@ async def main():
     # Optional: fund an address from genesis for testing
     if args.fund_address:
         node.fund_local(args.fund_address, args.fund_amount or 10000.0)
-
-    # Always fund own wallet for testing (only in dev mode / no genesis config)
-    if not cfg.genesis.accounts:
-        node.fund_local(node.wallet.address, 50000.0)
 
     if args.no_cli:
         # Run forever without CLI

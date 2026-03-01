@@ -47,8 +47,13 @@ enabled = false
 backend = "sqlite"
 path = "data/nexaflow.db"
 
+[wallet]
+wallet_file = "data/wallet.json"   # auto-created on first run
+auto_genesis = true                # auto-assign full supply when [genesis.accounts] is empty
+
 # Deterministic genesis — every node must use the same genesis config.
-# When [genesis.accounts] is empty the default genesis account receives all supply.
+# When [genesis.accounts] is empty and auto_genesis = true, the full supply
+# is automatically assigned to this node's wallet address on first run.
 [genesis.accounts]
 # "nGenesisNXF" = 100_000_000_000.0
 # "rFoundation" = 10_000_000.0
