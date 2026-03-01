@@ -1,7 +1,7 @@
 """
 Order Book / DEX matching engine for NexaFlow.
 
-Implements a simple limit-order book that matches OfferCreate
+Implements a limit-order book that matches OfferCreate
 transactions within the ledger.
 
 Each "book" is identified by a trading pair string such as
@@ -11,6 +11,12 @@ to buy the base, orders on the **ask** side want to sell the base.
 Matching follows price-time priority:
   • Best price first (lowest ask, highest bid).
   • Among equal prices, the earliest order wins.
+
+Advanced features:
+  • Immediate-or-Cancel (IoC) — fill what you can, cancel the rest
+  • Fill-or-Kill (FoK) — fill entirely or cancel entirely
+  • Time-in-Force expiration — orders expire after a set timestamp
+  • Auto-bridging through NXF — cross-currency pairs route via NXF
 
 Usage:
     ob = OrderBook()
@@ -43,6 +49,9 @@ class Order:
     remaining: float = 0.0
     timestamp: float = field(default_factory=time.time)
     status: str = "open"     # open | partially_filled | filled | cancelled
+    # Advanced order types
+    time_in_force: str = "GTC"  # GTC (Good-til-Cancelled) | IOC | FOK
+    expiration: float = 0.0     # Unix timestamp, 0 = never expires
 
     def __post_init__(self):
         if self.remaining == 0.0:
@@ -52,6 +61,12 @@ class Order:
             self.sort_key = (self.price, self.timestamp)
         else:
             self.sort_key = (-self.price, self.timestamp)
+
+    @property
+    def is_expired(self) -> bool:
+        if self.expiration <= 0:
+            return False
+        return time.time() >= self.expiration
 
     def to_dict(self) -> dict:
         return {
@@ -64,6 +79,8 @@ class Order:
             "remaining": self.remaining,
             "timestamp": self.timestamp,
             "status": self.status,
+            "time_in_force": self.time_in_force,
+            "expiration": self.expiration,
         }
 
 
@@ -114,14 +131,24 @@ class OrderBook:
         price: float,
         quantity: float,
         order_id: str | None = None,
+        time_in_force: str = "GTC",
+        expiration: float = 0.0,
     ) -> list[Fill]:
         """
         Submit a new limit order.  Returns a list of immediate fills
         (may be empty if no match).
+
+        time_in_force:
+          - GTC: Good-til-Cancelled (default) — rest on book if not fully filled
+          - IOC: Immediate-or-Cancel — fill what matches, cancel remainder
+          - FOK: Fill-or-Kill — fill entirely or reject
         """
         if order_id is None:
             order_id = f"ORD-{self._next_id:06d}"
             self._next_id += 1
+
+        # Purge expired orders before matching
+        self._purge_expired(pair)
 
         order = Order(
             order_id=order_id,
@@ -131,12 +158,25 @@ class OrderBook:
             price=price,
             quantity=quantity,
             remaining=quantity,
+            time_in_force=time_in_force,
+            expiration=expiration,
         )
+
+        # FOK: pre-check liquidity
+        if time_in_force == "FOK":
+            available = self._available_liquidity(order)
+            if available < quantity:
+                order.status = "cancelled"
+                self._orders[order.order_id] = order
+                return []
 
         fills = self._match(order)
 
-        # If remaining quantity, rest on the book
-        if order.remaining > 0:
+        # IOC: cancel any remaining
+        if time_in_force == "IOC" and order.remaining > 0:
+            order.status = "cancelled"
+        elif order.remaining > 0:
+            # GTC: rest on the book
             order.status = "partially_filled" if order.remaining < quantity else "open"
             self._insert(order)
         else:
@@ -144,6 +184,47 @@ class OrderBook:
 
         self._orders[order.order_id] = order
         return fills
+
+    def submit_auto_bridged_order(
+        self,
+        account: str,
+        src_currency: str,
+        dst_currency: str,
+        side: str,
+        amount: float,
+        order_id: str | None = None,
+    ) -> list[Fill]:
+        """
+        Auto-bridge a cross-currency order through NXF.
+
+        e.g., USD→EUR becomes USD→NXF then NXF→EUR.
+        Returns combined fills from both legs.
+        """
+        if src_currency == "NXF" or dst_currency == "NXF":
+            # Direct pair, no bridging needed
+            pair = f"{dst_currency}/{src_currency}" if side == "buy" else f"{src_currency}/{dst_currency}"
+            return self.submit_order(account, pair, side, 0.0, amount, order_id)
+
+        all_fills: list[Fill] = []
+
+        # Leg 1: sell src_currency for NXF
+        pair1 = f"NXF/{src_currency}"
+        id1 = f"{order_id or 'AB'}-leg1"
+        fills1 = self.submit_order(account, pair1, "buy", 0.0, amount, id1)
+        all_fills.extend(fills1)
+
+        # Compute NXF received from leg 1
+        nxf_received = sum(f.quantity for f in fills1)
+        if nxf_received <= 0:
+            return all_fills
+
+        # Leg 2: buy dst_currency with NXF
+        pair2 = f"{dst_currency}/NXF"
+        id2 = f"{order_id or 'AB'}-leg2"
+        fills2 = self.submit_order(account, pair2, "buy", 0.0, nxf_received, id2)
+        all_fills.extend(fills2)
+
+        return all_fills
 
     def cancel_order(self, order_id: str) -> bool:
         """Cancel a resting order.  Returns True if found and cancelled."""
@@ -195,11 +276,18 @@ class OrderBook:
         while taker.remaining > 0 and book:
             best = book[0]
 
-            # Price check
-            if taker.side == "buy" and best.price > taker.price:
-                break
-            if taker.side == "sell" and best.price < taker.price:
-                break
+            # Skip expired orders
+            if best.is_expired:
+                best.status = "cancelled"
+                book.pop(0)
+                continue
+
+            # Price check (skip if taker price is 0 — market order)
+            if taker.price > 0:
+                if taker.side == "buy" and best.price > taker.price:
+                    break
+                if taker.side == "sell" and best.price < taker.price:
+                    break
 
             fill_qty = min(taker.remaining, best.remaining)
             fill = Fill(
@@ -222,6 +310,41 @@ class OrderBook:
                 best.status = "partially_filled"
 
         return fills
+
+    def _available_liquidity(self, taker: Order) -> float:
+        """Check how much liquidity is available for a taker order (for FOK)."""
+        if taker.side == "buy":
+            book = self._asks.get(taker.pair, [])
+        else:
+            book = self._bids.get(taker.pair, [])
+
+        total = 0.0
+        for order in book:
+            if order.is_expired:
+                continue
+            if taker.price > 0:
+                if taker.side == "buy" and order.price > taker.price:
+                    break
+                if taker.side == "sell" and order.price < taker.price:
+                    break
+            total += order.remaining
+            if total >= taker.remaining:
+                return total
+        return total
+
+    def _purge_expired(self, pair: str) -> int:
+        """Remove expired orders from a pair's book. Returns count removed."""
+        removed = 0
+        for book in (self._asks.get(pair, []), self._bids.get(pair, [])):
+            i = 0
+            while i < len(book):
+                if book[i].is_expired:
+                    book[i].status = "cancelled"
+                    book.pop(i)
+                    removed += 1
+                else:
+                    i += 1
+        return removed
 
     def _insert(self, order: Order) -> None:
         """Insert an order into the appropriate sorted book."""

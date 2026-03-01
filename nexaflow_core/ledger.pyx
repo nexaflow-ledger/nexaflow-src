@@ -26,6 +26,13 @@ from nexaflow_core.staking import (
     TIER_CONFIG, MIN_STAKE_AMOUNT, SECONDS_PER_YEAR,
     EARLY_INTEREST_PENALTY, EARLY_PRINCIPAL_PENALTY,
 )
+from nexaflow_core.escrow import EscrowManager
+from nexaflow_core.payment_channel import PaymentChannelManager
+from nexaflow_core.check import CheckManager
+from nexaflow_core.multi_sign import MultiSignManager
+from nexaflow_core.amendments import AmendmentManager
+from nexaflow_core.nftoken import NFTokenManager
+from nexaflow_core.ticket import TicketManager
 
 
 # ── GIL-free arithmetic helpers ──────────────────────────────────────────────
@@ -109,6 +116,15 @@ cdef class AccountEntry:
     cdef public list open_offers
     cdef public double transfer_rate
     cdef public bint is_gateway
+    cdef public bint require_dest    # asfRequireDest
+    cdef public bint disable_master  # asfDisableMaster
+    cdef public bint default_ripple  # asfDefaultRipple
+    cdef public bint global_freeze   # asfGlobalFreeze
+    cdef public bint deposit_auth    # asfDepositAuth
+    cdef public str regular_key      # SetRegularKey address
+    cdef public str domain           # domain verification string
+    cdef public set deposit_preauth  # set of preauthorised addresses
+    cdef public list tickets         # list of ticket_ids
 
     def __init__(self, str address, double balance=0.0):
         self.address = address
@@ -119,6 +135,15 @@ cdef class AccountEntry:
         self.open_offers = []
         self.transfer_rate = 1.0
         self.is_gateway = False
+        self.require_dest = False
+        self.disable_master = False
+        self.default_ripple = False
+        self.global_freeze = False
+        self.deposit_auth = False
+        self.regular_key = ""
+        self.domain = ""
+        self.deposit_preauth = set()
+        self.tickets = []
 
     cpdef dict to_dict(self):
         cdef dict tl = {}
@@ -149,6 +174,10 @@ cdef class TrustLineEntry:
     cdef public double limit            # max the holder trusts
     cdef public double limit_peer       # max the issuer trusts back
     cdef public bint no_ripple          # disable rippling flag
+    cdef public bint frozen             # trust line freeze flag
+    cdef public bint authorized         # authorized trust line flag
+    cdef public double quality_in       # inbound quality (multiplier)
+    cdef public double quality_out      # outbound quality (multiplier)
 
     def __init__(self, str currency, str issuer, str holder,
                  double limit=0.0):
@@ -159,6 +188,10 @@ cdef class TrustLineEntry:
         self.limit = limit
         self.limit_peer = 0.0
         self.no_ripple = False
+        self.frozen = False
+        self.authorized = False
+        self.quality_in = 1.0
+        self.quality_out = 1.0
 
     cpdef dict to_dict(self):
         return {
@@ -248,6 +281,13 @@ cdef class Ledger:
     cdef public set applied_tx_ids     # str  → duplicate-TX detection
     cdef public dict confidential_outputs  # stealth_addr_hex → ConfidentialOutput
     cdef public object staking_pool    # StakingPool instance
+    cdef public object escrow_manager  # EscrowManager instance
+    cdef public object channel_manager # PaymentChannelManager instance
+    cdef public object check_manager   # CheckManager instance
+    cdef public object multi_sign_manager  # MultiSignManager instance
+    cdef public object amendment_manager   # AmendmentManager instance
+    cdef public object nftoken_manager     # NFTokenManager instance
+    cdef public object ticket_manager      # TicketManager instance
 
     def __init__(self, double total_supply=100_000_000_000.0,
                  str genesis_account="nGenesisNXF"):
@@ -264,6 +304,13 @@ cdef class Ledger:
         self.applied_tx_ids = set()
         self.confidential_outputs = {}  # stealth_addr_hex → ConfidentialOutput
         self.staking_pool = StakingPool()
+        self.escrow_manager = EscrowManager()
+        self.channel_manager = PaymentChannelManager()
+        self.check_manager = CheckManager()
+        self.multi_sign_manager = MultiSignManager()
+        self.amendment_manager = AmendmentManager()
+        self.nftoken_manager = NFTokenManager()
+        self.ticket_manager = TicketManager()
 
         # Create genesis account with full supply
         cdef AccountEntry genesis = AccountEntry(genesis_account, total_supply)
@@ -352,6 +399,8 @@ cdef class Ledger:
         cdef double fee_val = fee.value
         cdef str cur
         cdef str iss
+        cdef double effective_amt = amt
+        cdef AccountEntry iss_acc
 
         if amount.is_native():
             # Native NXF payment
@@ -376,18 +425,31 @@ cdef class Ledger:
             self.total_burned += fee_val
 
             # Check sender's trust line (or sender is issuer)
+            effective_amt = amt
             if src != iss:
                 tl_src = self.get_trust_line(src, cur, iss)
                 if tl_src is None:
                     return 103  # tecNO_LINE
-                if tl_src.balance < amt:
+                # noRipple enforcement: if set, sender cannot ripple through
+                if tl_src.no_ripple:
+                    return 115  # tecNO_RIPPLE
+                # Frozen trust line check
+                if tl_src.frozen:
+                    return 116  # tecFROZEN
+                # Apply transfer_rate if sender is not the issuer
+                iss_acc = self.accounts.get(iss)
+                if iss_acc is not None and iss_acc.transfer_rate > 1.0:
+                    effective_amt = amt * iss_acc.transfer_rate
+                if tl_src.balance < effective_amt:
                     return 101  # tecUNFUNDED
-                tl_src.balance -= amt
+                tl_src.balance -= effective_amt
             # Credit receiver's trust line (or receiver is issuer)
             if dst != iss:
                 tl_dst = self.get_trust_line(dst, cur, iss)
                 if tl_dst is None:
                     return 103  # tecNO_LINE
+                if tl_dst.frozen:
+                    return 116  # tecFROZEN
                 if tl_dst.balance + amt > tl_dst.limit:
                     return 101  # tecUNFUNDED — would exceed trust
                 tl_dst.balance += amt
@@ -499,12 +561,50 @@ cdef class Ledger:
             return 109
         if tt == 0:      # Payment
             result = self.apply_payment(tx)
+        elif tt == 1:    # EscrowCreate
+            result = self.apply_escrow_create(tx)
+        elif tt == 2:    # EscrowFinish
+            result = self.apply_escrow_finish(tx)
+        elif tt == 3:    # AccountSet
+            result = self.apply_account_set(tx)
+        elif tt == 4:    # EscrowCancel
+            result = self.apply_escrow_cancel(tx)
+        elif tt == 5:    # SetRegularKey
+            result = self.apply_set_regular_key(tx)
         elif tt == 7:    # OfferCreate
             result = self.apply_offer_create(tx)
         elif tt == 8:    # OfferCancel
             result = self.apply_offer_cancel(tx)
+        elif tt == 12:   # SignerListSet
+            result = self.apply_signer_list_set(tx)
+        elif tt == 13:   # PayChanCreate
+            result = self.apply_paychan_create(tx)
+        elif tt == 14:   # PayChanFund
+            result = self.apply_paychan_fund(tx)
+        elif tt == 15:   # PayChanClaim
+            result = self.apply_paychan_claim(tx)
+        elif tt == 16:   # CheckCreate
+            result = self.apply_check_create(tx)
+        elif tt == 17:   # CheckCash
+            result = self.apply_check_cash(tx)
+        elif tt == 18:   # CheckCancel
+            result = self.apply_check_cancel(tx)
+        elif tt == 19:   # DepositPreauth
+            result = self.apply_deposit_preauth(tx)
         elif tt == 20:   # TrustSet
             result = self.apply_trust_set(tx)
+        elif tt == 21:   # AccountDelete
+            result = self.apply_account_delete(tx)
+        elif tt == 22:   # TicketCreate
+            result = self.apply_ticket_create(tx)
+        elif tt == 25:   # NFTokenMint
+            result = self.apply_nftoken_mint(tx)
+        elif tt == 26:   # NFTokenBurn
+            result = self.apply_nftoken_burn(tx)
+        elif tt == 27:   # NFTokenOfferCreate
+            result = self.apply_nftoken_offer_create(tx)
+        elif tt == 28:   # NFTokenOfferAccept
+            result = self.apply_nftoken_offer_accept(tx)
         elif tt == 30:   # Stake
             result = self.apply_stake(tx)
         elif tt == 31:   # Unstake (early cancel)
@@ -749,6 +849,647 @@ cdef class Ledger:
 
         acc.sequence += 1
         return 0  # tesSUCCESS
+
+    # ---- fee helper (reused by all handlers) ----
+
+    cdef int _debit_fee(self, object acc, double fee_val):
+        """Debit fee from account, burn it. Returns 0 on success, 104 on fail."""
+        if acc.balance < fee_val:
+            return 104  # tecINSUF_FEE
+        acc.balance -= fee_val
+        self.total_supply -= fee_val
+        self.total_burned += fee_val
+        return 0
+
+    cdef int _check_seq(self, object tx, object acc):
+        """Verify sequence number. Returns 0 on match, 105 on mismatch."""
+        if tx.sequence != 0 and tx.sequence != acc.sequence:
+            return 105  # tecBAD_SEQ
+        return 0
+
+    # ---- escrow handlers ----
+
+    cpdef int apply_escrow_create(self, object tx):
+        """Lock NXF into an escrow."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double amt = tx.amount.value
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        if acc.balance < amt:
+            return 101  # tecUNFUNDED
+        # Debit escrowed amount
+        acc.balance -= amt
+        # Create destination if needed
+        cdef str dst = tx.destination
+        if dst and dst not in self.accounts:
+            self.create_account(dst)
+        # Create the escrow entry
+        self.escrow_manager.create_escrow(
+            escrow_id=tx.tx_id,
+            account=src,
+            destination=dst,
+            amount=amt,
+            condition=tx.flags.get("condition", ""),
+            finish_after=tx.flags.get("finish_after", 0),
+            cancel_after=tx.flags.get("cancel_after", 0),
+        )
+        acc.owner_count += 1
+        acc.sequence += 1
+        return 0
+
+    cpdef int apply_escrow_finish(self, object tx):
+        """Release escrowed NXF to destination."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        escrow_id = tx.flags.get("escrow_id", "")
+        fulfillment = tx.flags.get("fulfillment", "")
+        try:
+            entry, err = self.escrow_manager.finish_escrow(escrow_id, fulfillment)
+        except KeyError:
+            return 117  # tecNO_ENTRY
+        if err:
+            if "Condition" in err or "fulfillment" in err.lower():
+                return 111  # tecESCROW_BAD_CONDITION
+            return 112  # tecESCROW_NOT_READY
+        # Credit destination
+        dst_acc = <AccountEntry>self.accounts.get(entry.destination)
+        if dst_acc is None:
+            dst_acc = self.create_account(entry.destination)
+        dst_acc.balance += entry.amount
+        # Decrement owner count for the creator
+        creator_acc = <AccountEntry>self.accounts.get(entry.account)
+        if creator_acc is not None and creator_acc.owner_count > 0:
+            creator_acc.owner_count -= 1
+        acc.sequence += 1
+        return 0
+
+    cpdef int apply_escrow_cancel(self, object tx):
+        """Return escrowed NXF to the creator."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        escrow_id = tx.flags.get("escrow_id", "")
+        try:
+            entry, err = self.escrow_manager.cancel_escrow(escrow_id, src)
+        except KeyError:
+            return 117  # tecNO_ENTRY
+        if err:
+            return 110  # tecNO_PERMISSION
+        # Refund to creator
+        creator_acc = <AccountEntry>self.accounts.get(entry.account)
+        if creator_acc is not None:
+            creator_acc.balance += entry.amount
+            if creator_acc.owner_count > 0:
+                creator_acc.owner_count -= 1
+        acc.sequence += 1
+        return 0
+
+    # ---- AccountSet handler ----
+
+    cpdef int apply_account_set(self, object tx):
+        """Apply account configuration flags."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        # Process set_flags
+        set_flags = tx.flags.get("set_flags", {})
+        clear_flags = tx.flags.get("clear_flags", {})
+        if set_flags.get("asfRequireDest"):
+            acc.require_dest = True
+        if set_flags.get("asfDisableMaster"):
+            acc.disable_master = True
+        if set_flags.get("asfDefaultRipple"):
+            acc.default_ripple = True
+        if set_flags.get("asfGlobalFreeze"):
+            acc.global_freeze = True
+        if set_flags.get("asfDepositAuth"):
+            acc.deposit_auth = True
+        # Process clear_flags
+        if clear_flags.get("asfRequireDest"):
+            acc.require_dest = False
+        if clear_flags.get("asfDisableMaster"):
+            acc.disable_master = False
+        if clear_flags.get("asfDefaultRipple"):
+            acc.default_ripple = False
+        if clear_flags.get("asfGlobalFreeze"):
+            acc.global_freeze = False
+        if clear_flags.get("asfDepositAuth"):
+            acc.deposit_auth = False
+        # Transfer rate
+        cdef double tr = tx.flags.get("transfer_rate", 0.0)
+        if tr > 0.0:
+            if tr < 1.0 or tr > 2.0:
+                return 110  # tecNO_PERMISSION - invalid rate
+            acc.transfer_rate = tr
+        # Domain
+        domain = tx.flags.get("domain", "")
+        if domain:
+            acc.domain = domain
+        acc.sequence += 1
+        return 0
+
+    # ---- SetRegularKey handler ----
+
+    cpdef int apply_set_regular_key(self, object tx):
+        """Assign or remove a regular (secondary) signing key."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        regular_key = tx.flags.get("regular_key", "")
+        acc.regular_key = regular_key
+        self.multi_sign_manager.set_regular_key(src, regular_key)
+        acc.sequence += 1
+        return 0
+
+    # ---- SignerListSet handler ----
+
+    cpdef int apply_signer_list_set(self, object tx):
+        """Set or remove an M-of-N signer list."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        quorum = tx.flags.get("signer_quorum", 0)
+        entries = tx.flags.get("signer_entries", [])
+        try:
+            self.multi_sign_manager.set_signer_list(src, quorum, entries)
+        except ValueError:
+            return 110  # tecNO_PERMISSION
+        # Update owner count
+        if quorum > 0 and entries:
+            acc.owner_count += 1
+        acc.sequence += 1
+        return 0
+
+    # ---- payment channel handlers ----
+
+    cpdef int apply_paychan_create(self, object tx):
+        """Create a payment channel."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double amt = tx.amount.value
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        if acc.balance < amt:
+            return 101
+        acc.balance -= amt
+        cdef str dst = tx.destination
+        if dst and dst not in self.accounts:
+            self.create_account(dst)
+        self.channel_manager.create_channel(
+            channel_id=tx.tx_id,
+            account=src,
+            destination=dst,
+            amount=amt,
+            settle_delay=tx.flags.get("settle_delay", 3600),
+            public_key=tx.flags.get("public_key", ""),
+            cancel_after=tx.flags.get("cancel_after", 0),
+        )
+        acc.owner_count += 1
+        acc.sequence += 1
+        return 0
+
+    cpdef int apply_paychan_fund(self, object tx):
+        """Add funds to an existing payment channel."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double amt = tx.amount.value
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        if acc.balance < amt:
+            return 101
+        channel_id = tx.flags.get("channel_id", "")
+        try:
+            self.channel_manager.fund_channel(channel_id, amt)
+        except (KeyError, ValueError):
+            return 117  # tecNO_ENTRY
+        acc.balance -= amt
+        acc.sequence += 1
+        return 0
+
+    cpdef int apply_paychan_claim(self, object tx):
+        """Claim NXF from a payment channel or request close."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        channel_id = tx.flags.get("channel_id", "")
+        close_flag = tx.flags.get("close", False)
+        claim_balance = tx.amount.value
+        try:
+            ch = self.channel_manager.get_channel(channel_id)
+            if ch is None:
+                return 117
+            # Process claim if balance specified
+            if claim_balance > 0:
+                ch_obj, payout, err = self.channel_manager.claim(channel_id, claim_balance)
+                if err:
+                    return 113  # tecPAYCHAN_EXPIRED
+                # Credit destination
+                dst_acc = <AccountEntry>self.accounts.get(ch.destination)
+                if dst_acc is not None:
+                    dst_acc.balance += payout
+            # Process close if requested
+            if close_flag:
+                ch_obj, is_closed, err = self.channel_manager.request_close(channel_id, src)
+                if is_closed:
+                    # Return remaining funds to creator
+                    remaining = ch_obj.amount - ch_obj.balance
+                    creator_acc = <AccountEntry>self.accounts.get(ch_obj.account)
+                    if creator_acc is not None and remaining > 0:
+                        creator_acc.balance += remaining
+                    if creator_acc is not None and creator_acc.owner_count > 0:
+                        creator_acc.owner_count -= 1
+        except KeyError:
+            return 117
+        acc.sequence += 1
+        return 0
+
+    # ---- check handlers ----
+
+    cpdef int apply_check_create(self, object tx):
+        """Create a deferred pull-payment check."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        cdef double send_max = tx.amount.value
+        cdef str cur = tx.amount.currency
+        cdef str iss = tx.amount.issuer
+        self.check_manager.create_check(
+            check_id=tx.tx_id,
+            account=src,
+            destination=tx.destination,
+            send_max=send_max,
+            currency=cur,
+            issuer=iss,
+            expiration=tx.flags.get("expiration", 0),
+        )
+        acc.owner_count += 1
+        acc.sequence += 1
+        return 0
+
+    cpdef int apply_check_cash(self, object tx):
+        """Cash a check — pull funds from the creator."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        check_id = tx.flags.get("check_id", "")
+        deliver_min = tx.flags.get("deliver_min", 0.0)
+        cash_amount = tx.amount.value
+        try:
+            entry, cashed_amt, err = self.check_manager.cash_check(
+                check_id, cash_amount, deliver_min,
+            )
+        except KeyError:
+            return 117
+        if err:
+            if "expired" in err.lower():
+                return 114  # tecCHECK_EXPIRED
+            return 110  # tecNO_PERMISSION
+        # Verify casher is the destination
+        if entry.destination != src:
+            return 110  # tecNO_PERMISSION
+        # Debit the check creator
+        creator_acc = <AccountEntry>self.accounts.get(entry.account)
+        if creator_acc is None:
+            return 101
+        if entry.currency == "NXF" or entry.currency == "":
+            if creator_acc.balance < cashed_amt:
+                return 101
+            creator_acc.balance -= cashed_amt
+            acc.balance += cashed_amt
+        else:
+            # IOU check
+            tl_src = self.get_trust_line(entry.account, entry.currency, entry.issuer)
+            if tl_src is None or tl_src.balance < cashed_amt:
+                return 101
+            tl_dst = self.get_trust_line(src, entry.currency, entry.issuer)
+            if tl_dst is None:
+                return 103
+            tl_src.balance -= cashed_amt
+            tl_dst.balance += cashed_amt
+        if creator_acc.owner_count > 0:
+            creator_acc.owner_count -= 1
+        acc.sequence += 1
+        return 0
+
+    cpdef int apply_check_cancel(self, object tx):
+        """Cancel a check."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        check_id = tx.flags.get("check_id", "")
+        try:
+            entry, err = self.check_manager.cancel_check(check_id, src)
+        except KeyError:
+            return 117
+        if err:
+            return 110
+        creator_acc = <AccountEntry>self.accounts.get(entry.account)
+        if creator_acc is not None and creator_acc.owner_count > 0:
+            creator_acc.owner_count -= 1
+        acc.sequence += 1
+        return 0
+
+    # ---- DepositPreauth handler ----
+
+    cpdef int apply_deposit_preauth(self, object tx):
+        """Preauthorise or de-authorise an account for deposits."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        auth = tx.flags.get("authorize", "")
+        unauth = tx.flags.get("unauthorize", "")
+        if auth:
+            acc.deposit_preauth.add(auth)
+        if unauth:
+            acc.deposit_preauth.discard(unauth)
+        acc.sequence += 1
+        return 0
+
+    # ---- AccountDelete handler ----
+
+    cpdef int apply_account_delete(self, object tx):
+        """Delete an account and transfer remaining NXF to destination."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        # Must have no owned objects
+        if acc.owner_count > 0:
+            return 110  # tecNO_PERMISSION — has owned objects
+        if len(acc.trust_lines) > 0:
+            return 110
+        cdef str dst = tx.destination
+        if dst not in self.accounts:
+            return 101
+        dst_acc = <AccountEntry>self.accounts[dst]
+        # Transfer remaining balance
+        dst_acc.balance += acc.balance
+        # Remove account from ledger
+        del self.accounts[src]
+        return 0
+
+    # ---- Ticket handler ----
+
+    cpdef int apply_ticket_create(self, object tx):
+        """Create sequence number reservation tickets."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        ticket_count = tx.flags.get("ticket_count", 1)
+        if ticket_count < 1 or ticket_count > 250:
+            return 110
+        # Each ticket consumes a sequence number
+        tickets = self.ticket_manager.create_tickets(
+            src, acc.sequence + 1, ticket_count,
+        )
+        for t in tickets:
+            acc.tickets.append(t.ticket_id)
+        acc.owner_count += ticket_count
+        acc.sequence += 1 + ticket_count  # skip consumed sequences
+        return 0
+
+    # ---- NFToken handlers ----
+
+    cpdef int apply_nftoken_mint(self, object tx):
+        """Mint a new non-fungible token."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        try:
+            token = self.nftoken_manager.mint(
+                issuer=src,
+                uri=tx.flags.get("uri", ""),
+                transfer_fee=tx.flags.get("transfer_fee", 0),
+                nftoken_taxon=tx.flags.get("nftoken_taxon", 0),
+                transferable=tx.flags.get("transferable", True),
+                burnable=tx.flags.get("burnable", True),
+            )
+        except ValueError:
+            return 110
+        acc.owner_count += 1
+        acc.sequence += 1
+        return 0
+
+    cpdef int apply_nftoken_burn(self, object tx):
+        """Burn (destroy) an NFToken."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        nftoken_id = tx.flags.get("nftoken_id", "")
+        token, err = self.nftoken_manager.burn(nftoken_id, src)
+        if err:
+            if token is None:
+                return 117  # tecNO_ENTRY
+            return 110  # tecNO_PERMISSION
+        acc.owner_count = max(0, acc.owner_count - 1)
+        acc.sequence += 1
+        return 0
+
+    cpdef int apply_nftoken_offer_create(self, object tx):
+        """Create a buy or sell offer for an NFToken."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        nftoken_id = tx.flags.get("nftoken_id", "")
+        offer, err = self.nftoken_manager.create_offer(
+            offer_id=tx.tx_id,
+            nftoken_id=nftoken_id,
+            owner=src,
+            amount=tx.amount.value,
+            destination=tx.destination,
+            is_sell=tx.flags.get("is_sell", False),
+            expiration=tx.flags.get("expiration", 0),
+        )
+        if err:
+            return 119  # tecNFTOKEN_EXISTS
+        acc.owner_count += 1
+        acc.sequence += 1
+        return 0
+
+    cpdef int apply_nftoken_offer_accept(self, object tx):
+        """Accept an NFToken buy/sell offer, transferring the token."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        offer_id = tx.flags.get("offer_id", "")
+        offer, err = self.nftoken_manager.accept_offer(offer_id, src)
+        if err:
+            if offer is None:
+                return 117
+            return 110
+        # Handle NXF payment between buyer and seller
+        if offer.amount > 0:
+            if offer.is_sell:
+                # Buyer (src) pays seller (offer.owner)
+                if acc.balance < offer.amount:
+                    return 101
+                acc.balance -= offer.amount
+                seller_acc = <AccountEntry>self.accounts.get(offer.owner)
+                if seller_acc is not None:
+                    seller_acc.balance += offer.amount
+                    if seller_acc.owner_count > 0:
+                        seller_acc.owner_count -= 1  # offer consumed
+            else:
+                # Buy offer: acceptor (current owner) receives payment from offer.owner
+                buyer_acc = <AccountEntry>self.accounts.get(offer.owner)
+                if buyer_acc is None or buyer_acc.balance < offer.amount:
+                    return 101
+                buyer_acc.balance -= offer.amount
+                acc.balance += offer.amount
+                if buyer_acc.owner_count > 0:
+                    buyer_acc.owner_count -= 1
+        acc.sequence += 1
+        return 0
 
     # ---- queries ----
 

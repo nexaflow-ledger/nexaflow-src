@@ -20,22 +20,60 @@ cimport cython
 from libc.time cimport time as c_time
 
 # Transaction type codes (cdef for internal C-speed use)
-cdef int _TT_PAYMENT      = 0
-cdef int _TT_TRUST_SET    = 20
-cdef int _TT_OFFER_CREATE = 7
-cdef int _TT_OFFER_CANCEL = 8
-cdef int _TT_ACCOUNT_SET  = 3
-cdef int _TT_STAKE        = 30
-cdef int _TT_UNSTAKE      = 31
+cdef int _TT_PAYMENT           = 0
+cdef int _TT_TRUST_SET         = 20
+cdef int _TT_OFFER_CREATE      = 7
+cdef int _TT_OFFER_CANCEL      = 8
+cdef int _TT_ACCOUNT_SET       = 3
+cdef int _TT_STAKE             = 30
+cdef int _TT_UNSTAKE           = 31
+cdef int _TT_ESCROW_CREATE     = 1
+cdef int _TT_ESCROW_FINISH     = 2
+cdef int _TT_ESCROW_CANCEL     = 4
+cdef int _TT_SET_REGULAR_KEY   = 5
+cdef int _TT_SIGNER_LIST_SET   = 12
+cdef int _TT_PAYCHAN_CREATE    = 13
+cdef int _TT_PAYCHAN_FUND      = 14
+cdef int _TT_PAYCHAN_CLAIM     = 15
+cdef int _TT_CHECK_CREATE      = 16
+cdef int _TT_CHECK_CASH        = 17
+cdef int _TT_CHECK_CANCEL      = 18
+cdef int _TT_DEPOSIT_PREAUTH   = 19
+cdef int _TT_ACCOUNT_DELETE    = 21
+cdef int _TT_TICKET_CREATE     = 22
+cdef int _TT_NFTOKEN_MINT      = 25
+cdef int _TT_NFTOKEN_BURN      = 26
+cdef int _TT_NFTOKEN_OFFER_CREATE = 27
+cdef int _TT_NFTOKEN_OFFER_ACCEPT = 28
+cdef int _TT_AMENDMENT         = 100
 
 # Python-visible aliases
-TT_PAYMENT      = _TT_PAYMENT
-TT_TRUST_SET    = _TT_TRUST_SET
-TT_OFFER_CREATE = _TT_OFFER_CREATE
-TT_OFFER_CANCEL = _TT_OFFER_CANCEL
-TT_ACCOUNT_SET  = _TT_ACCOUNT_SET
-TT_STAKE        = _TT_STAKE
-TT_UNSTAKE      = _TT_UNSTAKE
+TT_PAYMENT           = _TT_PAYMENT
+TT_TRUST_SET         = _TT_TRUST_SET
+TT_OFFER_CREATE      = _TT_OFFER_CREATE
+TT_OFFER_CANCEL      = _TT_OFFER_CANCEL
+TT_ACCOUNT_SET       = _TT_ACCOUNT_SET
+TT_STAKE             = _TT_STAKE
+TT_UNSTAKE           = _TT_UNSTAKE
+TT_ESCROW_CREATE     = _TT_ESCROW_CREATE
+TT_ESCROW_FINISH     = _TT_ESCROW_FINISH
+TT_ESCROW_CANCEL     = _TT_ESCROW_CANCEL
+TT_SET_REGULAR_KEY   = _TT_SET_REGULAR_KEY
+TT_SIGNER_LIST_SET   = _TT_SIGNER_LIST_SET
+TT_PAYCHAN_CREATE    = _TT_PAYCHAN_CREATE
+TT_PAYCHAN_FUND      = _TT_PAYCHAN_FUND
+TT_PAYCHAN_CLAIM     = _TT_PAYCHAN_CLAIM
+TT_CHECK_CREATE      = _TT_CHECK_CREATE
+TT_CHECK_CASH        = _TT_CHECK_CASH
+TT_CHECK_CANCEL      = _TT_CHECK_CANCEL
+TT_DEPOSIT_PREAUTH   = _TT_DEPOSIT_PREAUTH
+TT_ACCOUNT_DELETE    = _TT_ACCOUNT_DELETE
+TT_TICKET_CREATE     = _TT_TICKET_CREATE
+TT_NFTOKEN_MINT      = _TT_NFTOKEN_MINT
+TT_NFTOKEN_BURN      = _TT_NFTOKEN_BURN
+TT_NFTOKEN_OFFER_CREATE = _TT_NFTOKEN_OFFER_CREATE
+TT_NFTOKEN_OFFER_ACCEPT = _TT_NFTOKEN_OFFER_ACCEPT
+TT_AMENDMENT         = _TT_AMENDMENT
 
 # Transaction result codes (cdef + Python-visible)
 cdef int _TES_SUCCESS  = 0
@@ -48,6 +86,16 @@ cdef int _TEC_BAD_SIG  = 106
 cdef int _TEC_KEY_IMAGE_SPENT = 107
 cdef int _TEC_STAKE_LOCKED = 108
 cdef int _TEC_STAKE_DUPLICATE = 109
+cdef int _TEC_NO_PERMISSION = 110
+cdef int _TEC_ESCROW_BAD_CONDITION = 111
+cdef int _TEC_ESCROW_NOT_READY = 112
+cdef int _TEC_PAYCHAN_EXPIRED = 113
+cdef int _TEC_CHECK_EXPIRED = 114
+cdef int _TEC_NO_RIPPLE = 115
+cdef int _TEC_FROZEN = 116
+cdef int _TEC_NO_ENTRY = 117
+cdef int _TEC_AMENDMENT_BLOCKED = 118
+cdef int _TEC_NFTOKEN_EXISTS = 119
 
 TES_SUCCESS      = _TES_SUCCESS
 TEC_UNFUNDED     = _TEC_UNFUNDED
@@ -59,6 +107,16 @@ TEC_BAD_SIG      = _TEC_BAD_SIG
 TEC_KEY_IMAGE_SPENT = _TEC_KEY_IMAGE_SPENT
 TEC_STAKE_LOCKED = _TEC_STAKE_LOCKED
 TEC_STAKE_DUPLICATE = _TEC_STAKE_DUPLICATE
+TEC_NO_PERMISSION = _TEC_NO_PERMISSION
+TEC_ESCROW_BAD_CONDITION = _TEC_ESCROW_BAD_CONDITION
+TEC_ESCROW_NOT_READY = _TEC_ESCROW_NOT_READY
+TEC_PAYCHAN_EXPIRED = _TEC_PAYCHAN_EXPIRED
+TEC_CHECK_EXPIRED = _TEC_CHECK_EXPIRED
+TEC_NO_RIPPLE = _TEC_NO_RIPPLE
+TEC_FROZEN = _TEC_FROZEN
+TEC_NO_ENTRY = _TEC_NO_ENTRY
+TEC_AMENDMENT_BLOCKED = _TEC_AMENDMENT_BLOCKED
+TEC_NFTOKEN_EXISTS = _TEC_NFTOKEN_EXISTS
 
 # Map names to codes for external use
 TX_TYPE_NAMES = {
@@ -69,6 +127,25 @@ TX_TYPE_NAMES = {
     "AccountSet": TT_ACCOUNT_SET,
     "Stake": TT_STAKE,
     "Unstake": TT_UNSTAKE,
+    "EscrowCreate": TT_ESCROW_CREATE,
+    "EscrowFinish": TT_ESCROW_FINISH,
+    "EscrowCancel": TT_ESCROW_CANCEL,
+    "SetRegularKey": TT_SET_REGULAR_KEY,
+    "SignerListSet": TT_SIGNER_LIST_SET,
+    "PayChanCreate": TT_PAYCHAN_CREATE,
+    "PayChanFund": TT_PAYCHAN_FUND,
+    "PayChanClaim": TT_PAYCHAN_CLAIM,
+    "CheckCreate": TT_CHECK_CREATE,
+    "CheckCash": TT_CHECK_CASH,
+    "CheckCancel": TT_CHECK_CANCEL,
+    "DepositPreauth": TT_DEPOSIT_PREAUTH,
+    "AccountDelete": TT_ACCOUNT_DELETE,
+    "TicketCreate": TT_TICKET_CREATE,
+    "NFTokenMint": TT_NFTOKEN_MINT,
+    "NFTokenBurn": TT_NFTOKEN_BURN,
+    "NFTokenOfferCreate": TT_NFTOKEN_OFFER_CREATE,
+    "NFTokenOfferAccept": TT_NFTOKEN_OFFER_ACCEPT,
+    "Amendment": TT_AMENDMENT,
 }
 
 RESULT_NAMES = {
@@ -82,6 +159,16 @@ RESULT_NAMES = {
     TEC_KEY_IMAGE_SPENT: "tecKEY_IMAGE_SPENT",
     TEC_STAKE_LOCKED:    "tecSTAKE_LOCKED",
     TEC_STAKE_DUPLICATE: "tecSTAKE_DUPLICATE",
+    TEC_NO_PERMISSION:   "tecNO_PERMISSION",
+    TEC_ESCROW_BAD_CONDITION: "tecESCROW_BAD_CONDITION",
+    TEC_ESCROW_NOT_READY: "tecESCROW_NOT_READY",
+    TEC_PAYCHAN_EXPIRED: "tecPAYCHAN_EXPIRED",
+    TEC_CHECK_EXPIRED:   "tecCHECK_EXPIRED",
+    TEC_NO_RIPPLE:       "tecNO_RIPPLE",
+    TEC_FROZEN:          "tecFROZEN",
+    TEC_NO_ENTRY:        "tecNO_ENTRY",
+    TEC_AMENDMENT_BLOCKED: "tecAMENDMENT_BLOCKED",
+    TEC_NFTOKEN_EXISTS:  "tecNFTOKEN_EXISTS",
 }
 
 
@@ -370,6 +457,241 @@ cpdef object create_unstake(str account, str stake_id,
         Amount(0.0), Amount(fee), sequence, memo,
     )
     tx.flags = {"stake_id": stake_id}
+    return tx
+
+
+# ===================================================================
+#  Internal helpers
+# ===================================================================
+
+cpdef object create_escrow_create(str account, str destination,
+                                  double amount, long long finish_after=0,
+                                  long long cancel_after=0, str condition="",
+                                  double fee=0.00001, long long sequence=0):
+    """Create an EscrowCreate transaction."""
+    cdef Transaction tx = Transaction(
+        TT_ESCROW_CREATE, account, destination,
+        Amount(amount), Amount(fee), sequence,
+    )
+    tx.flags = {
+        "finish_after": finish_after,
+        "cancel_after": cancel_after,
+        "condition": condition,
+    }
+    return tx
+
+cpdef object create_escrow_finish(str account, str owner, str escrow_id,
+                                  str fulfillment="",
+                                  double fee=0.00001, long long sequence=0):
+    """Create an EscrowFinish transaction."""
+    cdef Transaction tx = Transaction(
+        TT_ESCROW_FINISH, account, owner,
+        Amount(0.0), Amount(fee), sequence,
+    )
+    tx.flags = {"escrow_id": escrow_id, "fulfillment": fulfillment}
+    return tx
+
+cpdef object create_escrow_cancel(str account, str owner, str escrow_id,
+                                  double fee=0.00001, long long sequence=0):
+    """Create an EscrowCancel transaction."""
+    cdef Transaction tx = Transaction(
+        TT_ESCROW_CANCEL, account, owner,
+        Amount(0.0), Amount(fee), sequence,
+    )
+    tx.flags = {"escrow_id": escrow_id}
+    return tx
+
+cpdef object create_set_regular_key(str account, str regular_key,
+                                    double fee=0.00001, long long sequence=0):
+    """Create a SetRegularKey transaction."""
+    cdef Transaction tx = Transaction(
+        TT_SET_REGULAR_KEY, account, "", Amount(0.0), Amount(fee), sequence,
+    )
+    tx.flags = {"regular_key": regular_key}
+    return tx
+
+cpdef object create_signer_list_set(str account, int signer_quorum,
+                                    list signer_entries,
+                                    double fee=0.00001, long long sequence=0):
+    """Create a SignerListSet transaction.
+    signer_entries: list of {"account": str, "weight": int}
+    """
+    cdef Transaction tx = Transaction(
+        TT_SIGNER_LIST_SET, account, "", Amount(0.0), Amount(fee), sequence,
+    )
+    tx.flags = {"signer_quorum": signer_quorum, "signer_entries": signer_entries}
+    return tx
+
+cpdef object create_paychan_create(str account, str destination,
+                                   double amount, long long settle_delay,
+                                   str public_key_hex="",
+                                   long long cancel_after=0,
+                                   double fee=0.00001, long long sequence=0):
+    """Create a PaymentChannelCreate transaction."""
+    cdef Transaction tx = Transaction(
+        TT_PAYCHAN_CREATE, account, destination,
+        Amount(amount), Amount(fee), sequence,
+    )
+    tx.flags = {
+        "settle_delay": settle_delay,
+        "public_key": public_key_hex,
+        "cancel_after": cancel_after,
+    }
+    return tx
+
+cpdef object create_paychan_fund(str account, str channel_id,
+                                 double amount, long long expiration=0,
+                                 double fee=0.00001, long long sequence=0):
+    """Fund an existing payment channel with additional NXF."""
+    cdef Transaction tx = Transaction(
+        TT_PAYCHAN_FUND, account, "", Amount(amount), Amount(fee), sequence,
+    )
+    tx.flags = {"channel_id": channel_id, "expiration": expiration}
+    return tx
+
+cpdef object create_paychan_claim(str account, str channel_id,
+                                  double balance, str signature_hex="",
+                                  str public_key_hex="",
+                                  bint close=False,
+                                  double fee=0.00001, long long sequence=0):
+    """Claim NXF from a payment channel."""
+    cdef Transaction tx = Transaction(
+        TT_PAYCHAN_CLAIM, account, "", Amount(balance), Amount(fee), sequence,
+    )
+    tx.flags = {
+        "channel_id": channel_id,
+        "claim_signature": signature_hex,
+        "public_key": public_key_hex,
+        "close": close,
+    }
+    return tx
+
+cpdef object create_check_create(str account, str destination,
+                                 double send_max, str currency="NXF",
+                                 str issuer="", long long expiration=0,
+                                 double fee=0.00001, long long sequence=0):
+    """Create a Check."""
+    cdef Transaction tx = Transaction(
+        TT_CHECK_CREATE, account, destination,
+        Amount(send_max, currency, issuer), Amount(fee), sequence,
+    )
+    tx.flags = {"expiration": expiration}
+    return tx
+
+cpdef object create_check_cash(str account, str check_id,
+                               double amount=0.0, double deliver_min=0.0,
+                               double fee=0.00001, long long sequence=0):
+    """Cash a Check."""
+    cdef Transaction tx = Transaction(
+        TT_CHECK_CASH, account, "", Amount(amount), Amount(fee), sequence,
+    )
+    tx.flags = {"check_id": check_id, "deliver_min": deliver_min}
+    return tx
+
+cpdef object create_check_cancel(str account, str check_id,
+                                 double fee=0.00001, long long sequence=0):
+    """Cancel a Check."""
+    cdef Transaction tx = Transaction(
+        TT_CHECK_CANCEL, account, "", Amount(0.0), Amount(fee), sequence,
+    )
+    tx.flags = {"check_id": check_id}
+    return tx
+
+cpdef object create_deposit_preauth(str account, str authorize="",
+                                    str unauthorize="",
+                                    double fee=0.00001, long long sequence=0):
+    """Create a DepositPreauth transaction."""
+    cdef Transaction tx = Transaction(
+        TT_DEPOSIT_PREAUTH, account, "", Amount(0.0), Amount(fee), sequence,
+    )
+    tx.flags = {"authorize": authorize, "unauthorize": unauthorize}
+    return tx
+
+cpdef object create_account_delete(str account, str destination,
+                                   double fee=0.00001, long long sequence=0):
+    """Delete account and transfer remaining NXF to destination."""
+    cdef Transaction tx = Transaction(
+        TT_ACCOUNT_DELETE, account, destination,
+        Amount(0.0), Amount(fee), sequence,
+    )
+    return tx
+
+cpdef object create_account_set(str account, dict set_flags=None,
+                                dict clear_flags=None,
+                                double transfer_rate=0.0,
+                                str domain="",
+                                double fee=0.00001, long long sequence=0):
+    """Create an AccountSet transaction to configure account flags."""
+    cdef Transaction tx = Transaction(
+        TT_ACCOUNT_SET, account, "", Amount(0.0), Amount(fee), sequence,
+    )
+    tx.flags = {
+        "set_flags": set_flags or {},
+        "clear_flags": clear_flags or {},
+        "transfer_rate": transfer_rate,
+        "domain": domain,
+    }
+    return tx
+
+cpdef object create_ticket_create(str account, int ticket_count=1,
+                                  double fee=0.00001, long long sequence=0):
+    """Create Ticket(s) for out-of-order sequence number usage."""
+    cdef Transaction tx = Transaction(
+        TT_TICKET_CREATE, account, "", Amount(0.0), Amount(fee), sequence,
+    )
+    tx.flags = {"ticket_count": ticket_count}
+    return tx
+
+cpdef object create_nftoken_mint(str account, str uri="",
+                                 int transfer_fee=0, int nftoken_taxon=0,
+                                 bint transferable=True, bint burnable=True,
+                                 double fee=0.00001, long long sequence=0):
+    """Mint a new NFToken."""
+    cdef Transaction tx = Transaction(
+        TT_NFTOKEN_MINT, account, "", Amount(0.0), Amount(fee), sequence,
+    )
+    tx.flags = {
+        "uri": uri,
+        "transfer_fee": transfer_fee,
+        "nftoken_taxon": nftoken_taxon,
+        "transferable": transferable,
+        "burnable": burnable,
+    }
+    return tx
+
+cpdef object create_nftoken_burn(str account, str nftoken_id,
+                                 double fee=0.00001, long long sequence=0):
+    """Burn (destroy) an NFToken."""
+    cdef Transaction tx = Transaction(
+        TT_NFTOKEN_BURN, account, "", Amount(0.0), Amount(fee), sequence,
+    )
+    tx.flags = {"nftoken_id": nftoken_id}
+    return tx
+
+cpdef object create_nftoken_offer_create(str account, str nftoken_id,
+                                         double amount, str destination="",
+                                         bint is_sell=False,
+                                         long long expiration=0,
+                                         double fee=0.00001, long long sequence=0):
+    """Create an offer to buy or sell an NFToken."""
+    cdef Transaction tx = Transaction(
+        TT_NFTOKEN_OFFER_CREATE, account, destination,
+        Amount(amount), Amount(fee), sequence,
+    )
+    tx.flags = {
+        "nftoken_id": nftoken_id,
+        "is_sell": is_sell,
+        "expiration": expiration,
+    }
+    return tx
+
+cpdef object create_nftoken_offer_accept(str account, str offer_id,
+                                         double fee=0.00001, long long sequence=0):
+    """Accept an NFToken buy/sell offer."""
+    cdef Transaction tx = Transaction(
+        TT_NFTOKEN_OFFER_ACCEPT, account, "", Amount(0.0), Amount(fee), sequence,
+    )
+    tx.flags = {"offer_id": offer_id}
     return tx
 
 

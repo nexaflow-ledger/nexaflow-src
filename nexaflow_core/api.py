@@ -269,6 +269,28 @@ class APIServer:
         app.router.add_post("/tx/unstake", self._submit_unstake)
         app.router.add_get("/staking/{address}", self._staking_info)
         app.router.add_get("/staking", self._staking_pool)
+        # ── New endpoints ──
+        app.router.add_get("/account/{address}", self._account_info)
+        app.router.add_get("/account/{address}/lines", self._account_lines)
+        app.router.add_get("/account/{address}/offers", self._account_offers)
+        app.router.add_get("/account/{address}/nftokens", self._account_nftokens)
+        app.router.add_get("/account/{address}/escrows", self._account_escrows)
+        app.router.add_get("/account/{address}/channels", self._account_channels)
+        app.router.add_get("/account/{address}/checks", self._account_checks)
+        app.router.add_get("/tx/{tx_id}", self._get_transaction)
+        # New tx submission endpoints
+        app.router.add_post("/tx/escrow/create", self._submit_escrow_create)
+        app.router.add_post("/tx/escrow/finish", self._submit_escrow_finish)
+        app.router.add_post("/tx/escrow/cancel", self._submit_escrow_cancel)
+        app.router.add_post("/tx/check/create", self._submit_check_create)
+        app.router.add_post("/tx/check/cash", self._submit_check_cash)
+        app.router.add_post("/tx/check/cancel", self._submit_check_cancel)
+        app.router.add_post("/tx/account_set", self._submit_account_set)
+        app.router.add_post("/tx/nftoken/mint", self._submit_nftoken_mint)
+        # Amendments
+        app.router.add_get("/amendments", self._amendments)
+        # WebSocket
+        app.router.add_get("/ws", self._websocket_handler)
 
     # ── handlers ─────────────────────────────────────────────────
 
@@ -523,6 +545,374 @@ class APIServer:
             self.node.ledger.total_supply
         )
         return web.json_response(pool, dumps=_json_dumps)
+
+    # ── account info endpoints ───────────────────────────────────
+
+    async def _account_info(self, request: web.Request) -> web.Response:
+        """GET /account/{address} — full account state."""
+        address = request.match_info["address"]
+        acc = self.node.ledger.get_account(address)
+        if acc is None:
+            raise web.HTTPNotFound(text=f"Account {address} not found")
+        info = acc.to_dict()
+        info["transfer_rate"] = acc.transfer_rate
+        info["require_dest"] = acc.require_dest
+        info["deposit_auth"] = acc.deposit_auth
+        info["default_ripple"] = acc.default_ripple
+        info["global_freeze"] = acc.global_freeze
+        info["disable_master"] = acc.disable_master
+        info["regular_key"] = acc.regular_key
+        info["domain"] = acc.domain
+        info["deposit_preauth"] = list(acc.deposit_preauth)
+        info["tickets"] = acc.tickets
+        # Signer list
+        sl = self.node.ledger.multi_sign_manager.get_signer_list(address)
+        info["signer_list"] = sl.to_dict() if sl else None
+        return web.json_response(info, dumps=_json_dumps)
+
+    async def _account_lines(self, request: web.Request) -> web.Response:
+        """GET /account/{address}/lines — trust lines with pagination."""
+        address = request.match_info["address"]
+        acc = self.node.ledger.get_account(address)
+        if acc is None:
+            raise web.HTTPNotFound(text=f"Account {address} not found")
+        limit = _safe_int(request.query.get("limit", "200"), "limit")
+        marker = _safe_int(request.query.get("marker", "0"), "marker")
+        lines = []
+        all_tl = list(acc.trust_lines.values())
+        page = all_tl[marker : marker + limit]
+        for tl in page:
+            lines.append({
+                "currency": tl.currency,
+                "issuer": tl.issuer,
+                "balance": tl.balance,
+                "limit": tl.limit,
+                "limit_peer": tl.limit_peer,
+                "no_ripple": tl.no_ripple,
+                "frozen": tl.frozen,
+                "authorized": tl.authorized,
+                "quality_in": tl.quality_in,
+                "quality_out": tl.quality_out,
+            })
+        result = {"account": address, "lines": lines}
+        if marker + limit < len(all_tl):
+            result["marker"] = marker + limit
+        return web.json_response(result, dumps=_json_dumps)
+
+    async def _account_offers(self, request: web.Request) -> web.Response:
+        """GET /account/{address}/offers — open DEX offers."""
+        address = request.match_info["address"]
+        acc = self.node.ledger.get_account(address)
+        if acc is None:
+            raise web.HTTPNotFound(text=f"Account {address} not found")
+        offers = acc.open_offers
+        return web.json_response(
+            {"account": address, "offers": offers, "count": len(offers)},
+            dumps=_json_dumps,
+        )
+
+    async def _account_nftokens(self, request: web.Request) -> web.Response:
+        """GET /account/{address}/nftokens — owned NFTokens."""
+        address = request.match_info["address"]
+        tokens = self.node.ledger.nftoken_manager.get_tokens_for_account(address)
+        return web.json_response(
+            {"account": address, "nftokens": [t.to_dict() for t in tokens]},
+            dumps=_json_dumps,
+        )
+
+    async def _account_escrows(self, request: web.Request) -> web.Response:
+        """GET /account/{address}/escrows — active escrows."""
+        address = request.match_info["address"]
+        escrows = self.node.ledger.escrow_manager.get_escrows_for_account(address)
+        return web.json_response(
+            {"account": address, "escrows": [e.to_dict() for e in escrows]},
+            dumps=_json_dumps,
+        )
+
+    async def _account_channels(self, request: web.Request) -> web.Response:
+        """GET /account/{address}/channels — active payment channels."""
+        address = request.match_info["address"]
+        channels = self.node.ledger.channel_manager.get_channels_for_account(address)
+        return web.json_response(
+            {"account": address, "channels": [c.to_dict() for c in channels]},
+            dumps=_json_dumps,
+        )
+
+    async def _account_checks(self, request: web.Request) -> web.Response:
+        """GET /account/{address}/checks — pending checks."""
+        address = request.match_info["address"]
+        checks = self.node.ledger.check_manager.get_checks_for_account(address)
+        return web.json_response(
+            {"account": address, "checks": [c.to_dict() for c in checks]},
+            dumps=_json_dumps,
+        )
+
+    async def _get_transaction(self, request: web.Request) -> web.Response:
+        """GET /tx/{tx_id} — lookup transaction by ID."""
+        tx_id = request.match_info["tx_id"]
+        tx_obj = getattr(self.node, "tx_objects", {}).get(tx_id)
+        if tx_obj is not None:
+            return web.json_response(tx_obj.to_dict(), dumps=_json_dumps)
+        tx_dict = self.node.tx_pool.get(tx_id)
+        if tx_dict is not None:
+            return web.json_response(tx_dict, dumps=_json_dumps)
+        raise web.HTTPNotFound(text=f"Transaction {tx_id} not found")
+
+    # ── new transaction submission handlers ──────────────────────
+
+    async def _submit_escrow_create(self, request: web.Request) -> web.Response:
+        """POST /tx/escrow/create"""
+        try:
+            body = await request.json()
+        except Exception as exc:
+            raise web.HTTPBadRequest(text="Invalid JSON body") from exc
+        dest = body.get("destination", "")
+        amount = _safe_float(body.get("amount", 0), "amount")
+        finish_after = _safe_int(body.get("finish_after", 0), "finish_after")
+        cancel_after = _safe_int(body.get("cancel_after", 0), "cancel_after")
+        condition = body.get("condition", "")
+        if not dest or amount <= 0:
+            raise web.HTTPBadRequest(text="destination and positive amount required")
+        from nexaflow_core.transaction import create_escrow_create
+        tx = create_escrow_create(self.node.wallet.address, dest, amount,
+                                  finish_after, cancel_after, condition)
+        self.node.wallet.sign_transaction(tx)
+        result = self.node.ledger.apply_transaction(tx)
+        if result != 0:
+            from nexaflow_core.transaction import RESULT_NAMES
+            raise web.HTTPBadRequest(text=f"Apply failed: {RESULT_NAMES.get(result, 'unknown')}")
+        return web.json_response({"status": "escrow_created", "tx_id": tx.tx_id})
+
+    async def _submit_escrow_finish(self, request: web.Request) -> web.Response:
+        """POST /tx/escrow/finish"""
+        try:
+            body = await request.json()
+        except Exception as exc:
+            raise web.HTTPBadRequest(text="Invalid JSON body") from exc
+        escrow_id = body.get("escrow_id", "")
+        owner = body.get("owner", "")
+        fulfillment = body.get("fulfillment", "")
+        from nexaflow_core.transaction import create_escrow_finish
+        tx = create_escrow_finish(self.node.wallet.address, owner, escrow_id, fulfillment)
+        self.node.wallet.sign_transaction(tx)
+        result = self.node.ledger.apply_transaction(tx)
+        if result != 0:
+            from nexaflow_core.transaction import RESULT_NAMES
+            raise web.HTTPBadRequest(text=f"Apply failed: {RESULT_NAMES.get(result, 'unknown')}")
+        return web.json_response({"status": "escrow_finished", "tx_id": tx.tx_id})
+
+    async def _submit_escrow_cancel(self, request: web.Request) -> web.Response:
+        """POST /tx/escrow/cancel"""
+        try:
+            body = await request.json()
+        except Exception as exc:
+            raise web.HTTPBadRequest(text="Invalid JSON body") from exc
+        escrow_id = body.get("escrow_id", "")
+        owner = body.get("owner", "")
+        from nexaflow_core.transaction import create_escrow_cancel
+        tx = create_escrow_cancel(self.node.wallet.address, owner, escrow_id)
+        self.node.wallet.sign_transaction(tx)
+        result = self.node.ledger.apply_transaction(tx)
+        if result != 0:
+            from nexaflow_core.transaction import RESULT_NAMES
+            raise web.HTTPBadRequest(text=f"Apply failed: {RESULT_NAMES.get(result, 'unknown')}")
+        return web.json_response({"status": "escrow_cancelled", "tx_id": tx.tx_id})
+
+    async def _submit_check_create(self, request: web.Request) -> web.Response:
+        """POST /tx/check/create"""
+        try:
+            body = await request.json()
+        except Exception as exc:
+            raise web.HTTPBadRequest(text="Invalid JSON body") from exc
+        dest = body.get("destination", "")
+        send_max = _safe_float(body.get("send_max", 0), "send_max")
+        currency = body.get("currency", "NXF")
+        issuer = body.get("issuer", "")
+        expiration = _safe_int(body.get("expiration", 0), "expiration")
+        from nexaflow_core.transaction import create_check_create
+        tx = create_check_create(self.node.wallet.address, dest, send_max,
+                                 currency, issuer, expiration)
+        self.node.wallet.sign_transaction(tx)
+        result = self.node.ledger.apply_transaction(tx)
+        if result != 0:
+            from nexaflow_core.transaction import RESULT_NAMES
+            raise web.HTTPBadRequest(text=f"Apply failed: {RESULT_NAMES.get(result, 'unknown')}")
+        return web.json_response({"status": "check_created", "tx_id": tx.tx_id})
+
+    async def _submit_check_cash(self, request: web.Request) -> web.Response:
+        """POST /tx/check/cash"""
+        try:
+            body = await request.json()
+        except Exception as exc:
+            raise web.HTTPBadRequest(text="Invalid JSON body") from exc
+        check_id = body.get("check_id", "")
+        amount = _safe_float(body.get("amount", 0), "amount")
+        deliver_min = _safe_float(body.get("deliver_min", 0), "deliver_min")
+        from nexaflow_core.transaction import create_check_cash
+        tx = create_check_cash(self.node.wallet.address, check_id, amount, deliver_min)
+        self.node.wallet.sign_transaction(tx)
+        result = self.node.ledger.apply_transaction(tx)
+        if result != 0:
+            from nexaflow_core.transaction import RESULT_NAMES
+            raise web.HTTPBadRequest(text=f"Apply failed: {RESULT_NAMES.get(result, 'unknown')}")
+        return web.json_response({"status": "check_cashed", "tx_id": tx.tx_id})
+
+    async def _submit_check_cancel(self, request: web.Request) -> web.Response:
+        """POST /tx/check/cancel"""
+        try:
+            body = await request.json()
+        except Exception as exc:
+            raise web.HTTPBadRequest(text="Invalid JSON body") from exc
+        check_id = body.get("check_id", "")
+        from nexaflow_core.transaction import create_check_cancel
+        tx = create_check_cancel(self.node.wallet.address, check_id)
+        self.node.wallet.sign_transaction(tx)
+        result = self.node.ledger.apply_transaction(tx)
+        if result != 0:
+            from nexaflow_core.transaction import RESULT_NAMES
+            raise web.HTTPBadRequest(text=f"Apply failed: {RESULT_NAMES.get(result, 'unknown')}")
+        return web.json_response({"status": "check_cancelled", "tx_id": tx.tx_id})
+
+    async def _submit_account_set(self, request: web.Request) -> web.Response:
+        """POST /tx/account_set"""
+        try:
+            body = await request.json()
+        except Exception as exc:
+            raise web.HTTPBadRequest(text="Invalid JSON body") from exc
+        set_flags = body.get("set_flags", {})
+        clear_flags = body.get("clear_flags", {})
+        transfer_rate = _safe_float(body.get("transfer_rate", 0), "transfer_rate")
+        domain = body.get("domain", "")
+        from nexaflow_core.transaction import create_account_set
+        tx = create_account_set(self.node.wallet.address, set_flags, clear_flags,
+                                transfer_rate, domain)
+        self.node.wallet.sign_transaction(tx)
+        result = self.node.ledger.apply_transaction(tx)
+        if result != 0:
+            from nexaflow_core.transaction import RESULT_NAMES
+            raise web.HTTPBadRequest(text=f"Apply failed: {RESULT_NAMES.get(result, 'unknown')}")
+        return web.json_response({"status": "account_set", "tx_id": tx.tx_id})
+
+    async def _submit_nftoken_mint(self, request: web.Request) -> web.Response:
+        """POST /tx/nftoken/mint"""
+        try:
+            body = await request.json()
+        except Exception as exc:
+            raise web.HTTPBadRequest(text="Invalid JSON body") from exc
+        uri = body.get("uri", "")
+        transfer_fee = _safe_int(body.get("transfer_fee", 0), "transfer_fee")
+        taxon = _safe_int(body.get("nftoken_taxon", 0), "nftoken_taxon")
+        transferable = body.get("transferable", True)
+        burnable = body.get("burnable", True)
+        from nexaflow_core.transaction import create_nftoken_mint
+        tx = create_nftoken_mint(self.node.wallet.address, uri=uri,
+                                 transfer_fee=transfer_fee, nftoken_taxon=taxon,
+                                 transferable=transferable, burnable=burnable)
+        self.node.wallet.sign_transaction(tx)
+        result = self.node.ledger.apply_transaction(tx)
+        if result != 0:
+            from nexaflow_core.transaction import RESULT_NAMES
+            raise web.HTTPBadRequest(text=f"Apply failed: {RESULT_NAMES.get(result, 'unknown')}")
+        return web.json_response({"status": "nftoken_minted", "tx_id": tx.tx_id})
+
+    # ── amendments ────────────────────────────────────────────────
+
+    async def _amendments(self, _request: web.Request) -> web.Response:
+        """GET /amendments — list all amendments and their status."""
+        amendments = self.node.ledger.amendment_manager.get_all_amendments()
+        enabled = self.node.ledger.amendment_manager.get_enabled()
+        return web.json_response(
+            {"amendments": amendments, "enabled": enabled},
+            dumps=_json_dumps,
+        )
+
+    # ── WebSocket subscription ───────────────────────────────────
+
+    async def _websocket_handler(self, request: web.Request) -> web.WebSocketResponse:
+        """
+        WebSocket /ws — subscribe to ledger events.
+
+        Client sends JSON messages to subscribe:
+          {"command": "subscribe", "streams": ["ledger", "transactions"]}
+          {"command": "subscribe", "accounts": ["rXXX"]}
+          {"command": "unsubscribe", "streams": ["ledger"]}
+
+        Server pushes events matching subscriptions.
+        """
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+
+        subscriptions: dict[str, bool] = {}
+        account_subs: set[str] = set()
+
+        # Register this WebSocket for event broadcasting
+        ws_id = id(ws)
+        if not hasattr(self, "_ws_clients"):
+            self._ws_clients = {}
+        self._ws_clients[ws_id] = {
+            "ws": ws,
+            "streams": subscriptions,
+            "accounts": account_subs,
+        }
+
+        try:
+            async for msg in ws:
+                if msg.type == web.WSMsgType.TEXT:
+                    try:
+                        data = json.loads(msg.data)
+                    except json.JSONDecodeError:
+                        await ws.send_json({"error": "Invalid JSON"})
+                        continue
+
+                    cmd = data.get("command", "")
+                    if cmd == "subscribe":
+                        for stream in data.get("streams", []):
+                            subscriptions[stream] = True
+                        for acct in data.get("accounts", []):
+                            account_subs.add(acct)
+                        await ws.send_json({"status": "subscribed",
+                                            "streams": list(subscriptions.keys()),
+                                            "accounts": list(account_subs)})
+                    elif cmd == "unsubscribe":
+                        for stream in data.get("streams", []):
+                            subscriptions.pop(stream, None)
+                        for acct in data.get("accounts", []):
+                            account_subs.discard(acct)
+                        await ws.send_json({"status": "unsubscribed"})
+                    elif cmd == "ping":
+                        await ws.send_json({"type": "pong"})
+                    else:
+                        await ws.send_json({"error": f"Unknown command: {cmd}"})
+                elif msg.type == web.WSMsgType.ERROR:
+                    logger.error(f"WebSocket error: {ws.exception()}")
+        finally:
+            self._ws_clients.pop(ws_id, None)
+
+        return ws
+
+    async def broadcast_ws_event(self, event_type: str, data: dict) -> None:
+        """Broadcast an event to all WebSocket clients subscribed to the stream."""
+        if not hasattr(self, "_ws_clients"):
+            return
+        for ws_info in list(self._ws_clients.values()):
+            ws = ws_info["ws"]
+            if ws.closed:
+                continue
+            # Check stream subscription
+            if event_type in ws_info["streams"]:
+                try:
+                    await ws.send_json({"type": event_type, **data})
+                except Exception:
+                    pass
+            # Check account subscription
+            if event_type == "transaction":
+                acct = data.get("account", "")
+                dest = data.get("destination", "")
+                if acct in ws_info["accounts"] or dest in ws_info["accounts"]:
+                    try:
+                        await ws.send_json({"type": "account_transaction", **data})
+                    except Exception:
+                        pass
 
 
 def _json_dumps(obj: Any) -> str:
