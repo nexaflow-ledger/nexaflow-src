@@ -184,6 +184,110 @@ class NodeBackend(QObject):
             raise ValueError(f"No wallet found for {address}")
         return wallet.to_dict()
 
+    def recover_wallet_from_keys(
+        self,
+        public_key: str,
+        private_key: str,
+        address: str | None = None,
+        name: str = "",
+        view_public_key: str | None = None,
+        view_private_key: str | None = None,
+        spend_public_key: str | None = None,
+        spend_private_key: str | None = None,
+    ) -> dict:
+        """Recover a wallet from raw hex key material.
+
+        Parameters
+        ----------
+        public_key       130-char hex uncompressed secp256k1 public key.
+        private_key      64-char hex secp256k1 private key.
+        address          Optional address; derived from public key if omitted.
+        name             Optional friendly name.
+        view_public_key  Optional 130-char hex view public key (privacy/stealth).
+        view_private_key Optional 64-char hex view private key.
+        spend_public_key Optional 130-char hex spend public key.
+        spend_private_key Optional 64-char hex spend private key.
+        """
+        pub = bytes.fromhex(public_key)
+        priv = bytes.fromhex(private_key)
+
+        # Validate key pairing — derive public key from private and compare
+        try:
+            from ecdsa import SECP256k1, SigningKey
+            sk = SigningKey.from_string(priv, curve=SECP256k1)
+            derived_pub = b"\x04" + sk.get_verifying_key().to_string()
+            if derived_pub != pub:
+                raise ValueError(
+                    "Public key does not match the provided private key. "
+                    "Please double-check both values."
+                )
+        except ImportError:
+            pass  # ecdsa not installed — skip verification
+
+        v_pub = bytes.fromhex(view_public_key) if view_public_key else None
+        v_priv = bytes.fromhex(view_private_key) if view_private_key else None
+        s_pub = bytes.fromhex(spend_public_key) if spend_public_key else None
+        s_priv = bytes.fromhex(spend_private_key) if spend_private_key else None
+
+        # Validate view key pairing if both provided
+        if v_priv and v_pub:
+            try:
+                from ecdsa import SECP256k1, SigningKey
+                vk = SigningKey.from_string(v_priv, curve=SECP256k1)
+                derived_v_pub = b"\x04" + vk.get_verifying_key().to_string()
+                if derived_v_pub != v_pub:
+                    raise ValueError(
+                        "View public key does not match view private key."
+                    )
+            except ImportError:
+                pass
+
+        # Validate spend key pairing if both provided
+        if s_priv and s_pub:
+            try:
+                from ecdsa import SECP256k1, SigningKey
+                sk2 = SigningKey.from_string(s_priv, curve=SECP256k1)
+                derived_s_pub = b"\x04" + sk2.get_verifying_key().to_string()
+                if derived_s_pub != s_pub:
+                    raise ValueError(
+                        "Spend public key does not match spend private key."
+                    )
+            except ImportError:
+                pass
+
+        wallet = Wallet(
+            priv, pub, address,
+            view_private_key=v_priv, view_public_key=v_pub,
+            spend_private_key=s_priv, spend_public_key=s_pub,
+        )
+
+        self.wallets[wallet.address] = wallet
+        self.wallet_names[wallet.address] = (
+            name or f"Recovered-{wallet.address[:8]}"
+        )
+
+        # Register on all validator ledgers
+        for node in self.network.nodes.values():
+            if not node.ledger.account_exists(wallet.address):
+                node.ledger.create_account(wallet.address, 0.0)
+
+        bal = self._primary_node.ledger.get_balance(wallet.address)
+        info = {
+            "address": wallet.address,
+            "name": self.wallet_names[wallet.address],
+            "balance": bal,
+            "public_key": wallet.public_key.hex(),
+        }
+        self.wallet_created.emit(info)
+        self.accounts_changed.emit()
+
+        has_privacy = bool(v_priv and s_priv)
+        self._log(
+            f"Recovered wallet → {wallet.address[:16]}… "
+            f"({'with' if has_privacy else 'without'} untraceable keys)"
+        )
+        return info
+
     def import_wallet_from_file(self, data_str: str, passphrase: str) -> dict:
         """Import a wallet from an encrypted JSON export."""
         data = json.loads(data_str)

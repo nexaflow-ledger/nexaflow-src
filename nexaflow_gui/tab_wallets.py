@@ -129,6 +129,147 @@ class _ExportWalletDialog(QDialog):
         self.accept()
 
 
+class _RecoverWalletDialog(QDialog):
+    """Recover a wallet from raw key material (address + public/private keys)."""
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("Recover Wallet from Keys")
+        self.setMinimumWidth(560)
+        lay = QVBoxLayout(self)
+
+        info = QLabel(
+            "Paste your key material to recover a wallet.\n"
+            "Private keys are 64 hex chars, public keys are 130 hex chars "
+            "(starting with 04).\nView/spend keys are optional — fill them "
+            "in to recover untraceable transaction capability."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("color: #8b949e; margin-bottom: 8px;")
+        lay.addWidget(info)
+
+        form = QFormLayout()
+
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("Optional friendly name")
+        form.addRow("Name:", self.name_edit)
+
+        self.address_edit = QLineEdit()
+        self.address_edit.setPlaceholderText("e.g. rABC123... (leave blank to derive)")
+        form.addRow("Address:", self.address_edit)
+
+        # ── main keys ───────
+        self.pub_edit = QLineEdit()
+        self.pub_edit.setPlaceholderText("130-char hex (04...)")
+        form.addRow("Public Key:", self.pub_edit)
+
+        self.priv_edit = QLineEdit()
+        self.priv_edit.setPlaceholderText("64-char hex")
+        self.priv_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        form.addRow("Private Key:", self.priv_edit)
+
+        # ── separator ───────
+        sep = QLabel("── Untraceable / Privacy Keys (optional) ──")
+        sep.setStyleSheet("color: #58a6ff; font-weight: 600; margin-top: 8px;")
+        form.addRow(sep)
+
+        self.view_pub_edit = QLineEdit()
+        self.view_pub_edit.setPlaceholderText("130-char hex (04...)")
+        form.addRow("View Public Key:", self.view_pub_edit)
+
+        self.view_priv_edit = QLineEdit()
+        self.view_priv_edit.setPlaceholderText("64-char hex")
+        self.view_priv_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        form.addRow("View Private Key:", self.view_priv_edit)
+
+        self.spend_pub_edit = QLineEdit()
+        self.spend_pub_edit.setPlaceholderText("130-char hex (04...)")
+        form.addRow("Spend Public Key:", self.spend_pub_edit)
+
+        self.spend_priv_edit = QLineEdit()
+        self.spend_priv_edit.setPlaceholderText("64-char hex")
+        self.spend_priv_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        form.addRow("Spend Private Key:", self.spend_priv_edit)
+
+        lay.addLayout(form)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._validate)
+        buttons.rejected.connect(self.reject)
+        lay.addWidget(buttons)
+
+    # ── helpers ──
+
+    @staticmethod
+    def _is_valid_hex(text: str, expected_len: int) -> bool:
+        if len(text) != expected_len:
+            return False
+        try:
+            bytes.fromhex(text)
+            return True
+        except ValueError:
+            return False
+
+    def _validate(self):
+        pub = self.pub_edit.text().strip()
+        priv = self.priv_edit.text().strip()
+
+        if not pub or not priv:
+            QMessageBox.warning(self, "Error", "Public key and private key are required.")
+            return
+        if not self._is_valid_hex(priv, 64):
+            QMessageBox.warning(
+                self, "Error",
+                "Private key must be exactly 64 hex characters."
+            )
+            return
+        if not self._is_valid_hex(pub, 130) or not pub.startswith("04"):
+            QMessageBox.warning(
+                self, "Error",
+                "Public key must be 130 hex characters starting with '04'."
+            )
+            return
+
+        # Validate optional untraceable keys if provided
+        for label, edit, length in [
+            ("View public key", self.view_pub_edit, 130),
+            ("View private key", self.view_priv_edit, 64),
+            ("Spend public key", self.spend_pub_edit, 130),
+            ("Spend private key", self.spend_priv_edit, 64),
+        ]:
+            val = edit.text().strip()
+            if val and not self._is_valid_hex(val, length):
+                QMessageBox.warning(
+                    self, "Error",
+                    f"{label} must be exactly {length} hex characters."
+                )
+                return
+            if val and length == 130 and not val.startswith("04"):
+                QMessageBox.warning(
+                    self, "Error",
+                    f"{label} must start with '04'."
+                )
+                return
+
+        self.accept()
+
+    def get_keys(self) -> dict:
+        """Return key material entered by the user (hex strings)."""
+        result: dict[str, str | None] = {
+            "name": self.name_edit.text().strip(),
+            "address": self.address_edit.text().strip() or None,
+            "public_key": self.pub_edit.text().strip(),
+            "private_key": self.priv_edit.text().strip(),
+            "view_public_key": self.view_pub_edit.text().strip() or None,
+            "view_private_key": self.view_priv_edit.text().strip() or None,
+            "spend_public_key": self.spend_pub_edit.text().strip() or None,
+            "spend_private_key": self.spend_priv_edit.text().strip() or None,
+        }
+        return result
+
+
 class _ImportFileDialog(QDialog):
     """Ask for a passphrase to decrypt an imported wallet file."""
 
@@ -238,6 +379,10 @@ class WalletTab(QWidget):
         self._btn_import_file.setMinimumHeight(36)
         header.addWidget(self._btn_import_file)
 
+        self._btn_recover = QPushButton("🔑  Recover Wallet")
+        self._btn_recover.setMinimumHeight(36)
+        header.addWidget(self._btn_recover)
+
         root.addLayout(header)
 
         # Wallet table
@@ -288,6 +433,7 @@ class WalletTab(QWidget):
         self._btn_create.clicked.connect(self._on_create)
         self._btn_import.clicked.connect(self._on_import)
         self._btn_import_file.clicked.connect(self._on_import_file)
+        self._btn_recover.clicked.connect(self._on_recover)
         self._btn_export.clicked.connect(self._on_export)
         self._btn_view_keys.clicked.connect(self._on_view_keys)
         self._table.currentCellChanged.connect(self._on_selection)
@@ -307,6 +453,26 @@ class WalletTab(QWidget):
                 QMessageBox.warning(self, "Error", "Seed cannot be empty.")
                 return
             self.backend.import_wallet_from_seed(seed, dlg.name_edit.text().strip())
+
+    def _on_recover(self):
+        dlg = _RecoverWalletDialog(self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            keys = dlg.get_keys()
+            self.backend.recover_wallet_from_keys(
+                public_key=keys["public_key"],
+                private_key=keys["private_key"],
+                address=keys.get("address"),
+                name=keys.get("name", ""),
+                view_public_key=keys.get("view_public_key"),
+                view_private_key=keys.get("view_private_key"),
+                spend_public_key=keys.get("spend_public_key"),
+                spend_private_key=keys.get("spend_private_key"),
+            )
+            QMessageBox.information(self, "Success", "Wallet recovered successfully.")
+        except Exception as exc:
+            QMessageBox.critical(self, "Recovery Failed", str(exc))
 
     def _on_import_file(self):
         path, _ = QFileDialog.getOpenFileName(
