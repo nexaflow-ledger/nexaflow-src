@@ -102,7 +102,7 @@ NexaFlow supports **tiered staking** with dynamic interest rates and early-cance
 
 Base APY is scaled by a **demand multiplier** (0.5×–2×) derived from the network staking ratio:
 
-$$\textit{effective\textunderscore apy} = \textit{base\textunderscore apy} \times \textit{demand\textunderscore multiplier}$$
+$$\mathit{effective\\_apy} = \mathit{base\\_apy} \times \mathit{demand\\_multiplier}$$
 
 When fewer tokens are staked the multiplier rises to attract capital.  When too many are staked it drops to release liquidity.  Target ratio = 30 %.
 
