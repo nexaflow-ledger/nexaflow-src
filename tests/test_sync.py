@@ -12,29 +12,25 @@ Covers:
   - Backward-compatible LEDGER_REQ/RES handling
 """
 
-import asyncio
-import copy
-import time
 
 import pytest
 
 from nexaflow_core.ledger import (
-    Ledger, LedgerHeader, AccountEntry, TrustLineEntry, ConfidentialOutput,
+    ConfidentialOutput,
+    Ledger,
+    LedgerHeader,
 )
-from nexaflow_core.staking import StakeRecord, StakeTier, StakingPool
+from nexaflow_core.staking import StakeTier
 from nexaflow_core.sync import (
-    build_full_snapshot,
-    build_delta_snapshot,
-    apply_snapshot,
-    _verify_header_chain,
-    _serialise_account,
-    _serialise_header,
-    _serialise_stake,
     LedgerSyncManager,
     PeerSyncStatus,
-    DELTA_THRESHOLD,
+    _serialise_account,
+    _serialise_header,
+    _verify_header_chain,
+    apply_snapshot,
+    build_delta_snapshot,
+    build_full_snapshot,
 )
-
 
 # ── Fixtures ─────────────────────────────────────────────────────────
 
@@ -167,7 +163,6 @@ class TestDeltaSnapshot:
 
         # Copy the first closed header from source to simulate shared history
         first_hdr = source_ledger.closed_ledgers[0]
-        from nexaflow_core.ledger import LedgerHeader
         hdr_copy = LedgerHeader(first_hdr.sequence, first_hdr.parent_hash)
         hdr_copy.hash = first_hdr.hash
         hdr_copy.tx_hash = first_hdr.tx_hash
@@ -317,7 +312,7 @@ class TestSyncManagerLogic:
 
         class FakeP2P:
             node_id = "local"
-            peers = {}
+            peers = {}  # noqa: RUF012
 
             async def send_to_peer(self, *a, **kw):
                 return True
@@ -338,7 +333,7 @@ class TestSyncManagerLogic:
     def test_choose_best_peer_none_when_not_ahead(self):
         class FakeP2P:
             node_id = "local"
-            peers = {}
+            peers = {}  # noqa: RUF012
 
         p2p = FakeP2P()
         ledger = Ledger(total_supply=1000.0)
@@ -355,7 +350,7 @@ class TestSyncManagerLogic:
     def test_handle_sync_status_req_returns_correct_data(self):
         class FakeP2P:
             node_id = "node-1"
-            peers = {}
+            peers = {}  # noqa: RUF012
 
         p2p = FakeP2P()
         ledger = Ledger(total_supply=1000.0)
@@ -371,7 +366,7 @@ class TestSyncManagerLogic:
     def test_handle_sync_delta_req_builds_delta(self, source_ledger):
         class FakeP2P:
             node_id = "node-1"
-            peers = {}
+            peers = {}  # noqa: RUF012
 
         mgr = LedgerSyncManager(FakeP2P(), source_ledger)
         delta = mgr.handle_sync_delta_req({"since_seq": 1}, "peer_x")
@@ -384,7 +379,7 @@ class TestSyncManagerLogic:
     def test_handle_sync_snap_req_builds_full(self, source_ledger):
         class FakeP2P:
             node_id = "node-1"
-            peers = {}
+            peers = {}  # noqa: RUF012
 
         mgr = LedgerSyncManager(FakeP2P(), source_ledger)
         snap = mgr.handle_sync_snap_req({}, "peer_x")
@@ -396,7 +391,7 @@ class TestSyncManagerLogic:
 
         class FakeP2P:
             node_id = "node-1"
-            peers = {}
+            peers = {}  # noqa: RUF012
 
         mgr_source = LedgerSyncManager(FakeP2P(), source_ledger)
         mgr_dest = LedgerSyncManager(FakeP2P(), empty_ledger)
@@ -411,7 +406,7 @@ class TestSyncManagerLogic:
     def test_status_output(self, source_ledger):
         class FakeP2P:
             node_id = "node-1"
-            peers = {}
+            peers = {}  # noqa: RUF012
 
         mgr = LedgerSyncManager(FakeP2P(), source_ledger)
         s = mgr.status()

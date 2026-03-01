@@ -32,12 +32,12 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from nexaflow_core.consensus import ConsensusEngine, Proposal  # noqa: E402
 from nexaflow_core.config import load_config  # noqa: E402
+from nexaflow_core.consensus import ConsensusEngine, Proposal  # noqa: E402
 from nexaflow_core.ledger import Ledger  # noqa: E402
 from nexaflow_core.p2p import P2PNode  # noqa: E402
 from nexaflow_core.storage import LedgerStore  # noqa: E402
-from nexaflow_core.sync import LedgerSyncManager, STATUS_TIMEOUT, DATA_TIMEOUT  # noqa: E402
+from nexaflow_core.sync import DATA_TIMEOUT, STATUS_TIMEOUT, LedgerSyncManager  # noqa: E402
 from nexaflow_core.transaction import Amount, Transaction, create_payment  # noqa: E402
 from nexaflow_core.trust_line import TrustGraph  # noqa: E402
 from nexaflow_core.validator import TransactionValidator  # noqa: E402
@@ -209,8 +209,8 @@ class NexaFlowNode:
 
     def _on_peer_connected(self, peer_id: str):
         logger.info(f"Peer connected: {peer_id}")
-        # Trigger an efficient sync cycle (status → delta/snap as needed)
-        asyncio.ensure_future(self.sync_manager.request_sync())
+        # Trigger an efficient sync cycle (status -> delta/snap as needed)
+        self._sync_task = asyncio.ensure_future(self.sync_manager.request_sync())
 
     def _on_peer_disconnected(self, peer_id: str):
         logger.info(f"Peer disconnected: {peer_id}")

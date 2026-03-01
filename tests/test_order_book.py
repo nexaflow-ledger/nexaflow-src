@@ -17,7 +17,6 @@ Covers:
 """
 
 import unittest
-import time
 
 from nexaflow_core.order_book import Fill, Order, OrderBook
 
@@ -259,7 +258,7 @@ class TestSnapshot(unittest.TestCase):
         self.assertEqual(fills[0]["quantity"], 10.0)
 
     def test_fills_limit(self):
-        for i in range(60):
+        for _i in range(60):
             self.ob.submit_order("rA", "NXF/USD", "sell", 1.0, 1.0)
             self.ob.submit_order("rB", "NXF/USD", "buy", 1.0, 1.0)
         fills = self.ob.get_fills(limit=10)

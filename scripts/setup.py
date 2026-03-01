@@ -1,5 +1,5 @@
 """
-Build configuration for NexaFlow – A NexaFlow-like cryptocurrency with Cython optimization.
+Build configuration for NexaFlow - A NexaFlow-like cryptocurrency with Cython optimization.
 
 Build with:
     python setup.py build_ext --inplace
@@ -11,7 +11,8 @@ still be used in pure-Python mode.
 
 import os
 from pathlib import Path
-from setuptools import setup, Extension, find_packages
+
+from setuptools import Extension, find_packages, setup
 
 HERE = Path(__file__).resolve().parent
 long_description = (HERE / "README.md").read_text(encoding="utf-8") if (HERE / "README.md").exists() else ""

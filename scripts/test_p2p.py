@@ -2,8 +2,8 @@
 """Integration test: two nodes connect, exchange transactions, and run consensus."""
 
 import asyncio
-import sys
 import os
+import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from run_node import NexaFlowNode
@@ -34,7 +34,7 @@ async def test_two_nodes():
     print("    ✓ Peers connected")
 
     # Send a payment from node1's wallet to node2's wallet
-    print(f"\n[4] Balances before payment:")
+    print("\n[4] Balances before payment:")
     print(f"    N1: {n1.ledger.get_balance(n1.wallet.address):.6f} NXF")
     print(f"    N2: {n2.ledger.get_balance(n2.wallet.address):.6f} NXF")
 
@@ -46,10 +46,10 @@ async def test_two_nodes():
     print(f"    N1 pool: {len(n1.tx_pool)} txns, N2 pool: {len(n2.tx_pool)} txns")
 
     # Run consensus on node 1
-    print(f"\n[6] Running consensus round...")
+    print("\n[6] Running consensus round...")
     await n1.run_consensus()
 
-    print(f"\n[7] Balances AFTER consensus:")
+    print("\n[7] Balances AFTER consensus:")
     print(f"    N1: {n1.ledger.get_balance(n1.wallet.address):.6f} NXF")
     n2_bal = n1.ledger.get_balance(n2.wallet.address)
     print(f"    N2 (on N1's ledger): {n2_bal:.6f} NXF")
@@ -58,7 +58,7 @@ async def test_two_nodes():
     print("    ✓ Payment applied successfully")
 
     # Check ledger state
-    print(f"\n[8] Ledger state:")
+    print("\n[8] Ledger state:")
     summary = n1.ledger.get_state_summary()
     for k, v in summary.items():
         print(f"    {k}: {v}")

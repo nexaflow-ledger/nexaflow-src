@@ -6,38 +6,38 @@ automatically returns principal + interest to the staker.  Early
 cancellation via an Unstake transaction is possible but incurs a
 penalty that scales with two factors:
 
-  1. **Tier APY** — higher-yield tiers carry a larger base penalty.
-  2. **Time served** — the longer the stake has been held, the more
+  1. **Tier APY** -- higher-yield tiers carry a larger base penalty.
+  2. **Time served** -- the longer the stake has been held, the more
      the penalty is reduced (linearly toward zero at maturity).
 
 Dynamic Interest Algorithm
-──────────────────────────
+--------------------------
 Base APY per tier is adjusted by a *demand multiplier* derived from
 the network staking ratio (total_staked / circulating_supply):
 
-    effective_apy = base_apy × demand_multiplier
-    demand_multiplier = clamp(0.5, 2.0, 1 + (target − ratio) × k)
+    effective_apy = base_apy x demand_multiplier
+    demand_multiplier = clamp(0.5, 2.0, 1 + (target - ratio) x k)
 
-When fewer tokens are staked the multiplier rises (up to 2×) to
-attract capital.  When too many tokens are staked it drops (to 0.5×)
+When fewer tokens are staked the multiplier rises (up to 2x) to
+attract capital.  When too many tokens are staked it drops (to 0.5x)
 to release liquidity.  Target ratio = 30 %, k = 3.
 
 Early-Cancellation Penalty (tier-scaled, time-decayed)
-──────────────────────────────────────────────────────
+------------------------------------------------------
   interest_penalty_rate = BASE_INTEREST_PENALTY
-                        + (tier_apy / MAX_BASE_APY) × INTEREST_PENALTY_SCALE
-     → ranges  50 %  (Flexible/lowest)  …  90 %  (365-day/highest)
+                        + (tier_apy / MAX_BASE_APY) x INTEREST_PENALTY_SCALE
+     -> ranges  50 %  (Flexible/lowest)  ...  90 %  (365-day/highest)
 
   principal_penalty_rate = BASE_PRINCIPAL_PENALTY
-                         + (tier_apy / MAX_BASE_APY) × PRINCIPAL_PENALTY_SCALE
-     → ranges  2 %  (Flexible)  …  10 %  (365-day)
+                         + (tier_apy / MAX_BASE_APY) x PRINCIPAL_PENALTY_SCALE
+     -> ranges  2 %  (Flexible)  ...  10 %  (365-day)
 
-  time_decay = 1 − (elapsed / lock_duration)   (0 at maturity)
+  time_decay = 1 - (elapsed / lock_duration)   (0 at maturity)
 
-  actual_interest_forfeited = accrued × interest_penalty_rate × time_decay
-  actual_principal_penalty  = principal × principal_penalty_rate × time_decay
+  actual_interest_forfeited = accrued x interest_penalty_rate x time_decay
+  actual_principal_penalty  = principal x principal_penalty_rate x time_decay
 
-Flexible-tier stakes have lock_duration = 0 → time_decay = 0 → zero penalty.
+Flexible-tier stakes have lock_duration = 0 -> time_decay = 0 -> zero penalty.
 """
 
 from __future__ import annotations
@@ -45,8 +45,6 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Optional
-
 
 # ── Tier definitions ────────────────────────────────────────────────────
 
@@ -87,14 +85,14 @@ MAX_MULTIPLIER: float = 2.0
 
 # ── Penalty parameters (tier-scaled, time-decayed) ─────────────────────
 
-# Highest base APY across all tiers — used to normalise tier scaling
+# Highest base APY across all tiers -- used to normalise tier scaling
 MAX_BASE_APY: float = max(apy for _, apy in TIER_CONFIG.values())  # 0.15
 
-# Interest penalty: forfeit 50 %–90 % of accrued interest
+# Interest penalty: forfeit 50 %-90 % of accrued interest
 BASE_INTEREST_PENALTY: float  = 0.50
 INTEREST_PENALTY_SCALE: float = 0.40   # adds up to 40 pp for highest tier
 
-# Principal penalty: burn 2 %–10 % of principal
+# Principal penalty: burn 2 %-10 % of principal
 BASE_PRINCIPAL_PENALTY: float  = 0.02
 PRINCIPAL_PENALTY_SCALE: float = 0.08  # adds up to 8 pp for highest tier
 
@@ -173,7 +171,7 @@ class StakeRecord:
     amount: float           # principal locked
     tier: StakeTier
     base_apy: float         # base rate at creation
-    effective_apy: float    # base × demand multiplier at creation
+    effective_apy: float    # base x demand multiplier at creation
     lock_duration: int      # seconds
     start_time: float       # epoch
     maturity_time: float    # epoch (0.0 for Flexible)
@@ -183,7 +181,7 @@ class StakeRecord:
 
     # ── interest helpers ────────────────────────────────────────────
 
-    def accrued_interest(self, now: Optional[float] = None) -> float:
+    def accrued_interest(self, now: float | None = None) -> float:
         """Interest accrued so far using the effective APY."""
         if now is None:
             now = time.time()
@@ -201,7 +199,7 @@ class StakeRecord:
         return self.amount + self.maturity_interest()
 
     def early_cancel_payout(
-        self, now: Optional[float] = None,
+        self, now: float | None = None,
     ) -> tuple[float, float, float]:
         """
         Compute the payout if cancelled before maturity.
@@ -231,7 +229,7 @@ class StakeRecord:
         payout = (self.amount - principal_penalty) + interest_kept
         return payout, interest_forfeited, principal_penalty
 
-    def is_mature(self, now: Optional[float] = None) -> bool:
+    def is_mature(self, now: float | None = None) -> bool:
         """True when the lock period has expired (never for Flexible)."""
         if self.tier == StakeTier.FLEXIBLE:
             return False
@@ -243,7 +241,7 @@ class StakeRecord:
     def is_active(self) -> bool:
         return not self.matured and not self.cancelled
 
-    def to_dict(self, now: Optional[float] = None) -> dict:
+    def to_dict(self, now: float | None = None) -> dict:
         if now is None:
             now = time.time()
         if self.cancelled:
@@ -309,7 +307,7 @@ class StakingPool:
         amount: float,
         tier: StakeTier | int,
         circulating_supply: float = 100_000_000_000.0,
-        now: Optional[float] = None,
+        now: float | None = None,
     ) -> StakeRecord:
         """
         Record a new stake from an applied Stake transaction.
@@ -350,7 +348,7 @@ class StakingPool:
         return record
 
     def mature_stakes(
-        self, now: Optional[float] = None,
+        self, now: float | None = None,
     ) -> list[tuple[str, float, float]]:
         """
         Process all stakes that have reached maturity.
@@ -379,7 +377,7 @@ class StakingPool:
     def cancel_stake(
         self,
         stake_id: str,
-        now: Optional[float] = None,
+        now: float | None = None,
     ) -> tuple[str, float, float, float]:
         """
         Cancel a stake early.
@@ -424,7 +422,7 @@ class StakingPool:
     def get_total_staked_for_address(self, address: str) -> float:
         return sum(s.amount for s in self.get_active_stakes(address))
 
-    def get_pool_summary(self, now: Optional[float] = None) -> dict:
+    def get_pool_summary(self, now: float | None = None) -> dict:
         active = [s for s in self.stakes.values() if s.is_active]
         total_pending = sum(s.accrued_interest(now) for s in active)
         return {

@@ -33,7 +33,6 @@ from nexaflow_core.config import (
     load_config,
 )
 
-
 # ═══════════════════════════════════════════════════════════════════
 #  Defaults
 # ═══════════════════════════════════════════════════════════════════
@@ -48,9 +47,9 @@ class TestDefaults(unittest.TestCase):
         self.assertEqual(n.peers, [])
 
     def test_ledger_defaults(self):
-        l = LedgerConfig()
-        self.assertEqual(l.total_supply, 100_000_000_000.0)
-        self.assertEqual(l.min_fee, 0.000010)
+        ledger_cfg = LedgerConfig()
+        self.assertEqual(ledger_cfg.total_supply, 100_000_000_000.0)
+        self.assertEqual(ledger_cfg.min_fee, 0.000010)
 
     def test_api_defaults(self):
         a = APIConfig()
@@ -84,10 +83,10 @@ class TestDefaults(unittest.TestCase):
         self.assertEqual(g.accounts, {})
 
     def test_logging_defaults(self):
-        l = LoggingConfig()
-        self.assertEqual(l.level, "INFO")
-        self.assertEqual(l.format, "human")
-        self.assertIsNone(l.file)
+        log_cfg = LoggingConfig()
+        self.assertEqual(log_cfg.level, "INFO")
+        self.assertEqual(log_cfg.format, "human")
+        self.assertIsNone(log_cfg.file)
 
     def test_nexaflow_config_defaults(self):
         cfg = NexaFlowConfig()

@@ -21,14 +21,10 @@ Covers additional attack vectors not in the original test_ledger_security.py:
 import time
 import unittest
 
-from nexaflow_core.ledger import AccountEntry, Ledger, LedgerHeader, TrustLineEntry
+from nexaflow_core.ledger import Ledger
 from nexaflow_core.transaction import (
-    TES_SUCCESS,
-    Amount,
-    Transaction,
     create_payment,
     create_stake,
-    create_trust_set,
     create_unstake,
 )
 
@@ -72,7 +68,7 @@ class TestNegativeAmountAttack(ExtendedLedgerSecBase):
         """A negative fee should not credit the sender."""
         tx = create_payment("rAlice", "rBob", 1.0, fee=-1.0)
         alice_before = self.ledger.get_balance("rAlice")
-        result = self.ledger.apply_payment(tx)
+        self.ledger.apply_payment(tx)
         # Negative fee should never increase balance
         alice_after = self.ledger.get_balance("rAlice")
         self.assertLessEqual(alice_after, alice_before)
@@ -89,7 +85,6 @@ class TestFloatingPointPrecision(ExtendedLedgerSecBase):
         VULN: Repeated tiny payments may accumulate floating-point drift.
         Total supply should remain conserved across many operations.
         """
-        initial_supply = self.ledger.total_supply
         initial_total = sum(
             acc.balance for acc in self.ledger.accounts.values()
         )
@@ -139,14 +134,12 @@ class TestSupplyConservation(ExtendedLedgerSecBase):
 
     def test_supply_after_payment(self):
         total_before = self._compute_total_in_accounts()
-        supply_before = self.ledger.total_supply
 
         tx = create_payment("rAlice", "rBob", 50.0, fee=0.5)
         tx.tx_id = "conserve_1"
         self.ledger.apply_transaction(tx)
 
         total_after = self._compute_total_in_accounts()
-        supply_after = self.ledger.total_supply
         burned = self.ledger.total_burned
 
         # Total in accounts + burned = initial supply
@@ -190,7 +183,6 @@ class TestSupplyConservation(ExtendedLedgerSecBase):
         self.ledger.apply_transaction(tx)
 
         supply_before_close = self.ledger.total_supply
-        staked_before = self.ledger.staking_pool.total_staked
 
         self.ledger.close_ledger()
 
@@ -278,7 +270,7 @@ class TestIOUCircularAttack(ExtendedLedgerSecBase):
 
     def test_self_trust_line_no_exploit(self):
         """Setting a trust line to yourself should be harmless."""
-        tl = self.ledger.set_trust_line("rAlice", "USD", "rAlice", 1000.0)
+        self.ledger.set_trust_line("rAlice", "USD", "rAlice", 1000.0)
         # Should not enable self-issued money
         tx = create_payment("rAlice", "rBob", 50.0, "USD", "rAlice")
         tx.tx_id = "self_trust_pay"
@@ -297,7 +289,7 @@ class TestGenesisAccountProtection(ExtendedLedgerSecBase):
     def test_create_duplicate_genesis_returns_existing(self):
         """Re-creating genesis should not reset its balance."""
         genesis_bal = self.ledger.get_balance("rGen")
-        acc = self.ledger.create_account("rGen", 0.0)
+        self.ledger.create_account("rGen", 0.0)
         self.assertEqual(self.ledger.get_balance("rGen"), genesis_bal)
 
     def test_genesis_is_gateway(self):

@@ -19,9 +19,8 @@ Covers:
 import time
 import unittest
 
-from nexaflow_core.ledger import AccountEntry, Ledger, LedgerHeader, TrustLineEntry
+from nexaflow_core.ledger import Ledger
 from nexaflow_core.transaction import (
-    TES_SUCCESS,
     create_payment,
     create_stake,
     create_trust_set,

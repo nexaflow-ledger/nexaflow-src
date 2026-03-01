@@ -13,19 +13,20 @@ Covers:
 
 from __future__ import annotations
 
-import asyncio
-import json
-import time
-from dataclasses import dataclass, field
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from dataclasses import dataclass
+from unittest.mock import MagicMock
 
 import pytest
 from aiohttp import web
-from aiohttp.test_utils import AioHTTPTestCase, TestClient, TestServer
+from aiohttp.test_utils import TestClient, TestServer
 
-from nexaflow_core.api import APIServer, _TokenBucket, _make_api_key_middleware, _make_cors_middleware, _make_rate_limit_middleware
-
+from nexaflow_core.api import (
+    APIServer,
+    _make_api_key_middleware,
+    _make_cors_middleware,
+    _make_rate_limit_middleware,
+    _TokenBucket,
+)
 
 # ─── Helpers ────────────────────────────────────────────────────────
 
@@ -247,7 +248,7 @@ class TestAPIKeyAuth:
     @pytest.mark.asyncio
     async def test_post_allowed_with_correct_header_key(self):
         cfg = _build_api_config(api_key="secret123")
-        client, node = await _make_test_client(cfg)
+        client, _node = await _make_test_client(cfg)
         async with client:
             resp = await client.post(
                 "/tx/payment",
@@ -260,7 +261,7 @@ class TestAPIKeyAuth:
     @pytest.mark.asyncio
     async def test_post_allowed_with_query_param_key(self):
         cfg = _build_api_config(api_key="secret123")
-        client, node = await _make_test_client(cfg)
+        client, _node = await _make_test_client(cfg)
         async with client:
             resp = await client.post(
                 "/tx/payment?api_key=secret123",

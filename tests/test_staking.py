@@ -19,20 +19,17 @@ from nexaflow_core.staking import (
     BASE_INTEREST_PENALTY,
     BASE_PRINCIPAL_PENALTY,
     INTEREST_PENALTY_SCALE,
-    MIN_STAKE_AMOUNT,
     PRINCIPAL_PENALTY_SCALE,
     SECONDS_PER_YEAR,
-    TIER_CONFIG,
     StakeRecord,
     StakeTier,
     StakingPool,
-    compute_demand_multiplier,
-    effective_apy,
     _interest_penalty_rate,
     _principal_penalty_rate,
     _time_decay,
+    compute_demand_multiplier,
+    effective_apy,
 )
-
 
 # Fixtures
 
@@ -147,8 +144,8 @@ class TestPenaltyAlgorithm:
             maturity_time=now + 365*86400,
         )
         cancel_time = now + 86400
-        _, forfeit_30, prin_pen_30 = r30.early_cancel_payout(cancel_time)
-        _, forfeit_365, prin_pen_365 = r365.early_cancel_payout(cancel_time)
+        _, _forfeit_30, prin_pen_30 = r30.early_cancel_payout(cancel_time)
+        _, _forfeit_365, prin_pen_365 = r365.early_cancel_payout(cancel_time)
         assert prin_pen_365 > prin_pen_30
 
     def test_longer_held_reduces_penalty(self):
@@ -290,7 +287,7 @@ class TestStakingPool:
     def test_cancel_stake_locked_with_penalty(self, pool):
         now = time.time()
         pool.record_stake("tx6", "rAlice", 1000, StakeTier.DAYS_90, now=now)
-        addr, payout, forfeit, prin_pen = pool.cancel_stake("tx6", now=now + 10*86400)
+        _addr, payout, forfeit, prin_pen = pool.cancel_stake("tx6", now=now + 10*86400)
         assert forfeit > 0
         assert prin_pen > 0
         assert payout < 1000
@@ -461,7 +458,7 @@ class TestLedgerStaking:
         record = ledger.staking_pool.stakes["stk11"]
         record.maturity_time = now - 1
         record.matured = False
-        header = ledger.close_ledger()
+        ledger.close_ledger()
         final = ledger.get_balance("rStaker")
         assert final > bal_after_stake
         assert record.matured is True

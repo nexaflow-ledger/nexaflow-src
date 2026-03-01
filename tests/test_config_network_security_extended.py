@@ -27,10 +27,8 @@ import tempfile
 import unittest
 
 from nexaflow_core.config import NexaFlowConfig, load_config
-from nexaflow_core.network import Network, ValidatorNode
 from nexaflow_core.ledger import Ledger
-from nexaflow_core.transaction import Transaction, create_payment, Amount
-
+from nexaflow_core.network import Network, ValidatorNode
 
 # ═══════════════════════════════════════════════════════════════════
 #  Config: Environment Variable Edge Cases
@@ -160,7 +158,7 @@ class TestConfigTOML(unittest.TestCase):
         with tempfile.NamedTemporaryFile(suffix=".toml", delete=False) as f:
             f.write(b"this is not valid TOML {{{{ garbage")
             f.flush()
-            with self.assertRaises(Exception):
+            with self.assertRaises(Exception):  # noqa: B017
                 load_config(f.name)
         os.unlink(f.name)
 

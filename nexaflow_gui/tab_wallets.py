@@ -27,8 +27,8 @@ from PyQt6.QtWidgets import (
 )
 
 from nexaflow_gui.widgets import (
-    make_primary_button,
     make_danger_button,
+    make_primary_button,
 )
 
 if TYPE_CHECKING:
@@ -318,7 +318,7 @@ class WalletTab(QWidget):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         try:
-            with open(path, "r") as f:
+            with open(path) as f:
                 data_str = f.read()
             self.backend.import_wallet_from_file(data_str, dlg.pass_edit.text())
             QMessageBox.information(self, "Success", "Wallet imported successfully.")

@@ -27,19 +27,16 @@ from nexaflow_core.staking import (
     INTEREST_PENALTY_SCALE,
     MIN_STAKE_AMOUNT,
     PRINCIPAL_PENALTY_SCALE,
-    SECONDS_PER_YEAR,
+    TIER_CONFIG,
     StakeRecord,
     StakeTier,
     StakingPool,
-    TIER_CONFIG,
-    TIER_NAMES,
     _interest_penalty_rate,
     _principal_penalty_rate,
     _time_decay,
     compute_demand_multiplier,
     effective_apy,
 )
-
 
 # ═══════════════════════════════════════════════════════════════════
 #  StakingPool.record_stake
@@ -176,7 +173,7 @@ class TestCancelStake(unittest.TestCase):
     def test_cancel_locked_has_penalty(self):
         self.pool.record_stake("tx1", "rA", 1000.0, 2, 10000.0, self.now)  # 90-day
         # Cancel immediately → maximum penalty
-        addr, payout, int_forfeited, prin_penalty = self.pool.cancel_stake("tx1", self.now + 1)
+        _addr, payout, _int_forfeited, prin_penalty = self.pool.cancel_stake("tx1", self.now + 1)
         self.assertGreater(prin_penalty, 0.0)
         self.assertLess(payout, 1000.0)
 
@@ -184,7 +181,7 @@ class TestCancelStake(unittest.TestCase):
         # 30-day tier, cancel 29 days in (1 day left)
         self.pool.record_stake("tx1", "rA", 1000.0, 1, 10000.0, self.now)
         cancel_time = self.now + 29 * 86400
-        addr, payout, int_forfeited, prin_penalty = self.pool.cancel_stake("tx1", cancel_time)
+        _addr, _payout, _int_forfeited, prin_penalty = self.pool.cancel_stake("tx1", cancel_time)
         # Penalty should be very small (time_decay ≈ 1/30)
         self.assertLess(prin_penalty, 5.0)  # much less than full penalty
 

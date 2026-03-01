@@ -31,6 +31,7 @@ TLS / mTLS:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import ssl
@@ -323,10 +324,8 @@ class P2PNode:
                 # Store peer's advertised public key
                 pubkey_hex = msg["payload"].get("pubkey", "")
                 if pubkey_hex:
-                    try:
+                    with contextlib.suppress(ValueError):
                         self.peer_pubkeys[peer.peer_id] = bytes.fromhex(pubkey_hex)
-                    except ValueError:
-                        pass
                 self.peers[peer.peer_id] = peer
                 logger.info(
                     f"[{self.node_id}] Connected to {peer.peer_id} "
@@ -366,10 +365,8 @@ class P2PNode:
         # Store peer's advertised public key
         pubkey_hex = msg["payload"].get("pubkey", "")
         if pubkey_hex:
-            try:
+            with contextlib.suppress(ValueError):
                 self.peer_pubkeys[peer.peer_id] = bytes.fromhex(pubkey_hex)
-            except ValueError:
-                pass
 
         # Send our HELLO back — include our public key
         await peer.send("HELLO", {
@@ -478,9 +475,8 @@ class P2PNode:
                 if snap:
                     await peer.send("SYNC_SNAP_RES", snap)
 
-        elif msg_type in ("SYNC_DELTA_RES", "SYNC_SNAP_RES"):
-            if self.on_sync_data_res:
-                self.on_sync_data_res(payload, peer.peer_id)
+        elif msg_type in ("SYNC_DELTA_RES", "SYNC_SNAP_RES") and self.on_sync_data_res:
+            self.on_sync_data_res(payload, peer.peer_id)
 
     # ---- broadcasting ----
 
@@ -511,7 +507,7 @@ class P2PNode:
     async def broadcast_peers(self):
         """Share our known peer addresses with all connected peers (gossip)."""
         my_addr = f"{self.host}:{self.port}"
-        addrs = [my_addr] + list(self._known_addrs.keys())
+        addrs = [my_addr, *list(self._known_addrs.keys())]
         # Include currently connected peers
         for peer in self.peers.values():
             if peer.remote_addr not in addrs:
@@ -564,7 +560,8 @@ class P2PNode:
                         try:
                             host, port_str = addr.rsplit(":", 1)
                             port = int(port_str)
-                            asyncio.create_task(self.connect_to_peer(host, port))
+                            task = asyncio.create_task(self.connect_to_peer(host, port))
+                            task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
                         except (ValueError, OSError):
                             pass
 

@@ -12,6 +12,7 @@ Validates transactions before they enter the consensus pool:
 
 from __future__ import annotations
 
+from nexaflow_core.staking import MIN_STAKE_AMOUNT, StakeTier
 from nexaflow_core.transaction import (
     TEC_BAD_SEQ,
     TEC_BAD_SIG,
@@ -26,7 +27,6 @@ from nexaflow_core.transaction import (
     TT_UNSTAKE,
     Transaction,
 )
-from nexaflow_core.staking import MIN_STAKE_AMOUNT, StakeTier, TIER_CONFIG
 
 # Minimum fee in NXF (8 decimal places)
 MIN_FEE = 0.00001000

@@ -184,7 +184,7 @@ python setup.py build_ext --inplace
 ### Run a Single Node
 
 ```bash
-python run_node.py --node-id alice --port 9001
+python run_node.py --node-id node1 --port 9001
 ```
 
 ### Run a Two-Node Test Network

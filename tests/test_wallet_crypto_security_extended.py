@@ -29,16 +29,15 @@ Covers crypto_utils.pyx:
 
 from __future__ import annotations
 
-import hashlib
 import time
 import unittest
 
 from nexaflow_core.crypto_utils import (
     NEXAFLOW_EPOCH,
-    base58_encode,
     base58_decode,
-    base58check_encode,
+    base58_encode,
     base58check_decode,
+    base58check_encode,
     derive_address,
     generate_keypair,
     generate_nonce,
@@ -53,7 +52,6 @@ from nexaflow_core.crypto_utils import (
     verify,
 )
 from nexaflow_core.wallet import Wallet
-
 
 # ═══════════════════════════════════════════════════════════════════
 #  Wallet: Private Key Exposure
@@ -258,7 +256,7 @@ class TestBase58RoundTrip(unittest.TestCase):
         """Empty bytes edge case."""
         encoded = base58_encode(b"")
         # Should get at least 1 char for zero value
-        decoded = base58_decode(encoded)
+        base58_decode(encoded)
         # May differ due to encoding of 0 — just ensure no crash
 
     def test_round_trip_large_data(self):
@@ -302,7 +300,7 @@ class TestBase58Check(unittest.TestCase):
 class TestAddressDerivation(unittest.TestCase):
 
     def test_deterministic(self):
-        priv, pub = generate_keypair()
+        _priv, pub = generate_keypair()
         addr1 = derive_address(pub)
         addr2 = derive_address(pub)
         self.assertEqual(addr1, addr2)
@@ -328,7 +326,7 @@ class TestKeyGeneration(unittest.TestCase):
     def test_unique_keys(self):
         keys = set()
         for _ in range(50):
-            priv, pub = generate_keypair()
+            priv, _pub = generate_keypair()
             keys.add(priv)
         self.assertEqual(len(keys), 50)
 
@@ -352,7 +350,7 @@ class TestSignVerify(unittest.TestCase):
         self.assertTrue(verify(pub, msg, sig))
 
     def test_verify_wrong_key(self):
-        priv1, pub1 = generate_keypair()
+        priv1, _pub1 = generate_keypair()
         _, pub2 = generate_keypair()
         msg = sha256(b"test")
         sig = sign(priv1, msg)

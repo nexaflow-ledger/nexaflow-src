@@ -15,6 +15,7 @@ import struct
 
 import pytest
 
+from nexaflow_core.config import LedgerConfig
 from nexaflow_core.precision import (
     DROPS_PER_NXF,
     NXF_DECIMALS,
@@ -24,9 +25,7 @@ from nexaflow_core.precision import (
     nxf_to_drops,
 )
 from nexaflow_core.transaction import Amount, create_payment
-from nexaflow_core.config import LedgerConfig
 from nexaflow_core.validator import MIN_FEE
-
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Precision constants
@@ -284,7 +283,7 @@ class TestPrivacyPrecision:
         c_sum = ca.add(cb)
 
         # Manually combine blindings
-        combined_blind_int = (
+        (
             int.from_bytes(a_blind, "big") + int.from_bytes(b_blind, "big")
         )
         # We need to check the sum commitment matches commit(a+b, combined)
@@ -374,8 +373,9 @@ class TestStakingPrecision:
     """Verify staking calculations maintain 8dp precision."""
 
     def test_interest_calculation_8dp(self):
-        from nexaflow_core.staking import TIER_CONFIG, StakeTier, StakeRecord
         import time
+
+        from nexaflow_core.staking import TIER_CONFIG, StakeRecord, StakeTier
         principal = 1000.00000001
         _, base_apy = TIER_CONFIG[StakeTier.FLEXIBLE]
         lock_dur, _ = TIER_CONFIG[StakeTier.FLEXIBLE]

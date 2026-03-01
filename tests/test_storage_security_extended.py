@@ -20,11 +20,9 @@ from __future__ import annotations
 
 import math
 import os
-import sqlite3
 import tempfile
 import threading
 import unittest
-from pathlib import Path
 
 from nexaflow_core.storage import LedgerStore
 
@@ -316,7 +314,7 @@ class TestLedgerSequence(StorageTestBase):
         self.assertEqual(self.store.latest_ledger_seq(), 5)
         ledgers = self.store.load_closed_ledgers()
         # Should be ordered by sequence
-        seqs = [l["sequence"] for l in ledgers]
+        seqs = [row["sequence"] for row in ledgers]
         self.assertEqual(seqs, [1, 3, 5])
 
 
@@ -442,7 +440,7 @@ class TestContextManager(unittest.TestCase):
             store.save_account("alice", 100.0)
         # After exit, connection should be closed
         # Accessing store._conn should raise ProgrammingError
-        with self.assertRaises(Exception):
+        with self.assertRaises(Exception):  # noqa: B017
             store._conn.execute("SELECT 1")
 
 

@@ -17,7 +17,7 @@ Covers:
 
 import unittest
 
-from nexaflow_core.crypto_utils import generate_keypair, derive_address
+from nexaflow_core.crypto_utils import derive_address, generate_keypair
 from nexaflow_core.ledger import Ledger
 from nexaflow_core.privacy import (
     KeyImage,
@@ -30,7 +30,6 @@ from nexaflow_core.privacy import (
 )
 from nexaflow_core.validator import TransactionValidator
 from nexaflow_core.wallet import Wallet
-
 
 # ---------------------------------------------------------------------------
 #  Helpers
@@ -199,8 +198,8 @@ class TestStealthAddress(unittest.TestCase):
 
     def test_cross_wallet_isolation(self):
         """Output generated for wallet A is not scanned by wallet B."""
-        v2_priv, v2_pub = _keypair()
-        sp2_priv, sp2_pub = _keypair()
+        v2_priv, _v2_pub = _keypair()
+        _sp2_priv, sp2_pub = _keypair()
         stealth, _ = StealthAddress.generate(self.v_pub, self.sp_pub)
         matched = StealthAddress.scan_output(
             v2_priv, sp2_pub, stealth.ephemeral_pub, stealth.view_tag
@@ -330,28 +329,28 @@ class TestRingSignature(unittest.TestCase):
         self.assertTrue(verify_ring_signature(sig.sig, self.msg))
 
     def test_verify_n3(self):
-        d1_priv, d1_pub = _keypair()
-        d2_priv, d2_pub = _keypair()
+        _d1_priv, d1_pub = _keypair()
+        _d2_priv, d2_pub = _keypair()
         ring = [self.pub, d1_pub, d2_pub]
         sig = RingSignature.sign(self.msg, self.priv, ring, 0)
         self.assertTrue(verify_ring_signature(sig.sig, self.msg))
 
     def test_verify_n5(self):
         decoys = [_keypair()[1] for _ in range(4)]
-        ring = [self.pub] + decoys
+        ring = [self.pub, *decoys]
         sig = RingSignature.sign(self.msg, self.priv, ring, 0)
         self.assertTrue(verify_ring_signature(sig.sig, self.msg))
 
     def test_signer_at_last_position(self):
-        d1_priv, d1_pub = _keypair()
-        d2_priv, d2_pub = _keypair()
+        _d1_priv, d1_pub = _keypair()
+        _d2_priv, d2_pub = _keypair()
         ring = [d1_pub, d2_pub, self.pub]
         sig = RingSignature.sign(self.msg, self.priv, ring, 2)
         self.assertTrue(verify_ring_signature(sig.sig, self.msg))
 
     def test_signer_at_middle_position(self):
-        d1_priv, d1_pub = _keypair()
-        d2_priv, d2_pub = _keypair()
+        _d1_priv, d1_pub = _keypair()
+        _d2_priv, d2_pub = _keypair()
         ring = [d1_pub, self.pub, d2_pub]
         sig = RingSignature.sign(self.msg, self.priv, ring, 1)
         self.assertTrue(verify_ring_signature(sig.sig, self.msg))
@@ -434,7 +433,6 @@ class TestCreateConfidentialPayment(unittest.TestCase):
         self.s_priv, self.s_pub = _keypair()
         self.v_priv, self.v_pub = _keypair()
         self.sp_priv, self.sp_pub = _keypair()
-        from nexaflow_core.crypto_utils import derive_address
         self.sender_addr = derive_address(self.s_pub)
 
     def _make_tx(self, amount=5.0, decoys=None, fee=0.0001, sequence=1):
@@ -499,8 +497,8 @@ class TestCreateConfidentialPayment(unittest.TestCase):
         self.assertNotEqual(tx1.commitment, tx2.commitment)
 
     def test_with_decoy_ring_sig_valid(self):
-        d1_priv, d1_pub = _keypair()
-        d2_priv, d2_pub = _keypair()
+        _d1_priv, d1_pub = _keypair()
+        _d2_priv, d2_pub = _keypair()
         tx = self._make_tx(decoys=[d1_pub, d2_pub])
         self.assertTrue(verify_ring_signature(tx.ring_signature, tx.hash_for_signing()))
 
@@ -528,7 +526,7 @@ class TestLedgerConfidentialPayment(unittest.TestCase):
         return ledger, s_priv, s_pub, v_priv, v_pub, sp_priv, sp_pub
 
     def test_apply_confidential_payment_success(self):
-        ledger, s_priv, s_pub, v_priv, v_pub, sp_priv, sp_pub = self._setup()
+        ledger, s_priv, _s_pub, _v_priv, v_pub, _sp_priv, sp_pub = self._setup()
         tx = create_confidential_payment(
             "rAlice", s_priv, v_pub, sp_pub, 5.0, [], fee=0.0001, sequence=1
         )
@@ -536,7 +534,7 @@ class TestLedgerConfidentialPayment(unittest.TestCase):
         self.assertEqual(result, 0)  # tesSUCCESS
 
     def test_spent_key_image_recorded(self):
-        ledger, s_priv, s_pub, v_priv, v_pub, sp_priv, sp_pub = self._setup()
+        ledger, s_priv, _s_pub, _v_priv, v_pub, _sp_priv, sp_pub = self._setup()
         tx = create_confidential_payment(
             "rAlice", s_priv, v_pub, sp_pub, 5.0, [], fee=0.0001, sequence=1
         )
@@ -544,7 +542,7 @@ class TestLedgerConfidentialPayment(unittest.TestCase):
         self.assertTrue(ledger.is_key_image_spent(tx.key_image))
 
     def test_double_spend_rejected(self):
-        ledger, s_priv, s_pub, v_priv, v_pub, sp_priv, sp_pub = self._setup()
+        ledger, s_priv, _s_pub, _v_priv, v_pub, _sp_priv, sp_pub = self._setup()
         tx = create_confidential_payment(
             "rAlice", s_priv, v_pub, sp_pub, 5.0, [], fee=0.0001, sequence=1
         )
@@ -553,7 +551,7 @@ class TestLedgerConfidentialPayment(unittest.TestCase):
         self.assertEqual(result, 107)  # tecKEY_IMAGE_SPENT
 
     def test_confidential_output_recorded(self):
-        ledger, s_priv, s_pub, v_priv, v_pub, sp_priv, sp_pub = self._setup()
+        ledger, s_priv, _s_pub, _v_priv, v_pub, _sp_priv, sp_pub = self._setup()
         tx = create_confidential_payment(
             "rAlice", s_priv, v_pub, sp_pub, 5.0, [], fee=0.0001, sequence=1
         )
@@ -562,7 +560,7 @@ class TestLedgerConfidentialPayment(unittest.TestCase):
         self.assertEqual(len(utxos), 1)
 
     def test_fee_deducted_from_sender(self):
-        ledger, s_priv, s_pub, v_priv, v_pub, sp_priv, sp_pub = self._setup()
+        ledger, s_priv, _s_pub, _v_priv, v_pub, _sp_priv, sp_pub = self._setup()
         before = ledger.get_account("rAlice").balance
         tx = create_confidential_payment(
             "rAlice", s_priv, v_pub, sp_pub, 5.0, [], fee=0.5, sequence=1
@@ -572,9 +570,9 @@ class TestLedgerConfidentialPayment(unittest.TestCase):
         self.assertAlmostEqual(after, before - 0.5, places=5)
 
     def test_multiple_outputs_accumulate(self):
-        ledger, s_priv, s_pub, v_priv, v_pub, sp_priv, sp_pub = self._setup()
+        ledger, s_priv, _s_pub, _v_priv, v_pub, _sp_priv, sp_pub = self._setup()
         ledger.create_account("rBob", 500.0)
-        s2_priv, s2_pub = _keypair()
+        s2_priv, _s2_pub = _keypair()
 
         tx1 = create_confidential_payment(
             "rAlice", s_priv, v_pub, sp_pub, 1.0, [], fee=0.0001, sequence=1
@@ -587,14 +585,14 @@ class TestLedgerConfidentialPayment(unittest.TestCase):
         self.assertEqual(len(ledger.get_all_confidential_outputs()), 2)
 
     def test_is_key_image_spent_false_before_apply(self):
-        ledger, s_priv, s_pub, v_priv, v_pub, sp_priv, sp_pub = self._setup()
+        ledger, s_priv, _s_pub, _v_priv, v_pub, _sp_priv, sp_pub = self._setup()
         tx = create_confidential_payment(
             "rAlice", s_priv, v_pub, sp_pub, 1.0, [], fee=0.0001, sequence=1
         )
         self.assertFalse(ledger.is_key_image_spent(tx.key_image))
 
     def test_stealth_address_used_after_apply(self):
-        ledger, s_priv, s_pub, v_priv, v_pub, sp_priv, sp_pub = self._setup()
+        ledger, s_priv, _s_pub, _v_priv, v_pub, _sp_priv, sp_pub = self._setup()
         tx = create_confidential_payment(
             "rAlice", s_priv, v_pub, sp_pub, 1.0, [], fee=0.0001, sequence=1
         )
@@ -603,7 +601,7 @@ class TestLedgerConfidentialPayment(unittest.TestCase):
         self.assertTrue(ledger.is_stealth_address_used(sa_hex))
 
     def test_state_summary_includes_confidential_counts(self):
-        ledger, s_priv, s_pub, v_priv, v_pub, sp_priv, sp_pub = self._setup()
+        ledger, s_priv, _s_pub, _v_priv, v_pub, _sp_priv, sp_pub = self._setup()
         tx = create_confidential_payment(
             "rAlice", s_priv, v_pub, sp_pub, 1.0, [], fee=0.0001, sequence=1
         )
@@ -629,15 +627,15 @@ class TestValidatorPrivacy(unittest.TestCase):
         return ledger, validator, s_priv, s_pub, v_priv, v_pub, sp_priv, sp_pub
 
     def test_valid_confidential_tx_passes(self):
-        ledger, validator, s_priv, s_pub, v_priv, v_pub, sp_priv, sp_pub = self._setup()
+        _ledger, validator, s_priv, _s_pub, _v_priv, v_pub, _sp_priv, sp_pub = self._setup()
         tx = create_confidential_payment(
             "rAlice", s_priv, v_pub, sp_pub, 5.0, [], fee=0.0001, sequence=1
         )
-        valid, code, msg = validator.validate(tx)
+        valid, _code, msg = validator.validate(tx)
         self.assertTrue(valid, msg)
 
     def test_double_spend_fails_validation(self):
-        ledger, validator, s_priv, s_pub, v_priv, v_pub, sp_priv, sp_pub = self._setup()
+        ledger, validator, s_priv, _s_pub, _v_priv, v_pub, _sp_priv, sp_pub = self._setup()
         tx = create_confidential_payment(
             "rAlice", s_priv, v_pub, sp_pub, 5.0, [], fee=0.0001, sequence=1
         )
@@ -648,7 +646,7 @@ class TestValidatorPrivacy(unittest.TestCase):
         self.assertEqual(code, TEC_KEY_IMAGE_SPENT)
 
     def test_invalid_ring_sig_fails_validation(self):
-        ledger, validator, s_priv, s_pub, v_priv, v_pub, sp_priv, sp_pub = self._setup()
+        _ledger, validator, s_priv, _s_pub, _v_priv, v_pub, _sp_priv, sp_pub = self._setup()
         tx = create_confidential_payment(
             "rAlice", s_priv, v_pub, sp_pub, 5.0, [], fee=0.0001, sequence=1
         )
@@ -656,16 +654,16 @@ class TestValidatorPrivacy(unittest.TestCase):
         bad_sig = bytearray(tx.ring_signature)
         bad_sig[70] ^= 0xFF
         tx.ring_signature = bytes(bad_sig)
-        valid, code, _msg = validator.validate(tx)
+        valid, _code, _msg = validator.validate(tx)
         self.assertFalse(valid)
 
     def test_invalid_range_proof_fails_validation(self):
-        ledger, validator, s_priv, s_pub, v_priv, v_pub, sp_priv, sp_pub = self._setup()
+        _ledger, validator, s_priv, _s_pub, _v_priv, v_pub, _sp_priv, sp_pub = self._setup()
         tx = create_confidential_payment(
             "rAlice", s_priv, v_pub, sp_pub, 5.0, [], fee=0.0001, sequence=1
         )
         tx.range_proof = b"\x00" * 32  # zero proof → rejected
-        valid, code, _msg = validator.validate(tx)
+        valid, _code, _msg = validator.validate(tx)
         self.assertFalse(valid)
 
 

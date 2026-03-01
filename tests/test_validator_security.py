@@ -16,6 +16,7 @@ import time
 import unittest
 
 from nexaflow_core.ledger import Ledger
+from nexaflow_core.staking import MIN_STAKE_AMOUNT
 from nexaflow_core.transaction import (
     TEC_BAD_SEQ,
     TEC_INSUF_FEE,
@@ -29,12 +30,9 @@ from nexaflow_core.transaction import (
     create_unstake,
 )
 from nexaflow_core.validator import (
-    ACCOUNT_RESERVE,
     MIN_FEE,
-    OWNER_RESERVE,
     TransactionValidator,
 )
-from nexaflow_core.staking import MIN_STAKE_AMOUNT
 
 
 class ValidatorSecBase(unittest.TestCase):
@@ -66,7 +64,7 @@ class TestStakeValidation(ValidatorSecBase):
 
     def test_stake_exactly_minimum(self):
         tx = create_stake("rAlice", MIN_STAKE_AMOUNT, 0)
-        ok, code, _ = self.validator.validate(tx)
+        ok, _code, _ = self.validator.validate(tx)
         self.assertTrue(ok)
 
     def test_stake_invalid_tier_negative(self):
@@ -84,7 +82,7 @@ class TestStakeValidation(ValidatorSecBase):
     def test_stake_all_valid_tiers(self):
         for tier in range(5):  # 0-4
             tx = create_stake("rAlice", 10.0, tier)
-            ok, code, _ = self.validator.validate(tx)
+            ok, _code, _ = self.validator.validate(tx)
             self.assertTrue(ok, f"Tier {tier} should be valid")
 
     def test_stake_insufficient_balance_with_reserve(self):
@@ -100,7 +98,7 @@ class TestStakeValidation(ValidatorSecBase):
         acc = self.ledger.get_account("rAlice")
         acc.owner_count = 10  # reserve = 20 + 10*5 = 70
         tx = create_stake("rAlice", 931.0, 0)  # 931 + fee + 70 > 1000
-        ok, code, _ = self.validator.validate(tx)
+        ok, _code, _ = self.validator.validate(tx)
         self.assertFalse(ok)
 
     def test_stake_nonexistent_account(self):
@@ -126,7 +124,7 @@ class TestUnstakeValidation(ValidatorSecBase):
     def test_valid_unstake(self):
         self._create_stake("s1")
         tx = create_unstake("rAlice", "s1")
-        ok, code, _ = self.validator.validate(tx)
+        ok, _code, _ = self.validator.validate(tx)
         self.assertTrue(ok)
 
     def test_unstake_missing_stake_id(self):
@@ -189,13 +187,13 @@ class TestExtremeAmounts(ValidatorSecBase):
 
     def test_very_small_payment(self):
         tx = create_payment("rAlice", "rBob", 0.000001)
-        ok, code, _ = self.validator.validate(tx)
+        ok, _code, _ = self.validator.validate(tx)
         self.assertTrue(ok)
 
     def test_very_large_fee(self):
         """Large fee is allowed if balance covers it."""
         tx = create_payment("rAlice", "rBob", 1.0, fee=100.0)
-        ok, code, _ = self.validator.validate(tx)
+        ok, _code, _ = self.validator.validate(tx)
         self.assertTrue(ok)
 
 
@@ -213,12 +211,12 @@ class TestFeeBoundary(ValidatorSecBase):
 
     def test_fee_exactly_minimum(self):
         tx = create_payment("rAlice", "rBob", 1.0, fee=MIN_FEE)
-        ok, code, _ = self.validator.validate(tx)
+        ok, _code, _ = self.validator.validate(tx)
         self.assertTrue(ok)
 
     def test_fee_zero(self):
         tx = create_payment("rAlice", "rBob", 1.0, fee=0.0)
-        ok, code, _ = self.validator.validate(tx)
+        ok, _code, _ = self.validator.validate(tx)
         self.assertFalse(ok)
 
 

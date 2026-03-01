@@ -17,8 +17,6 @@ Covers:
 from __future__ import annotations
 
 import os
-import tempfile
-from pathlib import Path
 
 import pytest
 
@@ -187,7 +185,7 @@ class TestClosedLedgerPersistence:
         store.save_closed_ledger(1, "a", "0", 100.0)
         store.save_closed_ledger(2, "b", "a", 200.0)
         ledgers = store.load_closed_ledgers()
-        seqs = [l["sequence"] for l in ledgers]
+        seqs = [row["sequence"] for row in ledgers]
         assert seqs == [1, 2, 3]
 
 

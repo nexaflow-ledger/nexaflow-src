@@ -1,33 +1,33 @@
-# NexaFlow Node Configuration for Exchange Development
-
 [node]
 node_id = "validator-1"
 host = "0.0.0.0"
 port = 9001
-peers = []
+peers = ["peer1.nfledger.com:9001", "peer2.nfledger.com:9001", "peer3.nfledger.com:9001"]  # other validators
 
 [ledger]
 total_supply = 100_000_000_000.0
-account_reserve = 20.0
-owner_reserve = 5.0
-min_fee = 0.000010
 
 [consensus]
 interval_seconds = 10
+# BFT mode (recommended for production):
+# validator_key_file = "certs/validator-1.key"
+# validator_pubkeys_dir = "certs/pubkeys/"
 
 [api]
 enabled = true
 host = "127.0.0.1"
 port = 8080
-api_key = ""
-rate_limit_rpm = 300
-cors_origins = ["http://localhost:8000"]
+api_key = "your-secret-api-key"
+rate_limit_rpm = 120
 
 [storage]
-enabled = false
+enabled = true
+path = "data/nexaflow.db"
 
+# Every node in the network MUST have identical genesis config
 [genesis.accounts]
+"rGGnFi6YTeXvNATZBt19NNVbke1eE9Totm" = 100_000_000_000.0
 
 [logging]
 level = "INFO"
-format = "human"
+format = "json"

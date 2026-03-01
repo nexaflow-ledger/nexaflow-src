@@ -23,7 +23,7 @@ import math
 import time
 import unittest
 
-from nexaflow_core.order_book import Fill, Order, OrderBook
+from nexaflow_core.order_book import OrderBook
 
 
 class OrderBookTestBase(unittest.TestCase):
@@ -44,7 +44,7 @@ class TestZeroNegativeValues(OrderBookTestBase):
         """
         fills = self.ob.submit_order("alice", "NXF/USD", "sell", 0.0, 100.0)
         # Order accepted (no validation)
-        order = list(self.ob._orders.values())[0]
+        order = next(iter(self.ob._orders.values()))
         self.assertEqual(order.price, 0.0)
         # A buy at any price should match
         fills = self.ob.submit_order("bob", "NXF/USD", "buy", 0.01, 100.0)
@@ -56,8 +56,8 @@ class TestZeroNegativeValues(OrderBookTestBase):
         VULN: Negative price creates an inverted sort_key, potentially
         breaking price-time priority.
         """
-        fills = self.ob.submit_order("alice", "NXF/USD", "sell", -1.0, 100.0)
-        order = list(self.ob._orders.values())[0]
+        self.ob.submit_order("alice", "NXF/USD", "sell", -1.0, 100.0)
+        order = next(iter(self.ob._orders.values()))
         self.assertEqual(order.price, -1.0)
 
     def test_zero_quantity_order(self):
@@ -67,7 +67,7 @@ class TestZeroNegativeValues(OrderBookTestBase):
         """
         fills = self.ob.submit_order("alice", "NXF/USD", "buy", 1.0, 0.0)
         self.assertEqual(len(fills), 0)
-        order = list(self.ob._orders.values())[0]
+        order = next(iter(self.ob._orders.values()))
         self.assertEqual(order.remaining, 0.0)
         # Order should be marked "filled" since remaining == 0
         self.assertEqual(order.status, "filled")
@@ -77,8 +77,8 @@ class TestZeroNegativeValues(OrderBookTestBase):
         VULN: Negative quantity makes remaining negative, which breaks
         the matching engine's fill_qty = min(taker.remaining, best.remaining).
         """
-        fills = self.ob.submit_order("alice", "NXF/USD", "sell", 1.0, -100.0)
-        order = list(self.ob._orders.values())[0]
+        self.ob.submit_order("alice", "NXF/USD", "sell", 1.0, -100.0)
+        order = next(iter(self.ob._orders.values()))
         self.assertEqual(order.quantity, -100.0)
 
 
@@ -123,10 +123,10 @@ class TestNaNInfPrices(OrderBookTestBase):
         NaN < x and NaN > x are both False, so price checks never break.
         """
         self.ob.submit_order("alice", "NXF/USD", "sell", float("nan"), 100.0)
-        order = list(self.ob._orders.values())[0]
+        order = next(iter(self.ob._orders.values()))
         self.assertTrue(math.isnan(order.price))
         # Buy should NOT match a NaN ask, but let's see
-        fills = self.ob.submit_order("bob", "NXF/USD", "buy", 1000.0, 100.0)
+        self.ob.submit_order("bob", "NXF/USD", "buy", 1000.0, 100.0)
         # NaN > 1000.0 is False, so the price check passes (breaks the loop)
         # This means NaN prices create phantom liquidity that can't be matched
 
@@ -243,7 +243,7 @@ class TestFloatPrecisionMatching(OrderBookTestBase):
         """
         self.ob.submit_order("alice", "NXF/USD", "sell", 1.0, 0.1, "s1")
         # Buy exactly 0.1 — but float subtraction might not yield 0.0
-        fills = self.ob.submit_order("bob", "NXF/USD", "buy", 1.0, 0.1)
+        self.ob.submit_order("bob", "NXF/USD", "buy", 1.0, 0.1)
         order = self.ob.get_order("s1")
         # remaining should be exactly 0 or very close
         self.assertAlmostEqual(order.remaining, 0.0, places=10)
@@ -288,13 +288,13 @@ class TestEmptyPairStrings(OrderBookTestBase):
 
     def test_empty_pair(self):
         """Empty pair string should work (it's just a dict key)."""
-        fills = self.ob.submit_order("alice", "", "sell", 1.0, 100.0)
+        self.ob.submit_order("alice", "", "sell", 1.0, 100.0)
         snapshot = self.ob.get_book_snapshot("")
         self.assertEqual(snapshot["ask_count"], 1)
 
     def test_pair_with_special_chars(self):
         pair = "🚀/💎"
-        fills = self.ob.submit_order("alice", pair, "sell", 1.0, 100.0)
+        self.ob.submit_order("alice", pair, "sell", 1.0, 100.0)
         snapshot = self.ob.get_book_snapshot(pair)
         self.assertEqual(snapshot["ask_count"], 1)
 

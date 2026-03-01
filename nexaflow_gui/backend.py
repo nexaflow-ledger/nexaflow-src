@@ -5,6 +5,7 @@ exposes a signal-based API that Qt widgets can safely connect to.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -14,6 +15,7 @@ from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 # ── NexaFlow imports ────────────────────────────────────────────────────
 from nexaflow_core.network import Network, ValidatorNode
 from nexaflow_core.order_book import OrderBook
+from nexaflow_core.staking import TIER_NAMES, StakeTier
 from nexaflow_core.transaction import (
     Amount,
     create_offer,
@@ -23,7 +25,6 @@ from nexaflow_core.transaction import (
     create_unstake,
 )
 from nexaflow_core.wallet import Wallet
-from nexaflow_core.staking import StakeTier, TIER_NAMES, TIER_CONFIG
 
 logger = logging.getLogger("nexaflow_gui.backend")
 
@@ -636,10 +637,8 @@ class NodeBackend(QObject):
 
     def _emit_p2p_status(self) -> None:
         """Push a P2P status snapshot every second."""
-        try:
+        with contextlib.suppress(Exception):
             self.p2p_status_updated.emit(self.get_p2p_status())
-        except Exception:
-            pass
 
     def _log(self, msg: str) -> None:
         logger.info(msg)

@@ -43,7 +43,7 @@ def drops_to_nxf(drops: int) -> float:
 
 def nxf_to_drops(value: float) -> int:
     """Convert an NXF float to the nearest integer drop count."""
-    return int(round(value * DROPS_PER_NXF))
+    return round(value * DROPS_PER_NXF)
 
 
 def format_amount(value: float, currency: str = "NXF") -> str:

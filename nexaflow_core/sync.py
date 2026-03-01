@@ -36,12 +36,11 @@ Message types added to the P2P protocol:
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
+import contextlib
 import logging
 import time
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from nexaflow_core.p2p import P2PNode
@@ -275,7 +274,7 @@ def apply_snapshot(ledger: Any, snapshot: dict) -> bool:
     Performs hash-chain verification on received headers before mutating
     any state.  Returns True on success, False if verification fails.
     """
-    from nexaflow_core.ledger import LedgerHeader, TrustLineEntry, ConfidentialOutput
+    from nexaflow_core.ledger import ConfidentialOutput, LedgerHeader, TrustLineEntry
     from nexaflow_core.staking import StakeRecord, StakeTier
 
     peer_seq = snapshot.get("current_sequence", 0)
@@ -408,10 +407,8 @@ def apply_snapshot(ledger: Any, snapshot: dict) -> bool:
 
     # ── Spent key images ─────────────────────────────────────────────
     for ki_hex in snapshot.get("spent_key_images", []):
-        try:
+        with contextlib.suppress(ValueError):
             ledger.spent_key_images.add(bytes.fromhex(ki_hex))
-        except ValueError:
-            pass
 
     logger.info(
         f"Snapshot applied: seq {ledger.current_sequence}, "
@@ -450,10 +447,11 @@ class LedgerSyncManager:
         self._sync_in_progress = False
         self._last_sync_time: float = 0.0
 
-        # Asyncio primitives
-        self._sync_event = asyncio.Event()
-        self._status_received = asyncio.Event()
-        self._data_received = asyncio.Event()
+        # Asyncio primitives — created lazily in start() so that
+        # construction works on Python 3.9 without a running event loop.
+        self._sync_event: asyncio.Event | None = None
+        self._status_received: asyncio.Event | None = None
+        self._data_received: asyncio.Event | None = None
         self._received_snapshot: dict | None = None
         self._task: asyncio.Task | None = None
         self._running = False
@@ -462,6 +460,9 @@ class LedgerSyncManager:
 
     async def start(self) -> None:
         """Start the background sync loop."""
+        self._sync_event = asyncio.Event()
+        self._status_received = asyncio.Event()
+        self._data_received = asyncio.Event()
         self._running = True
         self._task = asyncio.create_task(self._sync_loop())
         logger.info("LedgerSyncManager started")
@@ -469,13 +470,12 @@ class LedgerSyncManager:
     async def stop(self) -> None:
         """Stop the sync manager gracefully."""
         self._running = False
-        self._sync_event.set()  # unblock the loop
+        if self._sync_event is not None:
+            self._sync_event.set()  # unblock the loop
         if self._task:
             self._task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._task
-            except asyncio.CancelledError:
-                pass
         logger.info("LedgerSyncManager stopped")
 
     async def request_sync(self) -> bool:
@@ -488,7 +488,8 @@ class LedgerSyncManager:
         if self._sync_in_progress:
             logger.debug("Sync already in progress, skipping request")
             return False
-        self._sync_event.set()
+        if self._sync_event is not None:
+            self._sync_event.set()
         # Give the background loop time to pick it up
         await asyncio.sleep(0.1)
         return True
@@ -500,12 +501,10 @@ class LedgerSyncManager:
         while self._running:
             try:
                 # Wait for a trigger or timeout
-                try:
+                with contextlib.suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(
                         self._sync_event.wait(), timeout=SYNC_COOLDOWN
                     )
-                except asyncio.TimeoutError:
-                    pass
                 self._sync_event.clear()
 
                 if not self._running:
@@ -538,12 +537,10 @@ class LedgerSyncManager:
             await self._broadcast_status_request()
 
             # Wait for responses (with timeout)
-            try:
+            with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(
                     self._wait_for_all_statuses(), timeout=STATUS_TIMEOUT
                 )
-            except asyncio.TimeoutError:
-                pass  # use whatever we got
 
             if not self._peer_statuses:
                 logger.debug("No peer status responses received")

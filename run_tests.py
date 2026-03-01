@@ -81,9 +81,8 @@ def main() -> int:
     )
     args, extra = parser.parse_known_args()
 
-    if not args.no_build:
-        if not build_extensions():
-            return 1
+    if not args.no_build and not build_extensions():
+        return 1
 
     pytest_args = extra
     if args.k:

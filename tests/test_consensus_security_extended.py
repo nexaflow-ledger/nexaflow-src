@@ -18,14 +18,11 @@ Covers:
 
 from __future__ import annotations
 
-import hashlib
 import unittest
 
 from ecdsa import SECP256k1, SigningKey
-from ecdsa.util import sigencode_der
 
 from nexaflow_core.consensus import (
-    PHASE_NAMES,
     ConsensusEngine,
     ConsensusResult,
     Proposal,
@@ -141,10 +138,10 @@ class TestByzantineThreshold(unittest.TestCase):
         With n=4, f=1. If 2 out of 3 UNL peers are Byzantine,
         consensus should fail (too many faults).
         """
-        priv1, pub1 = _keygen()
+        _priv1, _pub1 = _keygen()
         priv2, pub2 = _keygen()
         priv3, pub3 = _keygen()
-        priv_self, pub_self = _keygen()
+        priv_self, _pub_self = _keygen()
 
         engine = ConsensusEngine(
             unl=["v2", "v3", "v4"],
@@ -198,7 +195,7 @@ class TestSignatureVerification(unittest.TestCase):
         the signature check is skipped entirely.
         An unknown attacker could inject proposals.
         """
-        priv, pub = _keygen()
+        _priv, pub = _keygen()
         engine = ConsensusEngine(
             unl=["v2", "attacker"],
             my_id="v1",
@@ -214,7 +211,7 @@ class TestSignatureVerification(unittest.TestCase):
 
     def test_bad_signature_rejected(self):
         """Proposal with wrong signature is marked Byzantine."""
-        priv_real, pub_real = _keygen()
+        _priv_real, pub_real = _keygen()
         priv_fake, _ = _keygen()
 
         engine = ConsensusEngine(

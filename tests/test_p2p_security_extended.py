@@ -20,18 +20,16 @@ Covers additional attack vectors not in the original test_p2p_security.py:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
-import time
 import unittest
 
 from nexaflow_core.p2p import (
     P2PNode,
-    PeerConnection,
     build_tls_context,
     decode_message,
     encode_message,
 )
-
 
 # ═══════════════════════════════════════════════════════════════════
 #  Node ID Spoofing
@@ -55,10 +53,6 @@ class TestNodeIDSpoofing(unittest.TestCase):
         """
         node = P2PNode("honest-node")
         # Simulate a HELLO that claims to be "admin-node"
-        msg = {
-            "type": "HELLO",
-            "payload": {"node_id": "admin-node", "port": 9002, "pubkey": ""},
-        }
         # The inbound handler just stores msg["payload"]["node_id"]
         # Without mTLS there's no verification
         self.assertEqual(node.node_id, "honest-node")
@@ -222,7 +216,7 @@ class TestMessageEdgeCases(unittest.TestCase):
         msg1 = encode_message("TX", {"id": "1"})
         msg2 = encode_message("TX", {"id": "2"})
         combined = msg1.rstrip(b"\n") + msg2
-        result = decode_message(combined)
+        decode_message(combined)
         # json.loads on the full thing may fail or parse first object
         # Behavior depends on implementation — should not crash
 
@@ -407,19 +401,15 @@ class TestHELLOAbuse(unittest.TestCase):
 
     def test_hello_with_huge_node_id(self):
         """HELLO with oversized node_id should not cause memory issues."""
-        node = P2PNode("v1")
-        huge_id = "x" * 1_000_000
-        msg = {"type": "HELLO", "payload": {"node_id": huge_id, "port": 9001, "pubkey": ""}}
+        P2PNode("v1")
         # Should not crash
 
     def test_hello_with_invalid_pubkey_hex(self):
         """HELLO with invalid hex pubkey should be handled gracefully."""
-        node = P2PNode("v1")
+        P2PNode("v1")
         # In connect_to_peer, invalid hex is caught with try/except ValueError
-        try:
+        with contextlib.suppress(ValueError):
             bytes.fromhex("not_valid_hex")
-        except ValueError:
-            pass  # Expected
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -458,7 +448,6 @@ class TestTLSContextEdgeCases(unittest.TestCase):
 
     def test_client_context_no_hostname_check(self):
         """Client TLS context should have hostname check disabled for P2P."""
-        import ssl
         ctx = build_tls_context(
             cert_file="", key_file="", ca_file="",
             verify_peer=False, server_side=False,
@@ -520,7 +509,7 @@ class TestBroadcastDuringDisconnect(unittest.TestCase):
 
         class GoodPeer:
             peer_id = "alive"
-            messages = []
+            messages = []  # noqa: RUF012
             async def send(self, msg_type, payload):
                 self.messages.append(msg_type)
                 return True
@@ -530,10 +519,8 @@ class TestBroadcastDuringDisconnect(unittest.TestCase):
         node.peers["alive"] = good
 
         # VULNERABILITY: broadcast_transaction raises instead of continuing
-        try:
+        with contextlib.suppress(ConnectionError):
             self._run(node.broadcast_transaction({"tx_id": "test"}))
-        except ConnectionError:
-            pass  # Expected — no try/except in broadcast loop
 
         # Good peer may or may not have received the message depending
         # on dict iteration order

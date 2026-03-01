@@ -57,7 +57,7 @@ logger = logging.getLogger("nexaflow_api")
 class _TokenBucket:
     """Simple per-IP token-bucket rate limiter."""
 
-    __slots__ = ("_rpm", "_buckets")
+    __slots__ = ("_buckets", "_rpm")
 
     def __init__(self, rpm: int):
         self._rpm = rpm  # 0 = unlimited
@@ -146,7 +146,7 @@ class APIServer:
         host: str = "127.0.0.1",
         port: int = 8080,
         *,
-        api_config: "APIConfig | None" = None,
+        api_config: APIConfig | None = None,
     ):
         self.node = node
         self.host = host

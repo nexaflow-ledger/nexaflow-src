@@ -19,7 +19,6 @@ import unittest
 from nexaflow_core.transaction import create_payment
 from nexaflow_core.wallet import Wallet
 
-
 # ═══════════════════════════════════════════════════════════════════
 #  View / Spend key generation
 # ═══════════════════════════════════════════════════════════════════
@@ -271,7 +270,7 @@ class TestSequenceManagement(unittest.TestCase):
 
     def test_signing_increments(self):
         w = Wallet.create()
-        for i in range(5):
+        for _i in range(5):
             tx = create_payment(w.address, "rDest", 1.0)
             w.sign_transaction(tx)
         self.assertEqual(w.sequence, 6)
