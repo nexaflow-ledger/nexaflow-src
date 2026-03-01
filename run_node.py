@@ -123,6 +123,120 @@ class NexaFlowNode:
         self.p2p.on_sync_snap_req = self.sync_manager.handle_sync_snap_req
         self.p2p.on_sync_data_res = self.sync_manager.handle_sync_data_res
 
+        # ── BFT key material ─────────────────────────────────────
+        self._validator_privkey: bytes = b""
+        self._unl_pubkeys: dict[str, bytes] = {}
+        self._ensure_validator_keys()
+
+    # ---- validator key management ----
+
+    def _ensure_validator_keys(self) -> None:
+        """Load or auto-generate BFT consensus keys (secp256k1)."""
+        if not self.config:
+            return
+
+        cc = self.config.consensus
+        certs_dir = Path(cc.certs_dir)
+
+        # Resolve default paths when auto-generating
+        if not cc.validator_key_file and cc.auto_generate_keys:
+            cc.validator_key_file = str(certs_dir / f"{self.node_id}.key")
+        if not cc.validator_pubkeys_dir and cc.auto_generate_keys:
+            cc.validator_pubkeys_dir = str(certs_dir / "pubkeys")
+
+        key_path = Path(cc.validator_key_file) if cc.validator_key_file else None
+
+        # Generate if missing and auto-generation enabled
+        if key_path and not key_path.exists() and cc.auto_generate_keys:
+            self._generate_consensus_keys(key_path, Path(cc.validator_pubkeys_dir))
+
+        # Load private key
+        if key_path and key_path.exists():
+            self._validator_privkey = bytes.fromhex(key_path.read_text().strip())
+            logger.info(f"BFT consensus key loaded from {key_path}")
+
+        # Load all known peer pubkeys
+        pubkeys_dir = Path(cc.validator_pubkeys_dir) if cc.validator_pubkeys_dir else None
+        if pubkeys_dir and pubkeys_dir.is_dir():
+            for pub_file in pubkeys_dir.glob("*.pub"):
+                vid = pub_file.stem  # e.g. "validator-1"
+                self._unl_pubkeys[vid] = bytes.fromhex(pub_file.read_text().strip())
+            if self._unl_pubkeys:
+                logger.info(
+                    f"Loaded {len(self._unl_pubkeys)} BFT public key(s) from {pubkeys_dir}"
+                )
+
+    def _generate_consensus_keys(self, key_path: Path, pubkeys_dir: Path) -> None:
+        """Generate a secp256k1 key pair for BFT proposal signing."""
+        try:
+            from ecdsa import SECP256k1, SigningKey
+        except ImportError:
+            logger.warning(
+                "Cannot auto-generate BFT keys: 'ecdsa' package not installed. "
+                "Run: pip install ecdsa"
+            )
+            return
+
+        sk = SigningKey.generate(curve=SECP256k1)
+        vk = sk.get_verifying_key()
+
+        priv_hex = sk.to_string().hex()
+        pub_hex = "04" + vk.to_string().hex()
+
+        key_path.parent.mkdir(parents=True, exist_ok=True)
+        pubkeys_dir.mkdir(parents=True, exist_ok=True)
+        pub_path = pubkeys_dir / f"{self.node_id}.pub"
+
+        key_path.write_text(priv_hex + "\n")
+        os.chmod(key_path, 0o600)
+        pub_path.write_text(pub_hex + "\n")
+
+        logger.info(
+            f"BFT consensus keys generated:\n"
+            f"  Private key: {key_path}\n"
+            f"  Public key:  {pub_path}\n"
+            f"  Share {pub_path} with other validators so they can verify "
+            f"this node's proposals."
+        )
+
+    # ---- TLS certificate management ----
+
+    def _ensure_tls_certs(self) -> None:
+        """Auto-generate TLS CA + node cert if missing and auto_generate is True."""
+        if not self.config or not self.config.tls.enabled:
+            return
+        tc = self.config.tls
+        if not tc.auto_generate:
+            return
+        cert_path = Path(tc.cert_file)
+        key_path = Path(tc.key_file)
+        ca_path = Path(tc.ca_file)
+        if cert_path.exists() and key_path.exists() and ca_path.exists():
+            return  # all present
+        try:
+            from scripts.gen_node_cert import generate_tls_certs
+            certs_dir = cert_path.parent
+            certs_dir.mkdir(parents=True, exist_ok=True)
+            existing_ca = ca_path.exists()
+            c, k, ca = generate_tls_certs(self.node_id, certs_dir, existing_ca)
+            # Update config to point at the generated files
+            tc.cert_file = c
+            tc.key_file = k
+            tc.ca_file = ca
+            logger.info(
+                f"TLS certificates generated:\n"
+                f"  Certificate: {c}\n"
+                f"  Key:         {k}\n"
+                f"  CA:          {ca}"
+            )
+        except ImportError:
+            logger.warning(
+                "Cannot auto-generate TLS certs: install 'cryptography' or "
+                "ensure 'openssl' is on PATH, then re-run."
+            )
+        except Exception as e:
+            logger.warning(f"TLS cert auto-generation failed: {e}")
+
     # ---- wallet persistence ----
 
     def _load_or_create_wallet(self) -> Wallet:
@@ -224,6 +338,9 @@ class NexaFlowNode:
         # Connect to seed peers (with retry)
         for peer_addr in self.peers_to_connect:
             self._bg_tasks.append(asyncio.create_task(self._connect_with_retry(peer_addr)))
+
+        # Auto-generate TLS certs if needed (after wallet, before p2p TLS)
+        self._ensure_tls_certs()
 
         # Start consensus timer
         self._bg_tasks.append(asyncio.create_task(self._consensus_loop()))
@@ -377,19 +494,24 @@ class NexaFlowNode:
         # Build UNL from connected peers
         unl = self.p2p.peer_ids()
 
-        # Create our proposal
+        # Create our proposal (BFT-signed when keys are loaded)
         my_tx_ids = list(self.tx_pool.keys())
         engine = ConsensusEngine(
-            unl, self.node_id, self.ledger.current_sequence
+            unl, self.node_id, self.ledger.current_sequence,
+            unl_pubkeys=self._unl_pubkeys if self._unl_pubkeys else None,
+            my_privkey=self._validator_privkey,
         )
         engine.submit_transactions(my_tx_ids)
 
-        # Broadcast our proposal
+        # Build and broadcast our (optionally signed) proposal
+        our_prop = engine.proposals.get(self.node_id)
         my_proposal = {
             "validator_id": self.node_id,
             "ledger_seq": self.ledger.current_sequence,
             "tx_ids": my_tx_ids,
         }
+        if our_prop and our_prop.signature:
+            my_proposal["signature"] = our_prop.signature.hex()
         await self.p2p.broadcast_proposal(my_proposal)
 
         # Wait briefly for peer proposals to arrive
@@ -663,12 +785,14 @@ async def main():
     )
     await node.start()
 
-    # ── BFT safety warning ───────────────────────────────────────
-    if not cfg.consensus.validator_key_file or not cfg.consensus.validator_pubkeys_dir:
+    # ── BFT status ───────────────────────────────────────────────
+    if cfg.consensus.validator_key_file and Path(cfg.consensus.validator_key_file).exists():
+        logger.info("BFT mode active — consensus proposals are signed.")
+    else:
         logger.warning(
             "⚠  Running in NON-BFT mode — consensus proposals are unsigned. "
-            "Set [consensus] validator_key_file and validator_pubkeys_dir "
-            "in nexaflow.toml for Byzantine fault tolerance."
+            "Set [consensus] auto_generate_keys = true or provide "
+            "validator_key_file in nexaflow.toml for Byzantine fault tolerance."
         )
 
     # Optional: fund an address from genesis for testing

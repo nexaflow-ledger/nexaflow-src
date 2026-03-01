@@ -19,15 +19,19 @@ proposal_wait_seconds = 2.0
 initial_threshold = 0.50
 final_threshold = 0.80
 # BFT mode — sign and verify consensus proposals.
-# Generate keys with:  python scripts/gen_node_cert.py --node-id validator-1
-validator_key_file = ""              # e.g. "certs/validator-1.key"
-validator_pubkeys_dir = ""           # e.g. "certs/pubkeys/"
+# Keys are auto-generated on first run when auto_generate_keys = true.
+# You can also generate manually:  python scripts/gen_node_cert.py --node-id validator-1
+auto_generate_keys = true            # generate BFT keys on first run if missing
+certs_dir = "certs"                  # directory for auto-generated key material
+validator_key_file = ""              # e.g. "certs/validator-1.key" (auto-filled when generated)
+validator_pubkeys_dir = ""           # e.g. "certs/pubkeys/" (auto-filled when generated)
 
 [tls]
 # When enabled every P2P connection is TLS-encrypted.
-# Set verify_peer = true for mutual TLS (recommended for production).
-# Generate certificates with:  python scripts/gen_node_cert.py --node-id validator-1
+# Certificates are auto-generated on first run when auto_generate = true.
+# You can also generate manually:  python scripts/gen_node_cert.py --node-id validator-1
 enabled = false
+auto_generate = true                # generate TLS CA + node cert on first run if missing
 cert_file = "certs/node.crt"
 key_file  = "certs/node.key"
 ca_file   = "certs/ca.crt"

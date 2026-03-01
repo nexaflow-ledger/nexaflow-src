@@ -65,6 +65,9 @@ class TLSConfig:
     key_file: str = "certs/node.key"    # PEM private key
     ca_file: str = "certs/ca.crt"       # CA bundle used to verify peers
     verify_peer: bool = True             # mutual TLS — require peer certificate
+    # When True, automatically generate TLS CA + node cert on first run
+    # if the configured cert files don't exist.
+    auto_generate: bool = True
 
 
 @dataclass
@@ -80,6 +83,11 @@ class ConsensusConfig:
     # BFT: directory containing <validator_id>.pub files (65-byte hex pubkeys)
     # used to verify peer proposals.  Empty = no signature verification.
     validator_pubkeys_dir: str = ""
+    # When True, automatically generate BFT consensus keys on first run
+    # if validator_key_file does not exist.
+    auto_generate_keys: bool = True
+    # Default directory for auto-generated key material.
+    certs_dir: str = "certs"
 
 
 @dataclass
