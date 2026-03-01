@@ -54,6 +54,18 @@ docker-down: ## Stop docker-compose network
 bench: ## Run benchmark suite
 	$(PYTHON) -m pytest benchmarks/ -v --tb=short
 
+# ── Executable Builds (PyInstaller) ──────────────────────────
+
+dist-node: build ## Build standalone node executable
+	pip install pyinstaller
+	pyinstaller nexaflow_node.spec --noconfirm --clean
+
+dist-gui: build ## Build standalone GUI executable
+	pip install pyinstaller
+	pyinstaller nexaflow_gui.spec --noconfirm --clean
+
+dist: dist-node dist-gui ## Build both executables
+
 # ── GUI ──────────────────────────────────────────────────────
 
 gui: ## Launch the PyQt6 desktop GUI
