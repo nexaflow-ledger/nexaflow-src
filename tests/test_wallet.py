@@ -128,9 +128,9 @@ class TestWalletSerialization(unittest.TestCase):
     def test_import_wrong_passphrase(self):
         w = Wallet.create()
         exported = w.export_encrypted("correct")
-        w2 = Wallet.import_encrypted(exported, "wrong")
-        # Wrong passphrase → different private key
-        self.assertNotEqual(w2.private_key, w.private_key)
+        # v3 AES-GCM: wrong passphrase raises ValueError (tag mismatch)
+        with self.assertRaises(ValueError):
+            Wallet.import_encrypted(exported, "wrong")
 
 
 if __name__ == "__main__":

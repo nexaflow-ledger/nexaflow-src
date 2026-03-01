@@ -15,7 +15,11 @@ Covers:
     wallet.sign_confidential_payment + scan_confidential_outputs round-trip
 """
 
+import os
 import unittest
+
+# Enable confidential transactions for testing
+os.environ.setdefault("NEXAFLOW_ALLOW_CONFIDENTIAL", "1")
 
 from nexaflow_core.crypto_utils import derive_address, generate_keypair
 from nexaflow_core.ledger import Ledger
@@ -271,13 +275,13 @@ class TestRangeProof(unittest.TestCase):
     def test_verify_valid_proof(self):
         blinding = self._blinding()
         c = PedersenCommitment.commit(0.5, blinding)
-        rp = RangeProof.prove(500_000, blinding)
+        rp = RangeProof.prove(500_000, blinding, c.commitment)
         self.assertTrue(rp.verify(c.commitment))
 
     def test_verify_zero_value(self):
         blinding = self._blinding()
         c = PedersenCommitment.commit(0.0, blinding)
-        rp = RangeProof.prove(0, blinding)
+        rp = RangeProof.prove(0, blinding, c.commitment)
         self.assertTrue(rp.verify(c.commitment))
 
     def test_negative_value_raises(self):

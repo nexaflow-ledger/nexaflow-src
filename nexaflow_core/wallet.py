@@ -63,22 +63,31 @@ class Wallet:
     def from_seed(cls, seed: str) -> Wallet:
         """
         Derive a wallet deterministically from a seed phrase.
-        Generates view and spend keypairs from seed.
+
+        Uses PBKDF2-HMAC-SHA256 with 600 000 iterations and per-key-type
+        salts to derive each private key, avoiding weak single-hash
+        derivation.
         """
+        import hashlib as _hl
         from ecdsa import SECP256k1, SigningKey
 
+        _ITERS = 600_000
+        _salt_main = b"NexaFlow/seed/main/v2"
+        _salt_view = b"NexaFlow/seed/view/v2"
+        _salt_spend = b"NexaFlow/seed/spend/v2"
+
         # Main keypair
-        priv_bytes = sha256(seed.encode("utf-8"))
+        priv_bytes = _hl.pbkdf2_hmac("sha256", seed.encode("utf-8"), _salt_main, _ITERS)
         sk = SigningKey.from_string(priv_bytes, curve=SECP256k1)
         pub_bytes = b"\x04" + sk.get_verifying_key().to_string()
 
         # View keypair
-        view_priv = sha256((seed + "_view").encode("utf-8"))
+        view_priv = _hl.pbkdf2_hmac("sha256", seed.encode("utf-8"), _salt_view, _ITERS)
         view_sk = SigningKey.from_string(view_priv, curve=SECP256k1)
         view_pub = b"\x04" + view_sk.get_verifying_key().to_string()
 
         # Spend keypair
-        spend_priv = sha256((seed + "_spend").encode("utf-8"))
+        spend_priv = _hl.pbkdf2_hmac("sha256", seed.encode("utf-8"), _salt_spend, _ITERS)
         spend_sk = SigningKey.from_string(spend_priv, curve=SECP256k1)
         spend_pub = b"\x04" + spend_sk.get_verifying_key().to_string()
 
@@ -221,54 +230,88 @@ class Wallet:
     def export_encrypted(self, passphrase: str) -> dict:
         """
         Export wallet as an encrypted JSON-compatible dict.
-        Uses PBKDF2-HMAC-SHA256 key derivation + BLAKE2b-CTR encryption.
-        Falls back to a simpler scheme if the `cryptography` package is
-        not installed.
+
+        v3 format — AES-256-GCM authenticated encryption with unique nonces
+        per key field.  PBKDF2-HMAC-SHA256 with 600 000 iterations.
         """
         salt = os.urandom(16)
-        # Derive 32-byte key with PBKDF2
-        key = hashlib.pbkdf2_hmac("sha256", passphrase.encode("utf-8"), salt, 100_000)
-        # AES-256-CBC via stdlib-compatible XOR-CTR (no external dep)
-        iv = os.urandom(16)
-        enc_priv = self._aes_ctr_encrypt(key, iv, self.private_key)
-        enc_view_priv = self._aes_ctr_encrypt(key, iv, self.view_private_key) if self.view_private_key else None
-        enc_spend_priv = self._aes_ctr_encrypt(key, iv, self.spend_private_key) if self.spend_private_key else None
+        iterations = 600_000
+        key = hashlib.pbkdf2_hmac("sha256", passphrase.encode("utf-8"), salt, iterations)
+
+        enc_priv, nonce_priv, tag_priv = self._aes_gcm_encrypt(key, self.private_key)
+        enc_view_priv = nonce_view = tag_view = None
+        if self.view_private_key:
+            enc_view_priv, nonce_view, tag_view = self._aes_gcm_encrypt(key, self.view_private_key)
+        enc_spend_priv = nonce_spend = tag_spend = None
+        if self.spend_private_key:
+            enc_spend_priv, nonce_spend, tag_spend = self._aes_gcm_encrypt(key, self.spend_private_key)
+
         return {
-            "version": 2,
+            "version": 3,
             "address": self.address,
             "public_key": self.public_key.hex(),
             "encrypted_private_key": enc_priv.hex(),
+            "nonce": nonce_priv.hex(),
+            "tag": tag_priv.hex(),
             "view_public_key": self.view_public_key.hex() if self.view_public_key else None,
             "encrypted_view_private_key": enc_view_priv.hex() if enc_view_priv else None,
+            "nonce_view": nonce_view.hex() if nonce_view else None,
+            "tag_view": tag_view.hex() if tag_view else None,
             "spend_public_key": self.spend_public_key.hex() if self.spend_public_key else None,
             "encrypted_spend_private_key": enc_spend_priv.hex() if enc_spend_priv else None,
+            "nonce_spend": nonce_spend.hex() if nonce_spend else None,
+            "tag_spend": tag_spend.hex() if tag_spend else None,
             "salt": salt.hex(),
-            "iv": iv.hex(),
             "kdf": "pbkdf2-hmac-sha256",
-            "kdf_iterations": 100_000,
+            "kdf_iterations": iterations,
         }
 
     @classmethod
     def import_encrypted(cls, data: dict, passphrase: str) -> Wallet:
-        """Import from an encrypted export."""
+        """Import from an encrypted export (supports v1, v2 and v3)."""
         version = data.get("version", 1)
         salt = bytes.fromhex(data["salt"])
         enc_priv = bytes.fromhex(data["encrypted_private_key"])
         pub = bytes.fromhex(data["public_key"])
 
-        if version >= 2:
+        if version >= 3:
+            # v3 — AES-256-GCM with unique nonces per field
+            iterations = data.get("kdf_iterations", 600_000)
+            key = hashlib.pbkdf2_hmac("sha256", passphrase.encode("utf-8"), salt, iterations)
+            nonce = bytes.fromhex(data["nonce"])
+            tag = bytes.fromhex(data["tag"])
+            priv = cls._aes_gcm_decrypt(key, nonce, enc_priv, tag)
+
+            view_priv = None
+            if data.get("encrypted_view_private_key"):
+                view_priv = cls._aes_gcm_decrypt(
+                    key,
+                    bytes.fromhex(data["nonce_view"]),
+                    bytes.fromhex(data["encrypted_view_private_key"]),
+                    bytes.fromhex(data["tag_view"]),
+                )
+            spend_priv = None
+            if data.get("encrypted_spend_private_key"):
+                spend_priv = cls._aes_gcm_decrypt(
+                    key,
+                    bytes.fromhex(data["nonce_spend"]),
+                    bytes.fromhex(data["encrypted_spend_private_key"]),
+                    bytes.fromhex(data["tag_spend"]),
+                )
+        elif version >= 2:
+            # v2 — legacy BLAKE2b-CTR (no authentication)
             iv = bytes.fromhex(data["iv"])
             iterations = data.get("kdf_iterations", 100_000)
             key = hashlib.pbkdf2_hmac("sha256", passphrase.encode("utf-8"), salt, iterations)
-            priv = cls._aes_ctr_encrypt(key, iv, enc_priv)  # CTR is symmetric
+            priv = cls._legacy_ctr_encrypt(key, iv, enc_priv)  # CTR is symmetric
             view_priv = None
             if data.get("encrypted_view_private_key"):
                 enc_view_priv = bytes.fromhex(data["encrypted_view_private_key"])
-                view_priv = cls._aes_ctr_encrypt(key, iv, enc_view_priv)
+                view_priv = cls._legacy_ctr_encrypt(key, iv, enc_view_priv)
             spend_priv = None
             if data.get("encrypted_spend_private_key"):
                 enc_spend_priv = bytes.fromhex(data["encrypted_spend_private_key"])
-                spend_priv = cls._aes_ctr_encrypt(key, iv, enc_spend_priv)
+                spend_priv = cls._legacy_ctr_encrypt(key, iv, enc_spend_priv)
         else:
             # Legacy v1 XOR fallback
             key = sha256(passphrase.encode("utf-8"))
@@ -282,17 +325,31 @@ class Wallet:
         return cls(priv, pub, data.get("address"), view_private_key=view_priv, view_public_key=view_pub,
                    spend_private_key=spend_priv, spend_public_key=spend_pub)
 
-    # ---- AES-CTR using only hashlib (no external crypto libs) ----
+    # ---- AES-256-GCM authenticated encryption ----
 
     @staticmethod
-    def _aes_ctr_encrypt(key: bytes, iv: bytes, data: bytes) -> bytes:
-        """
-        Simple CTR-mode stream cipher built on BLAKE2b.
-        Not as fast as OpenSSL AES, but avoids any external dependency
-        while being far stronger than plain XOR.
-        """
+    def _aes_gcm_encrypt(key: bytes, data: bytes) -> tuple[bytes, bytes, bytes]:
+        """Encrypt *data* with AES-256-GCM. Returns (ciphertext, nonce, tag)."""
+        from Crypto.Cipher import AES
+        nonce = os.urandom(12)  # 96-bit nonce — unique per encryption
+        cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
+        ciphertext, tag = cipher.encrypt_and_digest(data)
+        return ciphertext, nonce, tag
+
+    @staticmethod
+    def _aes_gcm_decrypt(key: bytes, nonce: bytes, ciphertext: bytes, tag: bytes) -> bytes:
+        """Decrypt and verify AES-256-GCM ciphertext. Raises ValueError on tamper."""
+        from Crypto.Cipher import AES
+        cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
+        return cipher.decrypt_and_verify(ciphertext, tag)
+
+    # ---- Legacy BLAKE2b-CTR cipher (v2 backward compatibility only) ----
+
+    @staticmethod
+    def _legacy_ctr_encrypt(key: bytes, iv: bytes, data: bytes) -> bytes:
+        """v2 CTR-mode stream cipher built on BLAKE2b — kept for v2 import only."""
         out = bytearray()
-        block_size = 32  # BLAKE2b-256 digest length
+        block_size = 32
         counter = int.from_bytes(iv, "big")
         for offset in range(0, len(data), block_size):
             counter_bytes = counter.to_bytes(16, "big")

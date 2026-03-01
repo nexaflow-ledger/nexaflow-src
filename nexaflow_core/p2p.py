@@ -32,13 +32,20 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ipaddress
 import json
 import logging
 import ssl
 import time
+from collections import deque
 from typing import Callable
 
 logger = logging.getLogger("nexaflow_p2p")
+
+# ── Security constants ────────────────────────────────────────────
+MAX_PEERS = 128          # maximum simultaneous peer connections
+MAX_MSG_BYTES = 65_536   # 64 KiB per message line
+MSG_PER_PEER_PER_SEC = 50  # per-peer relay rate limit
 
 
 # =====================================================================
@@ -75,7 +82,9 @@ def build_tls_context(
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     else:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        ctx.check_hostname = False  # hostname check is not meaningful for P2P IPs
+        # For P2P we verify the peer certificate via the CA but do not
+        # enforce hostname matching (nodes are identified by node_id).
+        ctx.check_hostname = False
 
     # Require TLS 1.3 minimum; reject older protocol versions.
     ctx.minimum_version = ssl.TLSVersion.TLSv1_3
@@ -152,13 +161,16 @@ class PeerConnection:
     async def readline(self) -> dict | None:
         """Read one newline-delimited JSON message."""
         try:
-            data = await asyncio.wait_for(self.reader.readline(), timeout=60.0)
-            if not data:
+            data = await asyncio.wait_for(
+                self.reader.readuntil(b"\n"), timeout=60.0
+            )
+            if not data or len(data) > MAX_MSG_BYTES:
                 return None
             self.last_seen = time.time()
             self.messages_received += 1
             return decode_message(data)
-        except (asyncio.TimeoutError, ConnectionError, OSError):
+        except (asyncio.TimeoutError, asyncio.IncompleteReadError,
+                asyncio.LimitOverrunError, ConnectionError, OSError):
             return None
 
     async def close(self):
@@ -260,9 +272,13 @@ class P2PNode:
         # {  "host:port": last_seen_timestamp  }
         self._known_addrs: dict[str, float] = {}
 
-        # Dedup - track seen message hashes to avoid rebroadcasts
-        self._seen_ids: set[str] = set()
-        self._max_seen = 10_000
+        # Dedup - track seen message hashes via an ordered deque to avoid
+        # unpredictable eviction, with a bounded size.
+        self._seen_ids: deque[str] = deque(maxlen=50_000)
+        self._seen_set: set[str] = set()
+
+        # Per-peer rate tracking: peer_id -> [msg_count, window_start]
+        self._peer_msg_rate: dict[str, list[float]] = {}
 
     # ---- lifecycle ----
 
@@ -302,27 +318,29 @@ class P2PNode:
     async def connect_to_peer(self, host: str, port: int) -> bool:
         """Initiate an outbound connection to a peer.
 
-        When :attr:`_client_ssl_context` is set the connection is TLS-
-        encrypted.  This is backward-compatible: without an SSL context
-        a plain TCP connection is made exactly as before.
+        Enforces MAX_PEERS and rejects duplicate peer_ids.
         """
+        if len(self.peers) >= MAX_PEERS:
+            logger.debug(f"[{self.node_id}] MAX_PEERS reached — skipping {host}:{port}")
+            return False
+
         try:
             reader, writer = await asyncio.open_connection(
                 host, port, ssl=self._client_ssl_context
             )
             peer = PeerConnection(reader, writer, direction="outbound")
-            # Send handshake — include our public key so the peer can verify
-            # our consensus proposal signatures.
             await peer.send("HELLO", {
                 "node_id": self.node_id,
                 "port": self.port,
                 "pubkey": self.node_pubkey.hex() if self.node_pubkey else "",
             })
-            # Read handshake response
             msg = await peer.readline()
             if msg and msg.get("type") == "HELLO":
-                peer.peer_id = msg["payload"]["node_id"]
-                # Store peer's advertised public key
+                claimed_id = msg["payload"].get("node_id", "")
+                if not claimed_id or claimed_id in self.peers:
+                    await peer.close()
+                    return False
+                peer.peer_id = claimed_id
                 pubkey_hex = msg["payload"].get("pubkey", "")
                 if pubkey_hex:
                     with contextlib.suppress(ValueError):
@@ -334,7 +352,6 @@ class P2PNode:
                 )
                 if self.on_peer_connected:
                     self.on_peer_connected(peer.peer_id)
-                # Start reading loop
                 task = asyncio.create_task(self._read_loop(peer))
                 self._tasks.append(task)
                 return True
@@ -350,11 +367,15 @@ class P2PNode:
     ):
         """Handle a new inbound connection.
 
-        When TLS is active the SSL handshake has already completed by the
-        time this callback fires, so the peer is already authenticated at
-        the transport layer.  The HELLO application-layer handshake then
-        exchanges node IDs and public keys.
+        Enforces MAX_PEERS, rejects duplicate peer_ids, and validates the
+        HELLO handshake before accepting the peer.
         """
+        # ── Connection limit ──────────────────────────────────────
+        if len(self.peers) >= MAX_PEERS:
+            logger.warning(f"[{self.node_id}] MAX_PEERS ({MAX_PEERS}) reached — rejecting inbound")
+            writer.close()
+            return
+
         peer = PeerConnection(reader, writer, direction="inbound")
         # Wait for HELLO
         msg = await peer.readline()
@@ -362,7 +383,21 @@ class P2PNode:
             await peer.close()
             return
 
-        peer.peer_id = msg["payload"]["node_id"]
+        claimed_id = msg["payload"].get("node_id", "")
+        if not claimed_id:
+            await peer.close()
+            return
+
+        # ── Reject duplicate peer_id ──────────────────────────────
+        if claimed_id in self.peers:
+            logger.warning(
+                f"[{self.node_id}] Duplicate peer_id {claimed_id!r} — "
+                "rejecting new inbound connection"
+            )
+            await peer.close()
+            return
+
+        peer.peer_id = claimed_id
         # Store peer's advertised public key
         pubkey_hex = msg["payload"].get("pubkey", "")
         if pubkey_hex:
@@ -398,6 +433,7 @@ class P2PNode:
 
         # Peer disconnected
         self.peers.pop(peer.peer_id, None)
+        self._peer_msg_rate.pop(peer.peer_id, None)
         await peer.close()
         logger.info(f"[{self.node_id}] Peer {peer.peer_id} disconnected")
         if self.on_peer_disconnected:
@@ -408,6 +444,25 @@ class P2PNode:
         msg_type = msg.get("type", "")
         payload = msg.get("payload", {})
 
+        # ── Per-peer rate limiting ────────────────────────────────
+        rate_info = self._peer_msg_rate.get(peer.peer_id)
+        now = time.time()
+        if rate_info is None:
+            rate_info = [1.0, now]
+            self._peer_msg_rate[peer.peer_id] = rate_info
+        else:
+            elapsed = now - rate_info[1]
+            if elapsed >= 1.0:
+                rate_info[0] = 1.0
+                rate_info[1] = now
+            else:
+                rate_info[0] += 1.0
+                if rate_info[0] > MSG_PER_PEER_PER_SEC:
+                    logger.warning(
+                        f"[{self.node_id}] Rate limit exceeded for {peer.peer_id}"
+                    )
+                    return  # drop message
+
         if msg_type == "PING":
             await peer.send("PONG", {"node_id": self.node_id})
 
@@ -416,7 +471,7 @@ class P2PNode:
 
         elif msg_type == "TX":
             tx_id = payload.get("tx_id", "")
-            if tx_id and tx_id not in self._seen_ids:
+            if tx_id and tx_id not in self._seen_set:
                 self._mark_seen(tx_id)
                 if self.on_transaction:
                     self.on_transaction(payload, peer.peer_id)
@@ -425,7 +480,7 @@ class P2PNode:
 
         elif msg_type == "PROPOSAL":
             prop_id = payload.get("validator_id", "") + str(payload.get("ledger_seq", ""))
-            if prop_id not in self._seen_ids:
+            if prop_id not in self._seen_set:
                 self._mark_seen(prop_id)
                 if self.on_proposal:
                     self.on_proposal(payload, peer.peer_id)
@@ -436,11 +491,14 @@ class P2PNode:
                 self.on_consensus_result(payload, peer.peer_id)
 
         elif msg_type == "PEERS":
-            # Gossip: peer shares known addresses
+            # Gossip: peer shares known addresses — filter to valid IPs only
             addrs = payload.get("addresses", [])
             for addr in addrs:
-                if isinstance(addr, str) and addr not in self._known_addrs:
-                    self._known_addrs[addr] = time.time()
+                if not isinstance(addr, str) or addr in self._known_addrs:
+                    continue
+                if not _is_valid_peer_addr(addr):
+                    continue
+                self._known_addrs[addr] = time.time()
 
         elif msg_type == "LEDGER_REQ":
             # Peer is requesting our ledger state (legacy)
@@ -546,6 +604,7 @@ class P2PNode:
                 ok = await peer.send("PING", {"node_id": self.node_id})
                 if not ok:
                     self.peers.pop(peer.peer_id, None)
+                    self._peer_msg_rate.pop(peer.peer_id, None)
                     await peer.close()
 
             # Every other cycle (~60s) share known addresses
@@ -569,12 +628,14 @@ class P2PNode:
     # ---- helpers ----
 
     def _mark_seen(self, msg_id: str):
-        if len(self._seen_ids) > self._max_seen:
-            # Evict oldest half
-            to_remove = list(self._seen_ids)[: self._max_seen // 2]
-            for k in to_remove:
-                self._seen_ids.discard(k)
-        self._seen_ids.add(msg_id)
+        if msg_id in self._seen_set:
+            return
+        # If at max capacity, evict the oldest entry
+        if len(self._seen_ids) >= self._seen_ids.maxlen:
+            evicted = self._seen_ids[0]
+            self._seen_set.discard(evicted)
+        self._seen_ids.append(msg_id)
+        self._seen_set.add(msg_id)
 
     @property
     def peer_count(self) -> int:
@@ -592,3 +653,32 @@ class P2PNode:
             "peer_list": [p.info() for p in self.peers.values()],
             "running": self._running,
         }
+
+
+# ── Module-level helpers ─────────────────────────────────────────────
+
+def _is_valid_peer_addr(addr: str) -> bool:
+    """Return True if *addr* looks like a safe ``host:port`` string.
+
+    Rejects RFC-1918 private addresses, loopback, link-local, and
+    non-routable ranges when they appear in gossip from *other* nodes.
+    Allows hostnames (DNS) and public IPs only.
+    """
+    if ":" not in addr:
+        return False
+    host, _, port_str = addr.rpartition(":")
+    try:
+        port = int(port_str)
+    except ValueError:
+        return False
+    if not (1 <= port <= 65535):
+        return False
+    # Reject known-dangerous IP ranges (SSRF protection)
+    try:
+        ip = ipaddress.ip_address(host)
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+            return False
+    except ValueError:
+        # It's a hostname — allow (DNS resolution will happen later)
+        pass
+    return True

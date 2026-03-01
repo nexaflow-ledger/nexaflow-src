@@ -5,6 +5,8 @@ Supports two output formats:
   - **human** - coloured, single-line, readable
   - **json**  - newline-delimited JSON for log aggregators
 
+File logging uses ``RotatingFileHandler`` to prevent unbounded disk usage.
+
 Usage:
     from nexaflow_core.logging_config import setup_logging
     setup_logging(level="DEBUG", fmt="json", log_file="nexaflow.log")
@@ -14,10 +16,15 @@ from __future__ import annotations
 
 import json
 import logging
+import logging.handlers
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import ClassVar
+
+# Rotation defaults: 50 MiB per file, keep 5 backups (≈250 MiB total)
+_LOG_MAX_BYTES = 50 * 1024 * 1024
+_LOG_BACKUP_COUNT = 5
 
 
 class _JSONFormatter(logging.Formatter):
@@ -89,10 +96,14 @@ def setup_logging(
         console.setFormatter(_HumanFormatter())
     root.addHandler(console)
 
-    # --- Optional file handler ---
+    # --- Optional file handler (with rotation) ---
     if log_file:
         path = Path(log_file)
         path.parent.mkdir(parents=True, exist_ok=True)
-        fh = logging.FileHandler(str(path))
+        fh = logging.handlers.RotatingFileHandler(
+            str(path),
+            maxBytes=_LOG_MAX_BYTES,
+            backupCount=_LOG_BACKUP_COUNT,
+        )
         fh.setFormatter(_JSONFormatter())  # always JSON for files
         root.addHandler(fh)

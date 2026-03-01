@@ -155,15 +155,16 @@ class TestDispatch(unittest.TestCase):
 
     def test_peers_gossip_populates_known_addrs(self):
         node = P2PNode("v1")
-        msg = {"type": "PEERS", "payload": {"addresses": ["10.0.0.1:9001", "10.0.0.2:9002"]}}
+        # Use public routable IPs (private IPs are now filtered)
+        msg = {"type": "PEERS", "payload": {"addresses": ["8.8.8.8:9001", "1.1.1.1:9002"]}}
 
         class FakePeer:
             peer_id = "p1"
             async def send(self, *a, **kw): return True
 
         self._run(node._dispatch(FakePeer(), msg))
-        self.assertIn("10.0.0.1:9001", node._known_addrs)
-        self.assertIn("10.0.0.2:9002", node._known_addrs)
+        self.assertIn("8.8.8.8:9001", node._known_addrs)
+        self.assertIn("1.1.1.1:9002", node._known_addrs)
 
     def test_peers_gossip_ignores_non_strings(self):
         node = P2PNode("v1")

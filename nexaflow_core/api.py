@@ -11,7 +11,7 @@ POST /tx/payment              Submit a payment
 POST /tx/trust                Set a trust line
 GET  /peers                   Connected peers
 GET  /ledger                  Latest closed ledger info
-POST /consensus               Trigger a consensus round
+POST /consensus               Trigger a consensus round (admin)
 GET  /orderbook/<base>/<counter>  Order-book snapshot (if DEX enabled)
 GET  /health                  Deep health check
 POST /tx/stake                Submit a stake
@@ -21,11 +21,13 @@ GET  /staking                 Global staking pool stats
 
 Security
 --------
-- API-key authentication on POST endpoints (``X-API-Key`` header or
-  ``api_key`` query param).  Disabled when ``api_key`` config is empty.
+- API-key authentication on POST endpoints via ``X-API-Key`` header only.
+  Timing-safe comparison via ``hmac.compare_digest``.
 - Per-IP token-bucket rate limiter (configurable RPM).
 - CORS middleware (origins configurable via ``cors_origins``).
 - Request body size cap (``max_body_bytes``, default 1 MiB).
+- Optional TLS for the HTTP listener (``api_tls_cert`` / ``api_tls_key``).
+- Numeric inputs validated and clamped (NaN / Inf rejected).
 
 Usage:
     api = APIServer(node, host="127.0.0.1", port=8080)
@@ -36,8 +38,11 @@ Usage:
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
+import math
+import ssl as _ssl
 import time
 from collections import defaultdict
 from typing import TYPE_CHECKING, Any
@@ -48,6 +53,38 @@ if TYPE_CHECKING:
     from nexaflow_core.config import APIConfig
 
 logger = logging.getLogger("nexaflow_api")
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Input helpers
+# ═══════════════════════════════════════════════════════════════════
+
+def _safe_float(value: Any, name: str = "value") -> float:
+    """Convert *value* to float, rejecting NaN, Inf, and non-numeric."""
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        raise web.HTTPBadRequest(text=f"{name} must be a number")
+    if math.isnan(f) or math.isinf(f):
+        raise web.HTTPBadRequest(text=f"{name} must be a finite number")
+    return f
+
+
+def _safe_int(value: Any, name: str = "value") -> int:
+    """Convert *value* to int, rejecting non-integer input."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise web.HTTPBadRequest(text=f"{name} must be an integer")
+
+
+def _sanitize_validation_msg(msg: str) -> str:
+    """Strip internal state (balances, sequences) from validation messages."""
+    # Allow only the error class prefix, trim after the first colon + space
+    # Examples:  "Insufficient balance: have 1234" → "Insufficient balance"
+    if ":" in msg:
+        return msg.split(":", 1)[0]
+    return msg
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -100,13 +137,18 @@ def _make_rate_limit_middleware(bucket: _TokenBucket):
 
 
 def _make_api_key_middleware(api_key: str):
-    """aiohttp middleware that requires an API key on POST/PUT/DELETE."""
+    """aiohttp middleware that requires an API key on POST/PUT/DELETE.
+
+    Uses ``hmac.compare_digest`` for timing-safe comparison and only
+    reads the key from the ``X-API-Key`` header (never from query params
+    to avoid credential leakage in logs / Referer headers).
+    """
 
     @web.middleware
     async def api_key_middleware(request: web.Request, handler):
         if request.method in ("POST", "PUT", "DELETE"):
-            key = request.headers.get("X-API-Key") or request.query.get("api_key")
-            if key != api_key:
+            key = request.headers.get("X-API-Key", "")
+            if not hmac.compare_digest(key, api_key):
                 raise web.HTTPUnauthorized(text="Invalid or missing API key")
         return await handler(request)
 
@@ -114,21 +156,27 @@ def _make_api_key_middleware(api_key: str):
 
 
 def _make_cors_middleware(origins: list[str]):
-    """aiohttp middleware that adds CORS headers."""
+    """aiohttp middleware that adds CORS headers.
+
+    The ``*`` wildcard is **not** supported — operators must list concrete
+    origins to prevent credential-bearing cross-origin requests from
+    untrusted sites.
+    """
 
     allowed = set(origins) if origins else set()
+    # Discard wildcard silently — explicit origins only
+    allowed.discard("*")
 
     @web.middleware
     async def cors_middleware(request: web.Request, handler):
-        # Handle preflight
         origin = request.headers.get("Origin", "")
         if request.method == "OPTIONS":
             resp = web.Response(status=204)
         else:
             resp = await handler(request)
 
-        if "*" in allowed or origin in allowed:
-            resp.headers["Access-Control-Allow-Origin"] = origin or "*"
+        if origin in allowed:
+            resp.headers["Access-Control-Allow-Origin"] = origin
             resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
             resp.headers["Access-Control-Allow-Headers"] = "Content-Type, X-API-Key"
             resp.headers["Access-Control-Max-Age"] = "3600"
@@ -160,9 +208,11 @@ class APIServer:
     async def start(self) -> None:
         middlewares: list = []
         max_body = 1_048_576  # default 1 MiB
+        ssl_ctx = None
 
         if self._api_config is not None:
             cfg = self._api_config
+
             max_body = cfg.max_body_bytes
 
             # Rate limiter
@@ -178,6 +228,14 @@ class APIServer:
             if cfg.api_key:
                 middlewares.append(_make_api_key_middleware(cfg.api_key))
 
+            # Optional TLS for the API listener
+            cert = getattr(cfg, "tls_cert", "") or ""
+            key = getattr(cfg, "tls_key", "") or ""
+            if cert and key:
+                ssl_ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_SERVER)
+                ssl_ctx.minimum_version = _ssl.TLSVersion.TLSv1_2
+                ssl_ctx.load_cert_chain(cert, key)
+
         self._app = web.Application(
             middlewares=middlewares,
             client_max_size=max_body,
@@ -185,9 +243,10 @@ class APIServer:
         self._register_routes(self._app)
         self._runner = web.AppRunner(self._app)
         await self._runner.setup()
-        site = web.TCPSite(self._runner, self.host, self.port)
+        site = web.TCPSite(self._runner, self.host, self.port, ssl_context=ssl_ctx)
         await site.start()
-        logger.info(f"API listening on http://{self.host}:{self.port}")
+        scheme = "https" if ssl_ctx else "http"
+        logger.info(f"API listening on {scheme}://{self.host}:{self.port}")
 
     async def stop(self) -> None:
         if self._runner:
@@ -254,7 +313,7 @@ class APIServer:
             raise web.HTTPBadRequest(text="Invalid JSON body") from exc
 
         dest = body.get("destination", "")
-        amount = float(body.get("amount", 0))
+        amount = _safe_float(body.get("amount", 0), "amount")
         currency = body.get("currency", "NXF")
         memo = body.get("memo", "")
 
@@ -282,7 +341,7 @@ class APIServer:
 
         currency = body.get("currency", "")
         issuer = body.get("issuer", "")
-        limit = float(body.get("limit", 0))
+        limit = _safe_float(body.get("limit", 0), "limit")
 
         if not currency or not issuer or limit <= 0:
             raise web.HTTPBadRequest(text="currency, issuer, and positive limit required")
@@ -293,7 +352,7 @@ class APIServer:
 
         valid, _code, msg = self.node.validator.validate(tx)
         if not valid:
-            raise web.HTTPBadRequest(text=f"Validation failed: {msg}")
+            raise web.HTTPBadRequest(text=f"Validation failed: {_sanitize_validation_msg(msg)}")
 
         tx_dict = tx.to_dict()
         tx_dict["tx_id"] = tx.tx_id
@@ -331,6 +390,11 @@ class APIServer:
         return web.json_response(result, dumps=_json_dumps)
 
     async def _trigger_consensus(self, _request: web.Request) -> web.Response:
+        """POST /consensus — admin-only consensus trigger.
+
+        This endpoint is gated behind API-key auth like all POST endpoints.
+        Operators should use a strong API key to prevent abuse.
+        """
         await self.node.run_consensus()
         return web.json_response({"status": "consensus_triggered"})
 
@@ -359,8 +423,8 @@ class APIServer:
         except Exception as exc:
             raise web.HTTPBadRequest(text="Invalid JSON body") from exc
 
-        amount = float(body.get("amount", 0))
-        tier = int(body.get("tier", 0))
+        amount = _safe_float(body.get("amount", 0), "amount")
+        tier = _safe_int(body.get("tier", 0), "tier")
         memo = body.get("memo", "")
 
         if amount <= 0:
@@ -372,13 +436,13 @@ class APIServer:
 
         valid, _code, msg = self.node.validator.validate(tx)
         if not valid:
-            raise web.HTTPBadRequest(text=f"Validation failed: {msg}")
+            raise web.HTTPBadRequest(text=f"Validation failed: {_sanitize_validation_msg(msg)}")
 
         result = self.node.ledger.apply_transaction(tx)
         if result != 0:
             from nexaflow_core.transaction import RESULT_NAMES
             raise web.HTTPBadRequest(
-                text=f"Apply failed: {RESULT_NAMES.get(result, result)}"
+                text=f"Apply failed: {RESULT_NAMES.get(result, 'unknown')}"
             )
 
         # Broadcast
@@ -420,13 +484,13 @@ class APIServer:
 
         valid, _code, msg = self.node.validator.validate(tx)
         if not valid:
-            raise web.HTTPBadRequest(text=f"Validation failed: {msg}")
+            raise web.HTTPBadRequest(text=f"Validation failed: {_sanitize_validation_msg(msg)}")
 
         result = self.node.ledger.apply_transaction(tx)
         if result != 0:
             from nexaflow_core.transaction import RESULT_NAMES
             raise web.HTTPBadRequest(
-                text=f"Apply failed: {RESULT_NAMES.get(result, result)}"
+                text=f"Apply failed: {RESULT_NAMES.get(result, 'unknown')}"
             )
 
         tx_dict = tx.to_dict()

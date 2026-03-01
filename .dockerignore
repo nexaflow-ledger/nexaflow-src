@@ -1,0 +1,38 @@
+# Build artifacts
+build/
+dist/
+*.egg-info/
+__pycache__/
+*.pyc
+*.pyo
+
+# Cython generated C files (rebuilt in container)
+nexaflow_core/*.c
+nexaflow_core/*.so
+nexaflow_core/*.html
+
+# Dev / test
+tests/
+scripts/
+.git/
+.github/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+# Data / secrets (never bake into image)
+data/
+certs/
+logs/
+*.db
+*.key
+*.crt
+*.pem
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store

@@ -30,8 +30,13 @@ class LedgerStore:
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(db_path)
         self._conn.row_factory = sqlite3.Row
+        # S2 — busy_timeout prevents "database is locked" under contention
+        self._conn.execute("PRAGMA busy_timeout = 5000")
         self._conn.execute("PRAGMA journal_mode=WAL")
+        # synchronous=NORMAL is safe with WAL and avoids fsync per commit
+        self._conn.execute("PRAGMA synchronous=NORMAL")
         self._create_tables()
+        self._ensure_schema_version()
         logger.info(f"Storage opened: {db_path}")
 
     # ── schema ───────────────────────────────────────────────────
@@ -103,7 +108,49 @@ class LedgerStore:
                 tx_id TEXT PRIMARY KEY
             )
         """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS schema_version (
+                id      INTEGER PRIMARY KEY CHECK (id = 1),
+                version INTEGER NOT NULL
+            )
+        """)
         c.commit()
+
+    # S4 — Schema versioning
+    CURRENT_SCHEMA_VERSION = 1
+
+    def _ensure_schema_version(self) -> None:
+        """Check / set schema version; run migrations when needed."""
+        row = self._conn.execute(
+            "SELECT version FROM schema_version WHERE id = 1"
+        ).fetchone()
+        if row is None:
+            self._conn.execute(
+                "INSERT INTO schema_version (id, version) VALUES (1, ?)",
+                (self.CURRENT_SCHEMA_VERSION,),
+            )
+            self._conn.commit()
+        else:
+            db_ver = row["version"]
+            if db_ver < self.CURRENT_SCHEMA_VERSION:
+                self._migrate(db_ver, self.CURRENT_SCHEMA_VERSION)
+            elif db_ver > self.CURRENT_SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"Database schema v{db_ver} is newer than this software "
+                    f"(v{self.CURRENT_SCHEMA_VERSION}).  Upgrade NexaFlow."
+                )
+
+    def _migrate(self, from_ver: int, to_ver: int) -> None:
+        """Run sequential migrations.  Add cases as schema evolves."""
+        logger.info(f"Migrating database schema v{from_ver} → v{to_ver}")
+        # Future migrations go here:
+        # if from_ver < 2:
+        #     self._conn.execute("ALTER TABLE ...")
+        #     from_ver = 2
+        self._conn.execute(
+            "UPDATE schema_version SET version = ? WHERE id = 1", (to_ver,)
+        )
+        self._conn.commit()
 
     # ── accounts ─────────────────────────────────────────────────
 
@@ -276,36 +323,70 @@ class LedgerStore:
     # ── bulk helpers ─────────────────────────────────────────────
 
     def snapshot_ledger(self, ledger: Any) -> None:
-        """Persist the full current state of a Ledger object."""
-        for addr, acc in ledger.accounts.items():
-            self.save_account(
-                addr, acc.balance, acc.sequence,
-                bool(acc.is_gateway), acc.owner_count,
-            )
-            for (currency, issuer), tl in acc.trust_lines.items():
-                self.save_trust_line(addr, currency, issuer, tl.balance, tl.limit)
+        """Persist the full current state of a Ledger object atomically.
 
-        for header in ledger.closed_ledgers:
-            self.save_closed_ledger(
-                header.sequence, header.hash, header.parent_hash,
-                header.close_time, header.tx_count,
-                header.total_nxf, 0,
-            )
+        All writes are wrapped in a single transaction (S3) to prevent
+        a partial snapshot if the process crashes mid-write.
+        """
+        c = self._conn
+        try:
+            c.execute("BEGIN IMMEDIATE")
 
-        # Persist staking pool
-        if hasattr(ledger, "staking_pool") and ledger.staking_pool is not None:
-            for record in ledger.staking_pool.stakes.values():
-                self.save_stake(
-                    record.stake_id, record.tx_id, record.address,
-                    record.amount, int(record.tier), record.base_apy,
-                    record.effective_apy, record.lock_duration,
-                    record.start_time, record.maturity_time,
-                    record.matured, record.cancelled, record.payout_amount,
+            for addr, acc in ledger.accounts.items():
+                c.execute(
+                    """INSERT OR REPLACE INTO accounts
+                       (address, balance, sequence, is_gateway, owner_count)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (addr, acc.balance, acc.sequence,
+                     int(bool(acc.is_gateway)), acc.owner_count),
+                )
+                for (currency, issuer), tl in acc.trust_lines.items():
+                    c.execute(
+                        """INSERT OR REPLACE INTO trust_lines
+                           (holder, currency, issuer, balance, "limit")
+                           VALUES (?, ?, ?, ?, ?)""",
+                        (addr, currency, issuer, tl.balance, tl.limit),
+                    )
+
+            for header in ledger.closed_ledgers:
+                c.execute(
+                    """INSERT OR REPLACE INTO closed_ledgers
+                       (sequence, hash, previous_hash, timestamp,
+                        transaction_count, total_nxf, account_count)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (header.sequence, header.hash, header.parent_hash,
+                     header.close_time, header.tx_count,
+                     header.total_nxf, 0),
                 )
 
-        # Persist applied tx IDs (replay protection)
-        if hasattr(ledger, "applied_tx_ids") and ledger.applied_tx_ids:
-            self.save_applied_tx_ids(ledger.applied_tx_ids)
+            # Persist staking pool
+            if hasattr(ledger, "staking_pool") and ledger.staking_pool is not None:
+                for record in ledger.staking_pool.stakes.values():
+                    c.execute(
+                        """INSERT OR REPLACE INTO stakes
+                           (stake_id, tx_id, address, amount, tier, base_apy,
+                            effective_apy, lock_duration, start_time, maturity_time,
+                            matured, cancelled, payout_amount)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (record.stake_id, record.tx_id, record.address,
+                         record.amount, int(record.tier), record.base_apy,
+                         record.effective_apy, record.lock_duration,
+                         record.start_time, record.maturity_time,
+                         int(record.matured), int(record.cancelled),
+                         record.payout_amount),
+                    )
+
+            # Persist applied tx IDs (replay protection)
+            if hasattr(ledger, "applied_tx_ids") and ledger.applied_tx_ids:
+                c.executemany(
+                    "INSERT OR IGNORE INTO applied_tx_ids (tx_id) VALUES (?)",
+                    [(tid,) for tid in ledger.applied_tx_ids],
+                )
+
+            c.execute("COMMIT")
+        except Exception:
+            c.execute("ROLLBACK")
+            raise
 
     def restore_ledger(self, ledger: Any) -> None:
         """

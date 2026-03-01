@@ -17,6 +17,15 @@ services:
     ports:
       - "9001:9001"
       - "8080:8080"
+    volumes:
+      - node1-data:/app/data
+      - node1-certs:/app/certs
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 512M
+    restart: unless-stopped
     networks:
       - nexaflow
 
@@ -32,6 +41,15 @@ services:
     ports:
       - "9002:9002"
       - "8081:8081"
+    volumes:
+      - node2-data:/app/data
+      - node2-certs:/app/certs
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 512M
+    restart: unless-stopped
     networks:
       - nexaflow
 
@@ -47,8 +65,25 @@ services:
     ports:
       - "9003:9003"
       - "8082:8082"
+    volumes:
+      - node3-data:/app/data
+      - node3-certs:/app/certs
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 512M
+    restart: unless-stopped
     networks:
       - nexaflow
+
+volumes:
+  node1-data:
+  node1-certs:
+  node2-data:
+  node2-certs:
+  node3-data:
+  node3-certs:
 
 networks:
   nexaflow:

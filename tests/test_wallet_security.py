@@ -100,53 +100,54 @@ class TestSeedEdgeCases(unittest.TestCase):
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  AES-CTR encryption
+#  AES-GCM encryption (v3)
 # ═══════════════════════════════════════════════════════════════════
 
 class TestAESCTR(unittest.TestCase):
+    """Tests for the AES-256-GCM authenticated encryption used in v3."""
 
     def test_roundtrip(self):
         key = b"\x00" * 32
-        iv = b"\x01" * 16
         data = b"hello world 1234"
-        encrypted = Wallet._aes_ctr_encrypt(key, iv, data)
-        decrypted = Wallet._aes_ctr_encrypt(key, iv, encrypted)
+        ct, nonce, tag = Wallet._aes_gcm_encrypt(key, data)
+        decrypted = Wallet._aes_gcm_decrypt(key, nonce, ct, tag)
         self.assertEqual(decrypted, data)
 
     def test_different_key_different_output(self):
-        iv = b"\x00" * 16
         data = b"test data"
-        enc1 = Wallet._aes_ctr_encrypt(b"\x01" * 32, iv, data)
-        enc2 = Wallet._aes_ctr_encrypt(b"\x02" * 32, iv, data)
-        self.assertNotEqual(enc1, enc2)
+        ct1, n1, t1 = Wallet._aes_gcm_encrypt(b"\x01" * 32, data)
+        ct2, n2, t2 = Wallet._aes_gcm_encrypt(b"\x02" * 32, data)
+        self.assertNotEqual(ct1, ct2)
 
     def test_different_iv_different_output(self):
         key = b"\x00" * 32
         data = b"test data"
-        enc1 = Wallet._aes_ctr_encrypt(key, b"\x01" * 16, data)
-        enc2 = Wallet._aes_ctr_encrypt(key, b"\x02" * 16, data)
-        self.assertNotEqual(enc1, enc2)
+        ct1, n1, t1 = Wallet._aes_gcm_encrypt(key, data)
+        ct2, n2, t2 = Wallet._aes_gcm_encrypt(key, data)
+        # Unique random nonce each call → different ciphertext
+        self.assertNotEqual(n1, n2)
 
     def test_empty_data(self):
         key = b"\x00" * 32
-        iv = b"\x00" * 16
-        result = Wallet._aes_ctr_encrypt(key, iv, b"")
-        self.assertEqual(result, b"")
+        ct, nonce, tag = Wallet._aes_gcm_encrypt(key, b"")
+        self.assertEqual(len(ct), 0)
+        decrypted = Wallet._aes_gcm_decrypt(key, nonce, ct, tag)
+        self.assertEqual(decrypted, b"")
 
     def test_large_data(self):
         key = b"\xab" * 32
-        iv = b"\xcd" * 16
         data = b"\xff" * 1000
-        encrypted = Wallet._aes_ctr_encrypt(key, iv, data)
-        decrypted = Wallet._aes_ctr_encrypt(key, iv, encrypted)
+        ct, nonce, tag = Wallet._aes_gcm_encrypt(key, data)
+        decrypted = Wallet._aes_gcm_decrypt(key, nonce, ct, tag)
         self.assertEqual(decrypted, data)
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  Encrypted export/import round-trips (v2)
+#  Encrypted export/import round-trips (v3 AES-GCM)
 # ═══════════════════════════════════════════════════════════════════
 
 class TestEncryptedExportV2(unittest.TestCase):
+    """Tests for v3 AES-GCM encrypted export/import."""
 
     def test_roundtrip_with_all_keys(self):
         w = Wallet.create()
@@ -167,21 +168,23 @@ class TestEncryptedExportV2(unittest.TestCase):
     def test_wrong_passphrase_corrupts_keys(self):
         w = Wallet.create()
         exported = w.export_encrypted("correct")
-        w2 = Wallet.import_encrypted(exported, "wrong")
-        self.assertNotEqual(w2.private_key, w.private_key)
+        # v3 AES-GCM: wrong passphrase raises ValueError (MAC check fails)
+        with self.assertRaises(ValueError):
+            Wallet.import_encrypted(exported, "wrong")
 
     def test_version_2_tag(self):
         w = Wallet.create()
         exported = w.export_encrypted("pw")
-        self.assertEqual(exported["version"], 2)
+        self.assertEqual(exported["version"], 3)
 
     def test_export_has_kdf_fields(self):
         w = Wallet.create()
         exported = w.export_encrypted("pw")
         self.assertEqual(exported["kdf"], "pbkdf2-hmac-sha256")
-        self.assertEqual(exported["kdf_iterations"], 100_000)
+        self.assertEqual(exported["kdf_iterations"], 600_000)
         self.assertIn("salt", exported)
-        self.assertIn("iv", exported)
+        self.assertIn("nonce", exported)
+        self.assertIn("tag", exported)
 
 
 # ═══════════════════════════════════════════════════════════════════

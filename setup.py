@@ -68,19 +68,20 @@ else:
 
 setup(
     name="nexaflow",
-    version="1.0.0",
+    version="0.9.0",
     description="A NexaFlow-like cryptocurrency with Cython optimized consensus",
     long_description=long_description,
     long_description_content_type="text/markdown",
     license="MIT",
     author="NexaFlow Contributors",
-    python_requires=">=3.9",
+    python_requires=">=3.10",
     packages=find_packages(exclude=["tests", "tests.*", "scripts", "build"]),
     ext_modules=ext_modules,
     install_requires=[
-        "ecdsa>=0.18.0",
-        "aiohttp>=3.9.0",
-        "tomli>=2.0.0;python_version<'3.11'",
+        "ecdsa>=0.18.0,<0.19",
+        "aiohttp>=3.9.0,<3.12",
+        "tomli>=2.0.0,<3;python_version<'3.11'",
+        "pycryptodome>=3.21.0,<4",
     ],
     extras_require={
         "gui": [
@@ -111,7 +112,6 @@ setup(
         "Operating System :: OS Independent",
         "Programming Language :: Cython",
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",

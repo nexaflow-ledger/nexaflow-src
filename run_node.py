@@ -261,19 +261,42 @@ class NexaFlowNode:
 
     def _save_wallet(self, wallet: Wallet, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        data = wallet.to_dict()
+        passphrase = os.environ.get("NEXAFLOW_WALLET_PASSPHRASE", "")
+        if passphrase:
+            # D6 — Encrypt wallet at rest
+            data = wallet.export_encrypted(passphrase)
+            data["_encrypted"] = True
+        else:
+            data = wallet.to_dict()
+            logger.warning(
+                "Wallet saved UNENCRYPTED. Set NEXAFLOW_WALLET_PASSPHRASE "
+                "env var to encrypt private keys at rest."
+            )
         path.write_text(json.dumps(data, indent=2) + "\n")
         os.chmod(path, 0o600)
         logger.info(
             f"Wallet created and saved to {path}\n"
             f"  Address:    {wallet.address}\n"
             f"  Public key: {wallet.public_key.hex()[:32]}...\n"
+            f"  Encrypted:  {'yes' if passphrase else 'NO'}\n"
             f"  ⚠  Back up {path} — this file holds your private keys!"
         )
 
     @staticmethod
     def _load_wallet(path: Path) -> Wallet:
         data = json.loads(path.read_text())
+        if data.get("_encrypted") or data.get("version"):
+            # Encrypted wallet — need passphrase
+            passphrase = os.environ.get("NEXAFLOW_WALLET_PASSPHRASE", "")
+            if not passphrase:
+                raise RuntimeError(
+                    f"Wallet at {path} is encrypted. Set NEXAFLOW_WALLET_PASSPHRASE "
+                    "env var to decrypt."
+                )
+            wallet = Wallet.import_encrypted(data, passphrase)
+            logger.info(f"Encrypted wallet loaded from {path} | {wallet.address}")
+            return wallet
+        # Legacy unencrypted wallet
         priv = bytes.fromhex(data["private_key"])
         pub = bytes.fromhex(data["public_key"])
         view_priv = bytes.fromhex(data["view_private_key"]) if data.get("view_private_key") else None
@@ -286,6 +309,10 @@ class NexaFlowNode:
             spend_private_key=spend_priv, spend_public_key=spend_pub,
         )
         logger.info(f"Wallet loaded from {path} | {wallet.address}")
+        logger.warning(
+            "Wallet is stored UNENCRYPTED. Set NEXAFLOW_WALLET_PASSPHRASE "
+            "and restart to encrypt."
+        )
         return wallet
 
     # ---- lifecycle ----

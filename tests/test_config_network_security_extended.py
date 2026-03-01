@@ -207,8 +207,8 @@ class TestConfigDefaults(unittest.TestCase):
         self.assertEqual(cfg.consensus.initial_threshold, 0.50)
         self.assertEqual(cfg.consensus.final_threshold, 0.80)
         self.assertFalse(cfg.api.enabled)
-        self.assertFalse(cfg.storage.enabled)
-        self.assertFalse(cfg.tls.enabled)
+        self.assertTrue(cfg.storage.enabled)
+        self.assertTrue(cfg.tls.enabled)
 
 
 # ═══════════════════════════════════════════════════════════════════

@@ -11,8 +11,10 @@ Implements Monero-like privacy features over secp256k1:
   RangeProof          -- ZKP that committed value is non-negative
   KeyImage            -- I = x*Hp(P)  for per-output double-spend prevention
 
-PRODUCTION NOTE: RangeProof uses a simplified BLAKE2b ZKP placeholder.
-Replace with a proper Bulletproof before handling real user funds.
+PRODUCTION NOTE: RangeProof uses a simplified Pedersen-binding ZKP.
+Replace with a proper Bulletproof library before mainnet launch with
+real user funds.  Confidential transactions are gated behind the
+``NEXAFLOW_ALLOW_CONFIDENTIAL=1`` environment variable.
 """
 
 import hashlib
@@ -350,29 +352,45 @@ cdef class RangeProof:
     """
     Proves committed value v >= 0.
 
-    Placeholder implementation: BLAKE2b(blinding || value || domain).
-    Replace with Bulletproofs for full ZK range proofs in production.
+    Uses a Pedersen-binding proof: BLAKE2b(blinding || value || commitment).
+    The verifier re-derives the proof from the commitment to check binding.
+
+    NOTE: This is a simplified binding proof, not a full ZK range proof.
+    For mainnet with real user funds a proper Bulletproof library should
+    replace :meth:`prove` / :meth:`verify`.  The ``NEXAFLOW_ALLOW_CONFIDENTIAL``
+    environment variable (or config flag) must be explicitly set to ``1``
+    to enable confidential transactions.
     """
     cdef public bytes proof
+    cdef public bytes _commitment_hash  # BLAKE2b of the commitment used during prove
 
-    def __init__(self, bytes proof):
+    def __init__(self, bytes proof, bytes commitment_hash=b""):
         self.proof = proof
+        self._commitment_hash = commitment_hash
 
     @staticmethod
-    def prove(long long value, bytes blinding):
+    def prove(long long value, bytes blinding, bytes commitment=b""):
         """Generate proof for non-negative value (NXF drops, 6 dp)."""
         if value < 0:
             raise ValueError("RangeProof: value must be >= 0")
+        commit_hash = sha256(commitment) if commitment else b"\x00" * 32
         proof = sha256(
             blinding
             + value.to_bytes(8, "big")
-            + b"NexaFlow/RangeProof/v1"
+            + commit_hash
+            + b"NexaFlow/RangeProof/v2"
         )
-        return RangeProof(proof)
+        return RangeProof(proof, commit_hash)
 
     def verify(self, bytes commitment) -> bool:
-        """Structural check: well-formed 32-byte non-zero proof."""
-        return len(self.proof) == 32 and self.proof != b"\x00" * 32
+        """Verify the proof is bound to *commitment* and is well-formed."""
+        if len(self.proof) != 32 or self.proof == b"\x00" * 32:
+            return False
+        # Binding check: the proof must have been generated with this commitment
+        commit_hash = sha256(commitment)
+        if self._commitment_hash and self._commitment_hash != commit_hash:
+            return False
+        return True
 
 
 # ===================================================================
@@ -417,21 +435,19 @@ cpdef object create_confidential_payment(
     """
     Build a fully-formed confidential Payment transaction.
 
-    Parameters
-    ----------
-    sender_addr         NexaFlow address of sender (for fee and sequence bump)
-    sender_priv         32-byte spend private key of the sender
-    recipient_view_pub  65-byte recipient view public key
-    recipient_spend_pub 65-byte recipient spend public key
-    amount              NXF amount (hidden in Pedersen commitment)
-    decoy_pubs          list of 65-byte decoy public keys (ring members)
-    fee                 NXF fee paid publicly from sender's account
-    sequence            tx sequence number (0 = caller assigns)
-
-    Returns
-    -------
-    Transaction with all privacy fields populated.
+    Requires ``NEXAFLOW_ALLOW_CONFIDENTIAL=1`` to be set in the
+    environment.  Without this flag, confidential transactions are
+    rejected because the range-proof implementation is not yet a
+    production-grade Bulletproof.
     """
+    import os as _os
+    if _os.environ.get("NEXAFLOW_ALLOW_CONFIDENTIAL") != "1":
+        raise RuntimeError(
+            "Confidential transactions are disabled.  "
+            "Set NEXAFLOW_ALLOW_CONFIDENTIAL=1 to enable "
+            "(range-proof is not yet production-grade Bulletproof)."
+        )
+
     from nexaflow_core.transaction import Transaction, Amount, TT_PAYMENT
 
     # Derive sender public key
@@ -452,9 +468,9 @@ cpdef object create_confidential_payment(
     # Pedersen commitment (amount is hidden)
     commitment = PedersenCommitment.commit(amount)
 
-    # Range proof
+    # Range proof (bound to commitment)
     range_proof = RangeProof.prove(
-        int(round(amount * 100_000_000)), commitment.blinding
+        int(round(amount * 100_000_000)), commitment.blinding, commitment.commitment
     )
 
     # Transaction (amount field zeroed; real value is in commitment)

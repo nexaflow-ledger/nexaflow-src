@@ -31,7 +31,7 @@ validator_pubkeys_dir = ""           # e.g. "certs/pubkeys/" (auto-filled when g
 # When enabled every P2P connection is TLS-encrypted.
 # Certificates are auto-generated on first run when auto_generate = true.
 # You can also generate manually:  python scripts/gen_node_cert.py --node-id validator-1
-enabled = false
+enabled = true
 auto_generate = true                # generate TLS CA + node cert on first run if missing
 cert_file = "certs/node.crt"
 key_file  = "certs/node.key"
@@ -43,18 +43,18 @@ enabled = false
 host = "127.0.0.1"
 port = 8080
 api_key = ""                 # set a secret key to protect POST endpoints (or use NEXAFLOW_API_KEY env)
-rate_limit_rpm = 120         # max requests per minute per IP (0 = unlimited)
+rate_limit_rpm = 60          # max requests per minute per IP (0 = unlimited)
 cors_origins = []            # e.g. ["https://dashboard.nexaflow.io"]
 max_body_bytes = 1_048_576   # 1 MiB
 
 [storage]
-enabled = false
+enabled = true
 backend = "sqlite"
 path = "data/nexaflow.db"
 
 [wallet]
 wallet_file = "data/wallet.json"   # auto-created on first run
-auto_genesis = true                # auto-assign full supply when [genesis.accounts] is empty
+auto_genesis = false               # set to true ONLY on the genesis node's first run
 
 # Deterministic genesis — every node must use the same genesis config.
 # When [genesis.accounts] is empty and auto_genesis = true, the full supply

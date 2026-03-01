@@ -27,8 +27,15 @@ cdef dict _ALPHA_MAP = {c: i for i, c in enumerate(ALPHABET)}
 # ===================================================================
 
 cpdef bytes sha256(bytes data):
-    """BLAKE2b-256 hash (replaces SHA-256 throughout NexaFlow)."""
+    """BLAKE2b-256 hash — primary hash function throughout NexaFlow.
+
+    Named ``sha256`` for historical API compatibility but uses BLAKE2b-256
+    which offers equivalent security with better performance.
+    """
     return hashlib.blake2b(data, digest_size=32).digest()
+
+# Explicit alias so callers can use the accurate name.
+blake2b_256 = sha256
 
 cpdef bytes sha256d(bytes data):
     """Double BLAKE2b-256 hash (used for checksums)."""

@@ -260,6 +260,7 @@ class TestAPIKeyAuth:
 
     @pytest.mark.asyncio
     async def test_post_allowed_with_query_param_key(self):
+        """Query-param API keys are no longer accepted (security hardening)."""
         cfg = _build_api_config(api_key="secret123")
         client, _node = await _make_test_client(cfg)
         async with client:
@@ -267,7 +268,7 @@ class TestAPIKeyAuth:
                 "/tx/payment?api_key=secret123",
                 json={"destination": "rDest", "amount": 10},
             )
-            assert resp.status == 400  # not 401
+            assert resp.status == 401  # query param no longer accepted
 
     @pytest.mark.asyncio
     async def test_no_auth_when_key_empty(self):
@@ -310,6 +311,7 @@ class TestCORSMiddleware:
 
     @pytest.mark.asyncio
     async def test_wildcard_allows_any_origin(self):
+        """Wildcard '*' is now rejected for CORS (security hardening)."""
         cfg = _build_api_config(cors_origins=["*"])
         client, _ = await _make_test_client(cfg)
         async with client:
@@ -317,7 +319,8 @@ class TestCORSMiddleware:
                 "/health",
                 headers={"Origin": "https://anything.com"},
             )
-            assert "Access-Control-Allow-Origin" in resp.headers
+            # Wildcard is silently discarded — no CORS header set
+            assert "Access-Control-Allow-Origin" not in resp.headers
 
     @pytest.mark.asyncio
     async def test_preflight_options_returns_204(self):

@@ -25,7 +25,7 @@ validator_pubkeys_dir = ""           # e.g. "certs/pubkeys/" (auto-filled when g
 # When enabled every P2P connection is TLS-encrypted.
 # Certificates are auto-generated on first run when auto_generate = true.
 # You can also generate manually:  python scripts/gen_node_cert.py --node-id validator-1
-enabled = false
+enabled = true
 auto_generate = true                # generate TLS CA + node cert on first run if missing
 cert_file = "certs/node.crt"
 key_file  = "certs/node.key"
@@ -36,8 +36,8 @@ verify_peer = true              # mutual TLS — require peer certificate
 enabled = true
 host = "127.0.0.1"
 port = 8080
-api_key = "your-secret-api-key"
-rate_limit_rpm = 120
+api_key = ""                 # REQUIRED — set via NEXAFLOW_API_KEY env var or here
+rate_limit_rpm = 60
 
 [storage]
 enabled = true

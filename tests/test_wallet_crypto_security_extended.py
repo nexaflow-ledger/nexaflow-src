@@ -102,14 +102,13 @@ class TestEncryptedExportImport(unittest.TestCase):
 
     def test_wrong_passphrase_wrong_key(self):
         """
-        VULN: Decrypting with wrong passphrase doesn't raise an error —
-        it silently produces garbage bytes. No HMAC/MAC integrity check.
+        v3 AES-GCM: Decrypting with wrong passphrase raises ValueError
+        due to MAC/tag verification failure.
         """
         w = Wallet.create()
         enc = w.export_encrypted("correct")
-        w2 = Wallet.import_encrypted(enc, "wrong")
-        # Keys will be different — silently corrupted
-        self.assertNotEqual(w.private_key, w2.private_key)
+        with self.assertRaises(ValueError):
+            Wallet.import_encrypted(enc, "wrong")
 
     def test_empty_passphrase(self):
         """Empty passphrase should still work (no crash)."""
@@ -134,43 +133,43 @@ class TestEncryptedExportImport(unittest.TestCase):
     def test_export_version_is_2(self):
         w = Wallet.create()
         enc = w.export_encrypted("pass")
-        self.assertEqual(enc["version"], 2)
+        self.assertEqual(enc["version"], 3)
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  Wallet: AES-CTR Implementation
+#  Wallet: AES-GCM Implementation (v3)
 # ═══════════════════════════════════════════════════════════════════
 
 class TestAESCTR(unittest.TestCase):
+    """Tests for the AES-256-GCM authenticated encryption used in v3."""
 
     def test_ctr_encrypt_decrypt_symmetry(self):
-        """CTR mode is symmetric: encrypt(encrypt(x)) = x."""
         key = sha256(b"test_key")
-        iv = b"\x00" * 16
         data = b"hello world 1234567890abcdef"
-        encrypted = Wallet._aes_ctr_encrypt(key, iv, data)
-        decrypted = Wallet._aes_ctr_encrypt(key, iv, encrypted)
+        ct, nonce, tag = Wallet._aes_gcm_encrypt(key, data)
+        decrypted = Wallet._aes_gcm_decrypt(key, nonce, ct, tag)
         self.assertEqual(decrypted, data)
 
     def test_ctr_different_iv_different_output(self):
         key = sha256(b"test_key")
         data = b"same data"
-        enc1 = Wallet._aes_ctr_encrypt(key, b"\x00" * 16, data)
-        enc2 = Wallet._aes_ctr_encrypt(key, b"\x01" + b"\x00" * 15, data)
-        self.assertNotEqual(enc1, enc2)
+        ct1, n1, t1 = Wallet._aes_gcm_encrypt(key, data)
+        ct2, n2, t2 = Wallet._aes_gcm_encrypt(key, data)
+        # Unique random nonce each call → different ciphertext
+        self.assertNotEqual(n1, n2)
 
     def test_ctr_empty_data(self):
         key = sha256(b"test_key")
-        iv = b"\x00" * 16
-        enc = Wallet._aes_ctr_encrypt(key, iv, b"")
-        self.assertEqual(enc, b"")
+        ct, nonce, tag = Wallet._aes_gcm_encrypt(key, b"")
+        self.assertEqual(len(ct), 0)
+        decrypted = Wallet._aes_gcm_decrypt(key, nonce, ct, tag)
+        self.assertEqual(decrypted, b"")
 
     def test_ctr_large_data(self):
         key = sha256(b"test_key")
-        iv = b"\x00" * 16
         data = b"\xff" * 10_000
-        enc = Wallet._aes_ctr_encrypt(key, iv, data)
-        dec = Wallet._aes_ctr_encrypt(key, iv, enc)
+        ct, nonce, tag = Wallet._aes_gcm_encrypt(key, data)
+        dec = Wallet._aes_gcm_decrypt(key, nonce, ct, tag)
         self.assertEqual(dec, data)
 
 

@@ -57,13 +57,13 @@ class TestDefaults(unittest.TestCase):
         self.assertEqual(a.host, "127.0.0.1")
         self.assertEqual(a.port, 8080)
         self.assertEqual(a.api_key, "")
-        self.assertEqual(a.rate_limit_rpm, 120)
+        self.assertEqual(a.rate_limit_rpm, 60)
         self.assertEqual(a.cors_origins, [])
         self.assertEqual(a.max_body_bytes, 1_048_576)
 
     def test_tls_defaults(self):
         t = TLSConfig()
-        self.assertFalse(t.enabled)
+        self.assertTrue(t.enabled)
         self.assertTrue(t.verify_peer)
 
     def test_consensus_defaults(self):
@@ -75,7 +75,7 @@ class TestDefaults(unittest.TestCase):
 
     def test_storage_defaults(self):
         s = StorageConfig()
-        self.assertFalse(s.enabled)
+        self.assertTrue(s.enabled)
         self.assertEqual(s.backend, "sqlite")
 
     def test_genesis_defaults(self):

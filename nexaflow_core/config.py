@@ -45,7 +45,7 @@ class WalletConfig:
     the newly-created wallet address receives the full supply.
     """
     wallet_file: str = "data/wallet.json"
-    auto_genesis: bool = True
+    auto_genesis: bool = False
 
 
 @dataclass
@@ -60,7 +60,7 @@ class LedgerConfig:
 @dataclass
 class TLSConfig:
     """TLS / mutual-TLS settings for the P2P layer."""
-    enabled: bool = False
+    enabled: bool = True
     cert_file: str = "certs/node.crt"   # PEM X.509 certificate
     key_file: str = "certs/node.key"    # PEM private key
     ca_file: str = "certs/ca.crt"       # CA bundle used to verify peers
@@ -97,15 +97,17 @@ class APIConfig:
     host: str = "127.0.0.1"
     port: int = 8080
     api_key: str = ""                 # require this key on POST endpoints (empty = no auth)
-    rate_limit_rpm: int = 120          # max requests per minute per IP (0 = unlimited)
+    rate_limit_rpm: int = 60           # max requests per minute per IP (0 = unlimited)
     cors_origins: list[str] = field(default_factory=list)  # allowed CORS origins (empty = no CORS)
     max_body_bytes: int = 1_048_576    # 1 MiB max request body
+    tls_cert: str = ""                 # PEM cert for HTTPS (empty = plain HTTP)
+    tls_key: str = ""                  # PEM key for HTTPS
 
 
 @dataclass
 class StorageConfig:
     """Persistence settings."""
-    enabled: bool = False
+    enabled: bool = True
     backend: str = "sqlite"
     path: str = "data/nexaflow.db"
 
@@ -212,5 +214,13 @@ def load_config(path: str | None = None) -> NexaFlowConfig:
         cfg.api.api_key = v
     if v := os.environ.get("NEXAFLOW_CORS_ORIGINS"):
         cfg.api.cors_origins = [o.strip() for o in v.split(",") if o.strip()]
+
+    # D2 — Warn when API is enabled but no key is set
+    if cfg.api.enabled and not cfg.api.api_key:
+        import logging as _log
+        _log.getLogger("nexaflow_config").warning(
+            "API is enabled but api_key is empty — "
+            "POST endpoints are unprotected!  Set api_key or NEXAFLOW_API_KEY."
+        )
 
     return cfg

@@ -256,18 +256,34 @@ cdef class ConsensusEngine:
         cdef Proposal p = <Proposal>proposal
         cdef str vid = p.validator_id
 
-        # ── Signature check ──────────────────────────────────────────
+        # ── Signature check (CS3 — distinguish missing vs bad sig) ──
         if self.unl_pubkeys:
             pubkey = self.unl_pubkeys.get(vid)
             if pubkey is not None:
+                if not p.signature:
+                    import logging as _log
+                    _log.getLogger("nexaflow_consensus").warning(
+                        f"[BFT] Unsigned proposal from {vid} rejected — "
+                        "pubkey is registered so signature is required"
+                    )
+                    return False
                 if not p.verify_signature(pubkey):
                     import logging as _log
                     _log.getLogger("nexaflow_consensus").warning(
-                        f"[BFT] Invalid proposal signature from {vid} — "
+                        f"[BFT] BAD SIGNATURE on proposal from {vid} — "
                         "treating as Byzantine"
                     )
                     self.byzantine_validators.add(vid)
                     return False
+            else:
+                # Validator not in pubkey registry — accept unsigned only
+                # when we have *no* pubkeys at all (non-BFT mode).
+                if p.signature:
+                    import logging as _log
+                    _log.getLogger("nexaflow_consensus").info(
+                        f"[BFT] Proposal from unknown validator {vid} "
+                        "has signature but no registered pubkey — cannot verify"
+                    )
 
         # ── Equivocation check ───────────────────────────────────────
         existing = self.proposals.get(vid)
@@ -294,8 +310,28 @@ cdef class ConsensusEngine:
         Byzantine validators are excluded from the quorum denominator so
         the threshold is computed over honest nodes only.
 
+        **Liveness vs safety (CS4)**:  The final threshold of 80 % exceeds
+        the BFT requirement of 2/3 honest votes.  This is deliberate — it
+        provides a wider safety margin at the cost of slightly reduced
+        liveness (the network may stall if >20 % of validators are
+        unreachable, compared to >33 % under a bare 2/3 rule).  Operators
+        should monitor ``ConsensusResult.byzantine_count`` and alert when
+        ``byzantine_count > 0``.
+
         Returns a :class:`ConsensusResult` or None on failure.
         """
+        import logging as _log
+        _logger = _log.getLogger("nexaflow_consensus")
+
+        # CS1 — BFT safety gate: warn (but proceed) when UNL is too small
+        if not self.is_bft_safe():
+            _logger.warning(
+                f"[BFT] UNL too small for Byzantine safety: "
+                f"{self.unl_size + 1} validators (need >= "
+                f"{3 * self.max_byzantine_faults + 1}).  "
+                f"Consensus results may not be fault-tolerant."
+            )
+
         self.phase = PHASE_ESTABLISH
         cdef double threshold
         cdef set agreed

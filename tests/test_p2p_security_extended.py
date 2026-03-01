@@ -100,18 +100,19 @@ class TestGossipPoisoning(unittest.TestCase):
 
     def test_gossip_private_ip_injection(self):
         """
-        VULN: Gossip can inject private/loopback addresses that the node
-        will attempt to connect to, enabling SSRF-like behavior.
+        Private/loopback addresses in gossip are now filtered by
+        _is_valid_peer_addr() — they should NOT appear in _known_addrs.
         """
         node = P2PNode("v1")
         msg = {
             "type": "PEERS",
             "payload": {
                 "addresses": [
-                    "127.0.0.1:22",     # SSH
-                    "10.0.0.1:5432",    # Internal DB
-                    "169.254.169.254:80",  # AWS metadata
-                    "0.0.0.0:9001",
+                    "127.0.0.1:22",     # SSH — loopback
+                    "10.0.0.1:5432",    # Internal DB — private
+                    "169.254.169.254:80",  # AWS metadata — link-local
+                    "0.0.0.0:9001",     # unspecified
+                    "8.8.8.8:9001",     # public — should be accepted
                 ]
             },
         }
@@ -121,17 +122,22 @@ class TestGossipPoisoning(unittest.TestCase):
             async def send(self, *a, **kw): return True
 
         self._run(node._dispatch(FakePeer(), msg))
-        # All addresses are blindly accepted
-        self.assertIn("127.0.0.1:22", node._known_addrs)
-        self.assertIn("169.254.169.254:80", node._known_addrs)
+        # Private/loopback/link-local addresses are rejected
+        self.assertNotIn("127.0.0.1:22", node._known_addrs)
+        self.assertNotIn("10.0.0.1:5432", node._known_addrs)
+        self.assertNotIn("169.254.169.254:80", node._known_addrs)
+        self.assertNotIn("0.0.0.0:9001", node._known_addrs)
+        # Public address is accepted
+        self.assertIn("8.8.8.8:9001", node._known_addrs)
 
     def test_gossip_with_huge_address_list(self):
         """
-        VULN: _known_addrs grows unboundedly with gossip messages.
-        This could be used for memory exhaustion.
+        Gossip with a huge address list — only valid public IPs accepted.
+        Private range (10.x.x.x) is filtered by _is_valid_peer_addr.
         """
         node = P2PNode("v1")
-        addrs = [f"10.{i // 256}.{i % 256}.1:9001" for i in range(5000)]
+        # Use public IPs in allowed ranges
+        addrs = [f"44.{i // 256}.{i % 256}.1:9001" for i in range(5000)]
         msg = {"type": "PEERS", "payload": {"addresses": addrs}}
 
         class FakePeer:
@@ -139,7 +145,7 @@ class TestGossipPoisoning(unittest.TestCase):
             async def send(self, *a, **kw): return True
 
         self._run(node._dispatch(FakePeer(), msg))
-        # All 5000 addresses accepted — no pruning
+        # All 5000 public addresses accepted
         self.assertEqual(len(node._known_addrs), 5000)
 
     def test_gossip_malformed_address(self):
@@ -419,25 +425,26 @@ class TestHELLOAbuse(unittest.TestCase):
 class TestMarkSeenEviction(unittest.TestCase):
 
     def test_eviction_removes_oldest(self):
-        """After eviction, the newest entries remain."""
+        """After filling the deque, the oldest entries are evicted (FIFO)."""
         node = P2PNode("v1")
-        node._max_seen = 100
-        for i in range(110):
+        # Use the default maxlen (50_000) — add more than that
+        count = 50_010
+        for i in range(count):
             node._mark_seen(f"msg_{i}")
         # Latest should always be present
-        self.assertIn("msg_109", node._seen_ids)
-        # Some old ones should be evicted
-        evicted = sum(1 for i in range(50) if f"msg_{i}" not in node._seen_ids)
-        self.assertGreater(evicted, 0)
+        self.assertIn(f"msg_{count - 1}", node._seen_set)
+        # Oldest should be evicted (deque FIFO)
+        self.assertNotIn("msg_0", node._seen_set)
 
     def test_eviction_correctness_after_repeated_overflow(self):
-        """Multiple overflow cycles should not corrupt the set."""
+        """Multiple overflow cycles keep the set and deque in sync."""
         node = P2PNode("v1")
-        node._max_seen = 50
-        for i in range(200):
+        count = 50_100
+        for i in range(count):
             node._mark_seen(f"id_{i}")
-        self.assertLessEqual(len(node._seen_ids), 60)  # some buffer
-        self.assertIn("id_199", node._seen_ids)
+        # Deque maxlen constrains the size
+        self.assertLessEqual(len(node._seen_set), 50_001)
+        self.assertIn(f"id_{count - 1}", node._seen_set)
 
 
 # ═══════════════════════════════════════════════════════════════════
