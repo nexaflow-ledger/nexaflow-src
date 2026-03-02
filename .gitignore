@@ -67,3 +67,8 @@ build/
 
 # macOS specific
 .DS_Store
+
+# certs
+*.crt
+*.key
+*.pub
