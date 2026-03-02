@@ -14,6 +14,92 @@ import time
 from dataclasses import dataclass, field
 
 
+def verify_claim_signature(
+    channel_id: str,
+    amount: float,
+    signature_hex: str,
+    public_key_hex: str,
+) -> bool:
+    """Verify a payment channel claim signature.
+
+    The claim payload is ``SHA-256(channel_id || amount_bytes)`` and the
+    signature is checked against *public_key_hex*.  Supports Ed25519
+    (via ``nacl``) and ECDSA secp256k1 (via ``ecdsa``).
+
+    Returns True if the signature is valid, False otherwise.
+    """
+    # Construct the claim payload (canonical)
+    import struct
+    payload = channel_id.encode("utf-8") + struct.pack(">d", amount)
+    msg_hash = hashlib.sha256(payload).digest()
+
+    try:
+        sig_bytes = bytes.fromhex(signature_hex)
+        pub_bytes = bytes.fromhex(public_key_hex)
+    except (ValueError, TypeError):
+        return False
+
+    # Try Ed25519 first (32-byte pubkey, 64-byte sig)
+    if len(pub_bytes) == 32 and len(sig_bytes) == 64:
+        try:
+            from nacl.signing import VerifyKey
+            vk = VerifyKey(pub_bytes)
+            vk.verify(msg_hash, sig_bytes)
+            return True
+        except Exception:
+            return False
+
+    # Try secp256k1 / ECDSA (33 or 65-byte pubkey)
+    if len(pub_bytes) in (33, 65):
+        try:
+            from ecdsa import VerifyingKey, SECP256k1, BadSignatureError
+            vk = VerifyingKey.from_string(pub_bytes, curve=SECP256k1)
+            vk.verify_digest(sig_bytes, msg_hash)
+            return True
+        except Exception:
+            return False
+
+    return False
+
+
+def create_claim_signature(
+    channel_id: str,
+    amount: float,
+    private_key_hex: str,
+) -> str:
+    """Create a claim signature for a payment channel.
+
+    Returns the signature as a hex string.
+    """
+    import struct
+    payload = channel_id.encode("utf-8") + struct.pack(">d", amount)
+    msg_hash = hashlib.sha256(payload).digest()
+
+    try:
+        priv_bytes = bytes.fromhex(private_key_hex)
+    except (ValueError, TypeError):
+        raise ValueError("Invalid private key hex")
+
+    # Ed25519 (32-byte key)
+    if len(priv_bytes) == 32:
+        try:
+            from nacl.signing import SigningKey
+            sk = SigningKey(priv_bytes)
+            sig = sk.sign(msg_hash).signature
+            return sig.hex()
+        except ImportError:
+            pass
+
+    # secp256k1 / ECDSA
+    try:
+        from ecdsa import SigningKey as ECSigningKey, SECP256k1
+        sk = ECSigningKey.from_string(priv_bytes, curve=SECP256k1)
+        sig = sk.sign_digest(msg_hash)
+        return sig.hex()
+    except Exception as exc:
+        raise ValueError(f"Failed to sign claim: {exc}") from exc
+
+
 @dataclass
 class PaymentChannel:
     """A unidirectional payment channel between two accounts."""
@@ -128,11 +214,22 @@ class PaymentChannelManager:
 
     def claim(
         self, channel_id: str, new_balance: float, now: float | None = None,
+        signature: str = "", public_key: str = "",
     ) -> tuple[PaymentChannel, float, str]:
-        """Process a claim. Returns (channel, NXF_paid_out, error_msg)."""
+        """Process a claim. Returns (channel, NXF_paid_out, error_msg).
+
+        If the channel has a ``public_key`` set and *signature* is provided,
+        the claim signature is verified before proceeding.
+        """
         ch = self.channels.get(channel_id)
         if ch is None:
             raise KeyError(f"Channel {channel_id} not found")
+        # Verify claim signature if channel has a public key
+        if ch.public_key and signature:
+            if not verify_claim_signature(
+                channel_id, new_balance, signature, public_key or ch.public_key
+            ):
+                return ch, 0.0, "Invalid claim signature"
         ok, reason = ch.can_claim(new_balance, now)
         if not ok:
             return ch, 0.0, reason

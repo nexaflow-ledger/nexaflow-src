@@ -47,6 +47,7 @@ from nexaflow_core.shamap import SHAMap
 from nexaflow_core.payment_path import PathFinder
 from nexaflow_core.trust_line import TrustGraph
 from nexaflow_core.directory import DirectoryManager
+from nexaflow_core.fee_escalation import FeeEscalation
 
 
 # ── GIL-free arithmetic helpers ──────────────────────────────────────────────
@@ -323,6 +324,7 @@ cdef class Ledger:
     cdef public list tx_metadata           # list of TransactionMetadata dicts
     cdef public object order_book          # OrderBook instance
     cdef public object directory_manager   # DirectoryManager instance
+    cdef public object fee_escalation      # FeeEscalation instance
 
     def __init__(self, double total_supply=100_000_000_000.0,
                  str genesis_account="nGenesisNXF"):
@@ -357,6 +359,7 @@ cdef class Ledger:
         self.tx_metadata = []
         self.order_book = OrderBook()
         self.directory_manager = DirectoryManager()
+        self.fee_escalation = FeeEscalation()
 
         # Create genesis account with full supply
         cdef AccountEntry genesis = AccountEntry(genesis_account, total_supply)
@@ -468,11 +471,37 @@ cdef class Ledger:
         cdef str iss
         cdef double effective_amt = amt
         cdef AccountEntry iss_acc
+        cdef double src_reserve
 
         if amount.is_native():
             # Native NXF payment
+            src_reserve = self.owner_reserve(src_acc)
             if src_acc.balance < amt + fee_val:
-                return 101  # tecUNFUNDED
+                # ── Partial payment support for native NXF ──
+                is_partial_native = False
+                if hasattr(tx, 'flags') and tx.flags and tx.flags.get('tfPartialPayment'):
+                    is_partial_native = True
+                if is_partial_native:
+                    # Deliver as much as possible while keeping reserve
+                    avail = src_acc.balance - fee_val - src_reserve
+                    if avail <= 0:
+                        return 101  # tecUNFUNDED
+                    amt = avail
+                    tx.delivered_amount = amt
+                else:
+                    return 101  # tecUNFUNDED
+            # Enforce reserve: sender must retain base + owner reserve
+            if src_acc.balance - (amt + fee_val) < src_reserve:
+                is_partial_native2 = False
+                if hasattr(tx, 'flags') and tx.flags and tx.flags.get('tfPartialPayment'):
+                    is_partial_native2 = True
+                if is_partial_native2:
+                    amt = max(0.0, src_acc.balance - fee_val - src_reserve)
+                    if amt <= 0:
+                        return 101  # tecUNFUNDED
+                    tx.delivered_amount = amt
+                else:
+                    return 101  # tecUNFUNDED
             src_acc.balance -= (amt + fee_val)
             dst_acc.balance += amt
             # Burn the fee — permanently remove from circulation
@@ -628,6 +657,13 @@ cdef class Ledger:
                 r_acc.balance += remaining
             else:
                 # IOU leg: adjust trust-line balances
+
+                # Look up issuer account for transfer_rate
+                iss_acc_hop = self.accounts.get(hop_iss)
+                hop_transfer_rate = 1.0
+                if iss_acc_hop is not None and iss_acc_hop.transfer_rate > 1.0:
+                    hop_transfer_rate = iss_acc_hop.transfer_rate
+
                 if sender_addr == hop_iss:
                     # Issuer sending: credit receiver's trust line
                     tl_r = self.get_trust_line(receiver_addr, hop_cur, hop_iss)
@@ -635,12 +671,20 @@ cdef class Ledger:
                         return -1
                     if tl_r.frozen:
                         return -1
+                    # Apply quality_in on receiver's trust line
+                    credit = remaining
+                    if tl_r.quality_in != 1.0 and tl_r.quality_in > 0.0:
+                        credit = remaining * tl_r.quality_in
                     avail = tl_r.limit - tl_r.balance
-                    if avail < remaining:
-                        remaining = avail
+                    if avail < credit:
+                        credit = avail
+                        if tl_r.quality_in != 1.0 and tl_r.quality_in > 0.0:
+                            remaining = credit / tl_r.quality_in
+                        else:
+                            remaining = credit
                         if remaining <= 0:
                             return -1
-                    tl_r.balance += remaining
+                    tl_r.balance += credit
                 elif receiver_addr == hop_iss:
                     # Sending back to issuer: debit sender's trust line
                     tl_s = self.get_trust_line(sender_addr, hop_cur, hop_iss)
@@ -648,11 +692,23 @@ cdef class Ledger:
                         return -1
                     if tl_s.frozen:
                         return -1
-                    if tl_s.balance < remaining:
-                        remaining = tl_s.balance
+                    # Apply quality_out and transfer_rate on sender's line
+                    effective = remaining
+                    if tl_s.quality_out != 1.0 and tl_s.quality_out > 0.0:
+                        effective = remaining * tl_s.quality_out
+                    if hop_transfer_rate > 1.0:
+                        effective = effective * hop_transfer_rate
+                    if tl_s.balance < effective:
+                        effective = tl_s.balance
+                        divisor = 1.0
+                        if tl_s.quality_out != 1.0 and tl_s.quality_out > 0.0:
+                            divisor = tl_s.quality_out
+                        if hop_transfer_rate > 1.0:
+                            divisor = divisor * hop_transfer_rate
+                        remaining = effective / divisor
                         if remaining <= 0:
                             return -1
-                    tl_s.balance -= remaining
+                    tl_s.balance -= effective
                 else:
                     # Rippling through an intermediary: debit sender's line,
                     # credit receiver's line, both toward hop_iss.
@@ -664,17 +720,43 @@ cdef class Ledger:
                         return -1
                     if tl_s.no_ripple:
                         return -1
-                    if tl_s.balance < remaining:
-                        remaining = tl_s.balance
+                    # Apply quality_out on sender + transfer_rate
+                    debit_amt = remaining
+                    if tl_s.quality_out != 1.0 and tl_s.quality_out > 0.0:
+                        debit_amt = remaining * tl_s.quality_out
+                    if hop_transfer_rate > 1.0:
+                        debit_amt = debit_amt * hop_transfer_rate
+                    if tl_s.balance < debit_amt:
+                        debit_amt = tl_s.balance
+                        divisor2 = 1.0
+                        if tl_s.quality_out != 1.0 and tl_s.quality_out > 0.0:
+                            divisor2 = tl_s.quality_out
+                        if hop_transfer_rate > 1.0:
+                            divisor2 = divisor2 * hop_transfer_rate
+                        remaining = debit_amt / divisor2
                         if remaining <= 0:
                             return -1
+                    # Apply quality_in on receiver
+                    credit_amt = remaining
+                    if tl_r.quality_in != 1.0 and tl_r.quality_in > 0.0:
+                        credit_amt = remaining * tl_r.quality_in
                     avail = tl_r.limit - tl_r.balance
-                    if avail < remaining:
-                        remaining = avail
+                    if avail < credit_amt:
+                        credit_amt = avail
+                        if tl_r.quality_in != 1.0 and tl_r.quality_in > 0.0:
+                            remaining = credit_amt / tl_r.quality_in
+                        else:
+                            remaining = credit_amt
                         if remaining <= 0:
                             return -1
-                    tl_s.balance -= remaining
-                    tl_r.balance += remaining
+                        # Recalculate debit with adjusted remaining
+                        debit_amt = remaining
+                        if tl_s.quality_out != 1.0 and tl_s.quality_out > 0.0:
+                            debit_amt = remaining * tl_s.quality_out
+                        if hop_transfer_rate > 1.0:
+                            debit_amt = debit_amt * hop_transfer_rate
+                    tl_s.balance -= debit_amt
+                    tl_r.balance += credit_amt
 
         # Record delivered amount for partial payments
         if remaining < amt:
@@ -810,6 +892,39 @@ cdef class Ledger:
         if tx.tx_id and tx.tx_id in self.applied_tx_ids:
             tx.result_code = 109  # tecSTAKE_DUPLICATE (reuse for general dup)
             return 109
+
+        # ── LastLedgerSequence — transaction expiration ──────────────────
+        cdef long long last_ledger_seq = getattr(tx, 'last_ledger_sequence', 0)
+        if last_ledger_seq > 0 and self.current_sequence > last_ledger_seq:
+            tx.result_code = 136  # tecEXPIRED
+            return 136
+
+        # ── TicketSequence — use a ticket instead of Sequence ────────────
+        cdef long long ticket_seq = getattr(tx, 'ticket_sequence', 0)
+        if ticket_seq > 0:
+            ticket_id = f"{tx.account}:{ticket_seq}"
+            ticket_obj, ticket_err = self.ticket_manager.use_ticket(ticket_id)
+            if ticket_err:
+                tx.result_code = 137  # tecNO_TICKET
+                return 137
+
+        # ── Amendment gating — check if tx type requires an enabled amendment ──
+        _AMENDMENT_GATED_TYPES = {
+            33: "Clawback",
+            34: "AMM", 35: "AMM", 36: "AMM", 37: "AMM", 38: "AMM", 39: "AMM",
+            25: "NFToken", 26: "NFToken", 27: "NFToken", 28: "NFToken", 29: "NFToken",
+            42: "DID", 43: "DID",
+            44: "MPToken", 45: "MPToken", 46: "MPToken", 47: "MPToken",
+            48: "Credentials", 49: "Credentials", 50: "Credentials",
+            51: "XChainBridge", 52: "XChainBridge", 53: "XChainBridge",
+            54: "XChainBridge", 55: "XChainBridge", 56: "XChainBridge",
+            57: "Hooks",
+        }
+        _amendment_name = _AMENDMENT_GATED_TYPES.get(tt, "")
+        if _amendment_name and self.amendment_manager.amendments:
+            if not self.amendment_manager.is_enabled(_amendment_name):
+                tx.result_code = 118  # tecAMENDMENT_BLOCKED
+                return 118
 
         # ── Snapshot for rollback on invariant failure ──────────────────
         self.invariant_checker.capture(self)
@@ -996,6 +1111,19 @@ cdef class Ledger:
         else:
             parent_hash = "0" * 64
 
+        # ── Ledger hash chain validation ──────────────────────────────
+        # Verify the previous ledger's hash chain is intact before building
+        # on top of it (guards against replayed / corrupted ledgers).
+        if n_closed >= 2:
+            prev = <LedgerHeader>self.closed_ledgers[n_closed - 1]
+            prev_prev = <LedgerHeader>self.closed_ledgers[n_closed - 2]
+            if prev.parent_hash != prev_prev.hash:
+                raise ValueError(
+                    f"Ledger chain broken: ledger {prev.sequence} parent_hash "
+                    f"{prev.parent_hash!r} != ledger {prev_prev.sequence} hash "
+                    f"{prev_prev.hash!r}"
+                )
+
         cdef LedgerHeader header = LedgerHeader(self.current_sequence, parent_hash)
         header.tx_count = len(self.pending_txns)
 
@@ -1048,6 +1176,16 @@ cdef class Ledger:
         self.closed_ledgers.append(header)
         self.pending_txns = []
         self.current_sequence += 1
+
+        # ── Expired offer sweep ─────────────────────────────────────────
+        # Proactively purge expired offers across all pairs so stale
+        # orders don't linger in inactive books.
+        for _pair in self.order_book.pairs:
+            self.order_book._purge_expired(_pair)
+
+        # ── Fee escalation: notify on ledger close ──────────────────────
+        self.fee_escalation.on_ledger_close()
+
         return header
 
     # ---- DEX offers ----
@@ -1078,6 +1216,7 @@ cdef class Ledger:
         # ── Offer execution flags (Tier 1) ──────────────────────────────
         cdef str time_in_force = "GTC"  # default: Good-Til-Cancelled
         cdef bint tf_sell = False
+        cdef double offer_expiration = 0.0
         if tx.flags:
             if tx.flags.get("tfImmediateOrCancel"):
                 time_in_force = "IOC"
@@ -1085,6 +1224,10 @@ cdef class Ledger:
                 time_in_force = "FOK"
             if tx.flags.get("tfSell"):
                 tf_sell = True
+            # Offer Expiration — Ripple-style Expiration field
+            exp_val = tx.flags.get("Expiration", 0)
+            if exp_val:
+                offer_expiration = float(exp_val)
 
         # ── DEX Offer Crossing via OrderBook ──────────────────────────
         # Determine pair, side, price from taker_pays / taker_gets
@@ -1123,6 +1266,7 @@ cdef class Ledger:
                     quantity=quantity,
                     order_id=tx.tx_id,
                     time_in_force=time_in_force,
+                    expiration=offer_expiration,
                 )
 
             # Apply fills to ledger state (settle matched amounts)
@@ -1136,6 +1280,7 @@ cdef class Ledger:
             "tx_id": tx.tx_id,
             "time_in_force": time_in_force,
             "tf_sell": tf_sell,
+            "expiration": offer_expiration,
         })
         src_acc.owner_count += 1
 
@@ -1203,25 +1348,53 @@ cdef class Ledger:
                 taker_acc.balance -= base_amount
                 maker_acc.balance += base_amount
         else:
-            # Base is IOU — adjust trust lines
-            tl_taker = self.get_trust_line(taker_order.account, base_currency, "")
-            tl_maker = self.get_trust_line(maker_order.account, base_currency, "")
+            # Base is IOU — adjust trust lines with quality + transfer_rate
+            base_issuer = getattr(taker_order, 'issuer', '') or ''
+            tl_taker = self.get_trust_line(taker_order.account, base_currency, base_issuer)
+            tl_maker = self.get_trust_line(maker_order.account, base_currency, base_issuer)
+            # Look up issuer transfer rate
+            base_iss_acc = self.accounts.get(base_issuer) if base_issuer else None
+            base_xfer_rate = 1.0
+            if base_iss_acc is not None and base_iss_acc.transfer_rate > 1.0:
+                base_xfer_rate = base_iss_acc.transfer_rate
             if tl_taker is not None:
-                tl_taker.balance -= base_amount
+                debit = base_amount
+                if tl_taker.quality_out != 1.0 and tl_taker.quality_out > 0.0:
+                    debit = base_amount * tl_taker.quality_out
+                if base_xfer_rate > 1.0:
+                    debit = debit * base_xfer_rate
+                tl_taker.balance -= debit
             if tl_maker is not None:
-                tl_maker.balance += base_amount
+                credit = base_amount
+                if tl_maker.quality_in != 1.0 and tl_maker.quality_in > 0.0:
+                    credit = base_amount * tl_maker.quality_in
+                tl_maker.balance += credit
 
         if counter_currency == "NXF":
             if maker_acc.balance >= counter_amount:
                 maker_acc.balance -= counter_amount
                 taker_acc.balance += counter_amount
         else:
-            tl_maker_c = self.get_trust_line(maker_order.account, counter_currency, "")
-            tl_taker_c = self.get_trust_line(taker_order.account, counter_currency, "")
+            counter_issuer = getattr(maker_order, 'issuer', '') or ''
+            tl_maker_c = self.get_trust_line(maker_order.account, counter_currency, counter_issuer)
+            tl_taker_c = self.get_trust_line(taker_order.account, counter_currency, counter_issuer)
+            # Look up issuer transfer rate
+            ctr_iss_acc = self.accounts.get(counter_issuer) if counter_issuer else None
+            ctr_xfer_rate = 1.0
+            if ctr_iss_acc is not None and ctr_iss_acc.transfer_rate > 1.0:
+                ctr_xfer_rate = ctr_iss_acc.transfer_rate
             if tl_maker_c is not None:
-                tl_maker_c.balance -= counter_amount
+                debit_c = counter_amount
+                if tl_maker_c.quality_out != 1.0 and tl_maker_c.quality_out > 0.0:
+                    debit_c = counter_amount * tl_maker_c.quality_out
+                if ctr_xfer_rate > 1.0:
+                    debit_c = debit_c * ctr_xfer_rate
+                tl_maker_c.balance -= debit_c
             if tl_taker_c is not None:
-                tl_taker_c.balance += counter_amount
+                credit_c = counter_amount
+                if tl_taker_c.quality_in != 1.0 and tl_taker_c.quality_in > 0.0:
+                    credit_c = counter_amount * tl_taker_c.quality_in
+                tl_taker_c.balance += credit_c
 
     # ---- staking: apply / cancel / maturity ----
 
@@ -1843,6 +2016,31 @@ cdef class Ledger:
         if acc.owner_count > 0:
             return 110  # tecNO_PERMISSION — has owned objects
         if len(acc.trust_lines) > 0:
+            return 110
+        # Also check for active escrows, channels, NFTs, checks
+        _has_escrows = False
+        for e in self.escrow_manager.escrows.values():
+            if e.account == src and not e.finished and not e.cancelled:
+                _has_escrows = True
+                break
+        if _has_escrows:
+            return 110
+        _has_channels = False
+        for c in self.channel_manager.channels.values():
+            if c.account == src and not c.closed:
+                _has_channels = True
+                break
+        if _has_channels:
+            return 110
+        _has_nfts = bool(self.nftoken_manager.get_tokens_for_account(src))
+        if _has_nfts:
+            return 110
+        _has_checks = False
+        for ch in self.check_manager.checks.values():
+            if ch.account == src and not ch.cashed and not ch.cancelled:
+                _has_checks = True
+                break
+        if _has_checks:
             return 110
         cdef str dst = tx.destination
         if dst not in self.accounts:

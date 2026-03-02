@@ -52,6 +52,9 @@ from aiohttp import web
 if TYPE_CHECKING:
     from nexaflow_core.config import APIConfig
 
+# Lazy imports for modules used in new endpoints
+from nexaflow_core.server_state import ServerStateMachine
+
 logger = logging.getLogger("nexaflow_api")
 
 
@@ -332,6 +335,28 @@ class APIServer:
         app.router.add_post("/admin/log_level", self._admin_log_level)
         # ── Pathfinding ──
         app.router.add_post("/path_find", self._path_find)
+        # ── Ripple parity RPCs ──
+        app.router.add_get("/ledger_entry", self._ledger_entry)
+        app.router.add_get("/nft_buy_offers/{nftoken_id}", self._nft_buy_offers)
+        app.router.add_get("/nft_sell_offers/{nftoken_id}", self._nft_sell_offers)
+        app.router.add_get("/gateway_balances/{address}", self._gateway_balances)
+        app.router.add_get("/account/{address}/currencies", self._account_currencies)
+        app.router.add_get("/noripple_check/{address}", self._noripple_check)
+        app.router.add_post("/channel_verify", self._channel_verify)
+        app.router.add_post("/channel_authorize", self._channel_authorize)
+        app.router.add_get("/deposit_authorized", self._deposit_authorized)
+        app.router.add_post("/submit", self._generic_submit)
+        app.router.add_post("/submit_multisigned", self._submit_multisigned)
+        app.router.add_post("/sign", self._sign)
+        app.router.add_post("/sign_for", self._sign_for)
+        app.router.add_get("/ledger_closed", self._ledger_closed)
+        app.router.add_get("/ledger_current", self._ledger_current)
+        app.router.add_get("/server_state", self._server_state)
+        app.router.add_get("/manifest/{public_key}", self._manifest)
+        app.router.add_get("/validators", self._validators)
+        app.router.add_get("/crawl", self._crawl)
+        # Reporting mode (read-only query proxy)
+        app.router.add_post("/reporting", self._reporting_rpc)
 
     # ── handlers ─────────────────────────────────────────────────
 
@@ -969,9 +994,22 @@ class APIServer:
         if hasattr(ledger, "fee_escalation"):
             stats = ledger.fee_escalation.get_stats()
             load_factor = stats.get("load_factor", 1)
+        # Server state — use the state machine if available
+        server_state_str = "full"
+        state_accounting = {"full": {"duration_us": int(uptime * 1_000_000)}}
+        ssm = getattr(self.node, "_state_machine", None)
+        if ssm is not None:
+            ssm.evaluate_state(
+                peer_count=self.node.p2p.peer_count,
+                synced=closed_count > 0,
+                is_validator=getattr(self.node, "is_validator", False),
+                ledger_current=ledger.current_sequence,
+            )
+            server_state_str = ssm.state.value
+            state_accounting = ssm.to_dict()
         info = {
             "build_version": "0.9.0",
-            "server_state": "full",
+            "server_state": server_state_str,
             "uptime": int(uptime),
             "node_id": self.node.node_id,
             "complete_ledgers": validated_range,
@@ -995,9 +1033,7 @@ class APIServer:
                 len(ledger.amendment_manager.get_enabled())
                 if hasattr(ledger, "amendment_manager") else 0
             ),
-            "state_accounting": {
-                "full": {"duration_us": int(uptime * 1_000_000)},
-            },
+            "state_accounting": state_accounting,
         }
         return web.json_response({"result": {"info": info}}, dumps=_json_dumps)
 
@@ -1532,6 +1568,554 @@ class APIServer:
             "amount": amount,
             "alternatives": [p.to_dict() for p in paths],
         })
+
+    # ── Ripple-parity RPC endpoints ──────────────────────────────
+
+    async def _ledger_entry(self, request: web.Request) -> web.Response:
+        """GET /ledger_entry?type=account&id=rXXX  — lookup ledger object by index/type."""
+        entry_type = request.query.get("type", "")
+        entry_id = request.query.get("id", "")
+        ledger = self.node.ledger
+
+        if entry_type == "account":
+            acc = ledger.get_account(entry_id)
+            if acc is None:
+                return web.json_response({"error": "entryNotFound"}, status=404)
+            return web.json_response({"result": {"node": acc.to_dict(), "index": entry_id}}, dumps=_json_dumps)
+        elif entry_type == "offer":
+            # Search across all accounts' open_offers
+            for acc in ledger.accounts.values():
+                for offer in acc.open_offers:
+                    if offer.get("tx_id") == entry_id:
+                        return web.json_response({"result": {"node": offer, "index": entry_id}}, dumps=_json_dumps)
+            return web.json_response({"error": "entryNotFound"}, status=404)
+        elif entry_type == "escrow":
+            esc = ledger.escrow_manager.escrows.get(entry_id)
+            if esc is None:
+                return web.json_response({"error": "entryNotFound"}, status=404)
+            return web.json_response({"result": {"node": esc.to_dict(), "index": entry_id}}, dumps=_json_dumps)
+        elif entry_type == "channel":
+            ch = ledger.channel_manager.get_channel(entry_id)
+            if ch is None:
+                return web.json_response({"error": "entryNotFound"}, status=404)
+            return web.json_response({"result": {"node": ch.to_dict(), "index": entry_id}}, dumps=_json_dumps)
+        elif entry_type == "check":
+            chk = ledger.check_manager.checks.get(entry_id)
+            if chk is None:
+                return web.json_response({"error": "entryNotFound"}, status=404)
+            return web.json_response({"result": {"node": chk.to_dict(), "index": entry_id}}, dumps=_json_dumps)
+        elif entry_type == "nftoken":
+            tok = ledger.nftoken_manager.tokens.get(entry_id)
+            if tok is None:
+                return web.json_response({"error": "entryNotFound"}, status=404)
+            return web.json_response({"result": {"node": tok.to_dict(), "index": entry_id}}, dumps=_json_dumps)
+        else:
+            return web.json_response(
+                {"error": "invalidParams", "error_message": f"Unknown type: {entry_type}"},
+                status=400,
+            )
+
+    async def _nft_buy_offers(self, request: web.Request) -> web.Response:
+        """GET /nft_buy_offers/{nftoken_id} — buy offers for a specific NFToken."""
+        nftoken_id = request.match_info["nftoken_id"]
+        mgr = self.node.ledger.nftoken_manager
+        offers = [o.to_dict() for o in mgr.get_offers(nftoken_id)
+                  if getattr(o, "is_sell", False) is False]
+        return web.json_response({"nftoken_id": nftoken_id, "offers": offers}, dumps=_json_dumps)
+
+    async def _nft_sell_offers(self, request: web.Request) -> web.Response:
+        """GET /nft_sell_offers/{nftoken_id} — sell offers for a specific NFToken."""
+        nftoken_id = request.match_info["nftoken_id"]
+        mgr = self.node.ledger.nftoken_manager
+        offers = [o.to_dict() for o in mgr.get_offers(nftoken_id)
+                  if getattr(o, "is_sell", True) is True]
+        return web.json_response({"nftoken_id": nftoken_id, "offers": offers}, dumps=_json_dumps)
+
+    async def _gateway_balances(self, request: web.Request) -> web.Response:
+        """GET /gateway_balances/{address} — obligations of a gateway account."""
+        address = request.match_info["address"]
+        acc = self.node.ledger.get_account(address)
+        if acc is None:
+            raise web.HTTPNotFound(text=f"Account {address} not found")
+        # Obligations = sum of all outgoing trust-line balances
+        obligations: dict[str, float] = {}
+        assets: dict[str, float] = {}
+        for (currency, issuer), tl in acc.trust_lines.items():
+            if tl.balance > 0:
+                assets.setdefault(currency, 0.0)
+                assets[currency] += tl.balance
+            elif tl.balance < 0:
+                obligations.setdefault(currency, 0.0)
+                obligations[currency] += abs(tl.balance)
+        # Also check trust lines where this account is the issuer
+        for other_acc in self.node.ledger.accounts.values():
+            if other_acc.address == address:
+                continue
+            for (currency, issuer), tl in other_acc.trust_lines.items():
+                if issuer == address and tl.balance > 0:
+                    obligations.setdefault(currency, 0.0)
+                    obligations[currency] += tl.balance
+        return web.json_response({
+            "account": address,
+            "obligations": obligations,
+            "assets": assets,
+        }, dumps=_json_dumps)
+
+    async def _account_currencies(self, request: web.Request) -> web.Response:
+        """GET /account/{address}/currencies — currencies account can send/receive."""
+        address = request.match_info["address"]
+        acc = self.node.ledger.get_account(address)
+        if acc is None:
+            raise web.HTTPNotFound(text=f"Account {address} not found")
+        send_currencies: set[str] = set()
+        receive_currencies: set[str] = set()
+        for (currency, issuer), tl in acc.trust_lines.items():
+            receive_currencies.add(currency)
+            if tl.balance > 0:
+                send_currencies.add(currency)
+        # Native currency always sendable if balance > 0
+        if acc.balance > 0:
+            send_currencies.add("NXF")
+        receive_currencies.add("NXF")
+        return web.json_response({
+            "account": address,
+            "send_currencies": sorted(send_currencies),
+            "receive_currencies": sorted(receive_currencies),
+        })
+
+    async def _noripple_check(self, request: web.Request) -> web.Response:
+        """GET /noripple_check/{address} — check trust lines for rippling issues."""
+        address = request.match_info["address"]
+        acc = self.node.ledger.get_account(address)
+        if acc is None:
+            raise web.HTTPNotFound(text=f"Account {address} not found")
+        problems: list[str] = []
+        # If account is a gateway (default_ripple should be set)
+        if acc.is_gateway and not acc.default_ripple:
+            problems.append("Gateway should enable DefaultRipple")
+        # Check trust lines
+        for (currency, issuer), tl in acc.trust_lines.items():
+            if acc.is_gateway:
+                # Gateway lines should NOT have NoRipple
+                if tl.no_ripple:
+                    problems.append(f"Trust line {currency}/{issuer}: Gateway should not set NoRipple")
+            else:
+                # Non-gateway lines SHOULD have NoRipple
+                if not tl.no_ripple and tl.balance > 0:
+                    problems.append(f"Trust line {currency}/{issuer}: Should set NoRipple flag")
+        return web.json_response({
+            "account": address,
+            "problems": problems,
+            "ok": len(problems) == 0,
+        })
+
+    async def _channel_verify(self, request: web.Request) -> web.Response:
+        """POST /channel_verify — verify a payment channel claim signature."""
+        try:
+            body = await request.json()
+        except Exception as exc:
+            raise web.HTTPBadRequest(text="Invalid JSON body") from exc
+        channel_id = body.get("channel_id", "")
+        amount = _safe_float(body.get("amount", 0), "amount")
+        signature = body.get("signature", "")
+        public_key = body.get("public_key", "")
+        if not channel_id or not signature or not public_key:
+            raise web.HTTPBadRequest(text="channel_id, amount, signature, and public_key required")
+        from nexaflow_core.payment_channel import verify_claim_signature
+        valid = verify_claim_signature(channel_id, amount, signature, public_key)
+        return web.json_response({"signature_verified": valid})
+
+    async def _channel_authorize(self, request: web.Request) -> web.Response:
+        """POST /channel_authorize — create a claim signature for a payment channel."""
+        try:
+            body = await request.json()
+        except Exception as exc:
+            raise web.HTTPBadRequest(text="Invalid JSON body") from exc
+        channel_id = body.get("channel_id", "")
+        amount = _safe_float(body.get("amount", 0), "amount")
+        secret = body.get("secret", "")
+        if not channel_id or not secret:
+            raise web.HTTPBadRequest(text="channel_id, amount, and secret required")
+        from nexaflow_core.payment_channel import create_claim_signature
+        try:
+            sig = create_claim_signature(channel_id, amount, secret)
+        except ValueError as e:
+            raise web.HTTPBadRequest(text=str(e))
+        return web.json_response({"signature": sig})
+
+    async def _deposit_authorized(self, request: web.Request) -> web.Response:
+        """GET /deposit_authorized?source=rX&destination=rY"""
+        source = request.query.get("source", "")
+        destination = request.query.get("destination", "")
+        if not source or not destination:
+            raise web.HTTPBadRequest(text="source and destination required")
+        dest_acc = self.node.ledger.get_account(destination)
+        if dest_acc is None:
+            raise web.HTTPNotFound(text=f"Destination {destination} not found")
+        # If deposit_auth is not enabled, anyone can send
+        if not dest_acc.deposit_auth:
+            return web.json_response({"deposit_authorized": True, "source": source, "destination": destination})
+        # Check if source is pre-authorized
+        authorized = source in dest_acc.deposit_preauth
+        return web.json_response({"deposit_authorized": authorized, "source": source, "destination": destination})
+
+    async def _generic_submit(self, request: web.Request) -> web.Response:
+        """POST /submit — submit a pre-signed transaction blob or JSON."""
+        try:
+            body = await request.json()
+        except Exception as exc:
+            raise web.HTTPBadRequest(text="Invalid JSON body") from exc
+
+        tx_blob = body.get("tx_blob", "")
+        tx_json = body.get("tx_json")
+
+        if tx_blob:
+            # Decode hex blob into a transaction
+            from nexaflow_core.transaction import Transaction, Amount
+            try:
+                import json as _j
+                tx_data = _j.loads(bytes.fromhex(tx_blob).decode("utf-8"))
+            except Exception:
+                raise web.HTTPBadRequest(text="Invalid tx_blob — must be hex-encoded JSON")
+            amt = tx_data.get("amount", {})
+            fee = tx_data.get("fee", {})
+            tx = Transaction(
+                tx_type=tx_data.get("tx_type", 0),
+                account=tx_data.get("account", ""),
+                destination=tx_data.get("destination", ""),
+                amount=Amount(float(amt.get("value", 0)), amt.get("currency", "NXF"), amt.get("issuer", "")),
+                fee=Amount(float(fee.get("value", 0))),
+                sequence=tx_data.get("sequence", 0),
+                memo=tx_data.get("memo", ""),
+            )
+            tx.tx_id = tx_data.get("tx_id", tx.tx_id)
+            if tx_data.get("signature"):
+                tx.signature = bytes.fromhex(tx_data["signature"])
+            if tx_data.get("signing_pub_key"):
+                tx.signing_pub_key = bytes.fromhex(tx_data["signing_pub_key"])
+        elif tx_json:
+            from nexaflow_core.transaction import Transaction, Amount
+            amt = tx_json.get("Amount", tx_json.get("amount", {}))
+            fee = tx_json.get("Fee", tx_json.get("fee", {}))
+            if isinstance(amt, (int, float)):
+                amt = {"value": amt, "currency": "NXF"}
+            if isinstance(fee, (int, float)):
+                fee = {"value": fee}
+            tx = Transaction(
+                tx_type=tx_json.get("TransactionType", tx_json.get("tx_type", 0)),
+                account=tx_json.get("Account", tx_json.get("account", "")),
+                destination=tx_json.get("Destination", tx_json.get("destination", "")),
+                amount=Amount(float(amt.get("value", 0)), amt.get("currency", "NXF"), amt.get("issuer", "")),
+                fee=Amount(float(fee.get("value", 0))),
+                sequence=tx_json.get("Sequence", tx_json.get("sequence", 0)),
+                memo=tx_json.get("memo", ""),
+            )
+        else:
+            raise web.HTTPBadRequest(text="tx_blob or tx_json required")
+
+        result = self.node.ledger.apply_transaction(tx)
+        if result != 0:
+            from nexaflow_core.transaction import RESULT_NAMES
+            return web.json_response({
+                "result": {"engine_result": RESULT_NAMES.get(result, f"tec{result}"),
+                           "engine_result_code": result,
+                           "tx_id": tx.tx_id},
+            }, status=400, dumps=_json_dumps)
+
+        tx_dict = tx.to_dict()
+        tx_dict["tx_id"] = tx.tx_id
+        self.node.tx_pool[tx.tx_id] = tx_dict
+        self.node.tx_objects[tx.tx_id] = tx
+        await self.node.p2p.broadcast_transaction(tx_dict)
+
+        return web.json_response({
+            "result": {"engine_result": "tesSUCCESS", "engine_result_code": 0,
+                       "tx_id": tx.tx_id},
+        }, dumps=_json_dumps)
+
+    async def _submit_multisigned(self, request: web.Request) -> web.Response:
+        """POST /submit_multisigned — submit a multi-signed transaction."""
+        try:
+            body = await request.json()
+        except Exception as exc:
+            raise web.HTTPBadRequest(text="Invalid JSON body") from exc
+
+        tx_json = body.get("tx_json", {})
+        if not tx_json:
+            raise web.HTTPBadRequest(text="tx_json required")
+
+        # Validate that signers are present
+        signers = tx_json.get("Signers", [])
+        if not signers:
+            raise web.HTTPBadRequest(text="No Signers in tx_json")
+
+        # Verify against signer list
+        account = tx_json.get("Account", "")
+        ms_mgr = self.node.ledger.multi_sign_manager
+        signer_list = ms_mgr.get_signer_list(account)
+        if signer_list is None:
+            raise web.HTTPBadRequest(text=f"No signer list for {account}")
+
+        # Check quorum (weight sum must meet quorum)
+        weight_sum = 0
+        for signer in signers:
+            signer_account = signer.get("Signer", {}).get("Account", "")
+            for entry in signer_list.entries:
+                if entry.account == signer_account:
+                    weight_sum += entry.weight
+                    break
+        if weight_sum < signer_list.quorum:
+            raise web.HTTPBadRequest(text=f"Insufficient signer weight: {weight_sum} < {signer_list.quorum}")
+
+        # Build and apply the transaction
+        from nexaflow_core.transaction import Transaction, Amount
+        amt = tx_json.get("Amount", {})
+        fee = tx_json.get("Fee", {})
+        if isinstance(amt, (int, float)):
+            amt = {"value": amt, "currency": "NXF"}
+        if isinstance(fee, (int, float)):
+            fee = {"value": fee}
+        tx = Transaction(
+            tx_type=tx_json.get("TransactionType", 0),
+            account=account,
+            destination=tx_json.get("Destination", ""),
+            amount=Amount(float(amt.get("value", 0)), amt.get("currency", "NXF")),
+            fee=Amount(float(fee.get("value", 0))),
+            sequence=tx_json.get("Sequence", 0),
+        )
+
+        result = self.node.ledger.apply_transaction(tx)
+        if result != 0:
+            from nexaflow_core.transaction import RESULT_NAMES
+            return web.json_response({
+                "result": {"engine_result": RESULT_NAMES.get(result, f"tec{result}"),
+                           "engine_result_code": result},
+            }, status=400, dumps=_json_dumps)
+
+        tx_dict = tx.to_dict()
+        tx_dict["tx_id"] = tx.tx_id
+        tx_dict["Signers"] = signers
+        self.node.tx_pool[tx.tx_id] = tx_dict
+        self.node.tx_objects[tx.tx_id] = tx
+        await self.node.p2p.broadcast_transaction(tx_dict)
+
+        return web.json_response({
+            "result": {"engine_result": "tesSUCCESS", "tx_id": tx.tx_id},
+        }, dumps=_json_dumps)
+
+    async def _sign(self, request: web.Request) -> web.Response:
+        """POST /sign — server-side transaction signing."""
+        try:
+            body = await request.json()
+        except Exception as exc:
+            raise web.HTTPBadRequest(text="Invalid JSON body") from exc
+
+        tx_json = body.get("tx_json", {})
+        secret = body.get("secret", "")
+
+        if not tx_json:
+            raise web.HTTPBadRequest(text="tx_json required")
+
+        from nexaflow_core.transaction import Transaction, Amount
+        amt = tx_json.get("Amount", tx_json.get("amount", {}))
+        fee = tx_json.get("Fee", tx_json.get("fee", {}))
+        if isinstance(amt, (int, float)):
+            amt = {"value": amt, "currency": "NXF"}
+        if isinstance(fee, (int, float)):
+            fee = {"value": fee}
+
+        tx = Transaction(
+            tx_type=tx_json.get("TransactionType", tx_json.get("tx_type", 0)),
+            account=tx_json.get("Account", tx_json.get("account", "")),
+            destination=tx_json.get("Destination", tx_json.get("destination", "")),
+            amount=Amount(float(amt.get("value", 0)), amt.get("currency", "NXF"), amt.get("issuer", "")),
+            fee=Amount(float(fee.get("value", 0))),
+            sequence=tx_json.get("Sequence", tx_json.get("sequence", 0)),
+            memo=tx_json.get("memo", ""),
+        )
+        # Set optional fields
+        if tx_json.get("LastLedgerSequence"):
+            tx.last_ledger_sequence = int(tx_json["LastLedgerSequence"])
+        if tx_json.get("Memos"):
+            tx.memos = tx_json["Memos"]
+        if tx_json.get("DestinationTag"):
+            tx.destination_tag = int(tx_json["DestinationTag"])
+
+        # Sign with node wallet (or provided secret — for now use node wallet)
+        self.node.wallet.sign_transaction(tx)
+
+        tx_dict = tx.to_dict()
+        tx_dict["tx_id"] = tx.tx_id
+        tx_dict["signing_pub_key"] = tx.signing_pub_key.hex()
+        tx_dict["signature"] = tx.signature.hex()
+        # Produce tx_blob (hex JSON)
+        tx_blob = json.dumps(tx_dict, default=str).encode("utf-8").hex()
+
+        return web.json_response({
+            "result": {
+                "tx_json": tx_dict,
+                "tx_blob": tx_blob,
+            },
+        }, dumps=_json_dumps)
+
+    async def _sign_for(self, request: web.Request) -> web.Response:
+        """POST /sign_for — add a signature (as one multi-signer) to a transaction."""
+        try:
+            body = await request.json()
+        except Exception as exc:
+            raise web.HTTPBadRequest(text="Invalid JSON body") from exc
+
+        tx_json = body.get("tx_json", {})
+        signer_account = body.get("account", "")
+        if not tx_json or not signer_account:
+            raise web.HTTPBadRequest(text="tx_json and account required")
+
+        # Sign the transaction on behalf of signer_account
+        from nexaflow_core.transaction import Transaction, Amount
+        amt = tx_json.get("Amount", {})
+        fee = tx_json.get("Fee", {})
+        if isinstance(amt, (int, float)):
+            amt = {"value": amt, "currency": "NXF"}
+        if isinstance(fee, (int, float)):
+            fee = {"value": fee}
+        tx = Transaction(
+            tx_type=tx_json.get("TransactionType", 0),
+            account=tx_json.get("Account", ""),
+            destination=tx_json.get("Destination", ""),
+            amount=Amount(float(amt.get("value", 0)), amt.get("currency", "NXF")),
+            fee=Amount(float(fee.get("value", 0))),
+            sequence=tx_json.get("Sequence", 0),
+        )
+
+        self.node.wallet.sign_transaction(tx)
+        signer_entry = {
+            "Signer": {
+                "Account": signer_account,
+                "SigningPubKey": tx.signing_pub_key.hex(),
+                "TxnSignature": tx.signature.hex(),
+            }
+        }
+
+        existing_signers = tx_json.get("Signers", [])
+        existing_signers.append(signer_entry)
+        tx_json["Signers"] = existing_signers
+
+        return web.json_response({
+            "result": {"tx_json": tx_json},
+        }, dumps=_json_dumps)
+
+    async def _ledger_closed(self, _request: web.Request) -> web.Response:
+        """GET /ledger_closed — sequence of the most recently closed ledger."""
+        closed = self.node.ledger.closed_ledgers
+        if not closed:
+            return web.json_response({"result": {"ledger_index": 0, "ledger_hash": ""}})
+        last = closed[-1]
+        return web.json_response({
+            "result": {
+                "ledger_index": last.sequence,
+                "ledger_hash": last.hash,
+            },
+        })
+
+    async def _ledger_current(self, _request: web.Request) -> web.Response:
+        """GET /ledger_current — sequence of the current open ledger."""
+        return web.json_response({
+            "result": {"ledger_current_index": self.node.ledger.current_sequence},
+        })
+
+    async def _server_state(self, _request: web.Request) -> web.Response:
+        """GET /server_state — compact server state (like rippled server_state)."""
+        import time as _time
+        uptime = _time.time() - getattr(self.node, "_start_time", _time.time())
+        ledger = self.node.ledger
+        closed_count = len(ledger.closed_ledgers)
+
+        server_state_str = "full"
+        ssm = getattr(self.node, "_state_machine", None)
+        if ssm is not None:
+            server_state_str = ssm.state.value
+
+        return web.json_response({
+            "result": {
+                "state": {
+                    "server_state": server_state_str,
+                    "build_version": "0.9.0",
+                    "complete_ledgers": f"1-{closed_count}" if closed_count > 0 else "empty",
+                    "uptime": int(uptime),
+                    "peers": self.node.p2p.peer_count,
+                    "validated_ledger": {
+                        "seq": closed_count,
+                        "hash": ledger.closed_ledgers[-1].hash if closed_count > 0 else "",
+                    },
+                },
+            },
+        })
+
+    async def _manifest(self, request: web.Request) -> web.Response:
+        """GET /manifest/{public_key} — lookup a validator manifest."""
+        public_key = request.match_info["public_key"]
+        manifest_cache = getattr(self.node, "manifest_cache", None)
+        if manifest_cache is None:
+            return web.json_response({"error": "Manifest cache not available"}, status=404)
+        manifest = manifest_cache.get(public_key)
+        if manifest is None:
+            return web.json_response({"error": "Manifest not found"}, status=404)
+        return web.json_response({
+            "result": {
+                "master_key": manifest.master_public_key,
+                "ephemeral_key": manifest.ephemeral_public_key,
+                "sequence": manifest.sequence,
+                "domain": manifest.domain,
+                "expiration": manifest.expiration,
+            },
+        })
+
+    async def _validators(self, _request: web.Request) -> web.Response:
+        """GET /validators — list known validators."""
+        manifest_cache = getattr(self.node, "manifest_cache", None)
+        validators = []
+        if manifest_cache is not None:
+            for m in manifest_cache.all_active():
+                validators.append({
+                    "master_key": m.master_public_key,
+                    "ephemeral_key": m.ephemeral_public_key,
+                    "sequence": m.sequence,
+                    "domain": m.domain,
+                })
+        # Also check UNL subscriber
+        unl_sub = getattr(self.node, "unl_subscriber", None)
+        trusted = set()
+        if unl_sub is not None:
+            trusted = unl_sub.trusted_validators
+        return web.json_response({
+            "result": {
+                "validators": validators,
+                "trusted_count": len(trusted),
+                "trusted_keys": sorted(trusted),
+            },
+        }, dumps=_json_dumps)
+
+    async def _crawl(self, _request: web.Request) -> web.Response:
+        """GET /crawl — peer topology information (rippled /crawl equivalent)."""
+        return web.json_response(self.node.p2p.crawl(), dumps=_json_dumps)
+
+    async def _reporting_rpc(self, request: web.Request) -> web.Response:
+        """POST /reporting — JSON-RPC proxy to the reporting server."""
+        reporting = getattr(self.node, "reporting_server", None)
+        if reporting is None:
+            return web.json_response(
+                {"error": "Reporting mode not available"}, status=404
+            )
+        try:
+            body = await request.json()
+        except Exception as exc:
+            raise web.HTTPBadRequest(text="Invalid JSON body") from exc
+        method = body.get("method", "")
+        params = body.get("params", {})
+        if isinstance(params, list) and params:
+            params = params[0]
+        result = reporting.handle_request(method, params)
+        return web.json_response(result, dumps=_json_dumps)
 
 
 def _json_dumps(obj: Any) -> str:

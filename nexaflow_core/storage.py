@@ -552,3 +552,97 @@ class LedgerStore:
 
     def __exit__(self, *exc):
         self.close()
+
+    # ── History sharding / online delete (rippled-style) ─────────
+
+    def online_delete(self, keep_last: int = 256) -> int:
+        """Delete old closed-ledger data and transactions beyond the
+        most recent *keep_last* ledgers.
+
+        Returns the number of ledgers pruned.  This mirrors rippled's
+        ``online_delete`` advisory-delete configuration.
+        """
+        latest = self.latest_ledger_seq()
+        if latest == 0 or keep_last <= 0:
+            return 0
+        cutoff = latest - keep_last
+        if cutoff <= 0:
+            return 0
+
+        c = self._conn
+        try:
+            c.execute("BEGIN IMMEDIATE")
+
+            # Count ledgers being removed
+            row = c.execute(
+                "SELECT COUNT(*) AS cnt FROM closed_ledgers WHERE sequence <= ?",
+                (cutoff,),
+            ).fetchone()
+            pruned = row["cnt"] if row else 0
+
+            # Delete old transactions
+            c.execute(
+                "DELETE FROM transactions WHERE ledger_seq <= ?", (cutoff,)
+            )
+            # Delete old closed ledgers
+            c.execute(
+                "DELETE FROM closed_ledgers WHERE sequence <= ?", (cutoff,)
+            )
+
+            c.execute("COMMIT")
+            logger.info(f"online_delete: pruned {pruned} ledgers (kept last {keep_last})")
+            return pruned
+        except Exception:
+            c.execute("ROLLBACK")
+            raise
+
+    def get_shard_info(self) -> dict:
+        """Return shard-style summary of stored history.
+
+        In rippled, history is broken into fixed-size *shards*
+        (typically 16,384 ledgers each).  We simulate this by reporting
+        which shard ranges are present.
+        """
+        SHARD_SIZE = 16384
+        rows = self._conn.execute(
+            "SELECT MIN(sequence) AS lo, MAX(sequence) AS hi, "
+            "COUNT(*) AS cnt FROM closed_ledgers"
+        ).fetchone()
+        if not rows or rows["lo"] is None:
+            return {"shards": [], "shard_size": SHARD_SIZE, "complete": False}
+        lo, hi, cnt = rows["lo"], rows["hi"], rows["cnt"]
+        shard_start = (lo // SHARD_SIZE) * SHARD_SIZE
+        shards: list[dict] = []
+        seq = shard_start
+        while seq <= hi:
+            shard_end = seq + SHARD_SIZE - 1
+            # Count ledgers in this shard range
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM closed_ledgers "
+                "WHERE sequence >= ? AND sequence <= ?",
+                (seq, shard_end),
+            ).fetchone()
+            n = row["n"] if row else 0
+            if n > 0:
+                shards.append({
+                    "index": seq // SHARD_SIZE,
+                    "first_seq": seq,
+                    "last_seq": min(shard_end, hi),
+                    "stored": n,
+                    "expected": min(shard_end, hi) - seq + 1,
+                    "complete": n >= (min(shard_end, hi) - seq + 1),
+                })
+            seq += SHARD_SIZE
+        return {
+            "shards": shards,
+            "shard_size": SHARD_SIZE,
+            "complete": cnt >= (hi - lo + 1),
+            "earliest": lo,
+            "latest": hi,
+            "total_stored": cnt,
+        }
+
+    def vacuum(self) -> None:
+        """Run VACUUM to reclaim disk space after online_delete."""
+        self._conn.execute("VACUUM")
+        logger.info("Storage vacuum complete")

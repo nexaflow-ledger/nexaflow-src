@@ -252,6 +252,13 @@ class P2PNode:
         # Map peer_id -> their 65-byte public key (populated from HELLO)
         self.peer_pubkeys: dict[str, bytes] = {}
 
+        # ── Peer reservations (rippled-style) ──────────────────────
+        # A set of node_ids (or IP addresses) that get reserved slots
+        # above MAX_PEERS.  Operators configure these so important
+        # validators / hubs always maintain connectivity.
+        self._reserved_peers: set[str] = set()
+        self._reserved_slots: int = 8  # how many slots above MAX_PEERS
+
         # Callbacks - set by the node runner
         self.on_transaction: Callable | None = None
         self.on_proposal: Callable | None = None
@@ -279,6 +286,7 @@ class P2PNode:
 
         # Per-peer rate tracking: peer_id -> [msg_count, window_start]
         self._peer_msg_rate: dict[str, list[float]] = {}
+        self._server_start: float | None = None
 
     # ---- lifecycle ----
 
@@ -294,6 +302,7 @@ class P2PNode:
             ssl=self._ssl_context,
         )
         self._running = True
+        self._server_start = time.time()
         addr = self._server.sockets[0].getsockname()
         tls_tag = " [TLS]" if self._ssl_context else ""
         logger.info(f"[{self.node_id}] Listening on {addr[0]}:{addr[1]}{tls_tag}")
@@ -319,9 +328,12 @@ class P2PNode:
         """Initiate an outbound connection to a peer.
 
         Enforces MAX_PEERS and rejects duplicate peer_ids.
+        Reserved peers get extra slots above the normal cap.
         """
-        if len(self.peers) >= MAX_PEERS:
-            logger.debug(f"[{self.node_id}] MAX_PEERS reached — skipping {host}:{port}")
+        addr_str = f"{host}:{port}"
+        cap = self._effective_max_peers(remote_addr=addr_str)
+        if len(self.peers) >= cap:
+            logger.debug(f"[{self.node_id}] Peer cap ({cap}) reached — skipping {host}:{port}")
             return False
 
         try:
@@ -370,12 +382,6 @@ class P2PNode:
         Enforces MAX_PEERS, rejects duplicate peer_ids, and validates the
         HELLO handshake before accepting the peer.
         """
-        # ── Connection limit ──────────────────────────────────────
-        if len(self.peers) >= MAX_PEERS:
-            logger.warning(f"[{self.node_id}] MAX_PEERS ({MAX_PEERS}) reached — rejecting inbound")
-            writer.close()
-            return
-
         peer = PeerConnection(reader, writer, direction="inbound")
         # Wait for HELLO
         msg = await peer.readline()
@@ -385,6 +391,13 @@ class P2PNode:
 
         claimed_id = msg["payload"].get("node_id", "")
         if not claimed_id:
+            await peer.close()
+            return
+
+        # ── Connection limit (respects peer reservations) ─────────
+        cap = self._effective_max_peers(claimed_id, peer.remote_addr)
+        if len(self.peers) >= cap:
+            logger.warning(f"[{self.node_id}] Peer cap ({cap}) reached — rejecting {claimed_id}")
             await peer.close()
             return
 
@@ -643,6 +656,69 @@ class P2PNode:
 
     def peer_ids(self) -> list[str]:
         return list(self.peers.keys())
+
+    # ── Peer Reservations (rippled-style) ─────────────────────────
+
+    def add_reservation(self, node_id_or_ip: str) -> None:
+        """Reserve a peer slot so this node can always connect."""
+        self._reserved_peers.add(node_id_or_ip)
+
+    def remove_reservation(self, node_id_or_ip: str) -> None:
+        self._reserved_peers.discard(node_id_or_ip)
+
+    @property
+    def reservations(self) -> set[str]:
+        return set(self._reserved_peers)
+
+    def _is_reserved(self, peer_id: str, remote_addr: str = "") -> bool:
+        """Check whether a peer qualifies for a reserved slot."""
+        if peer_id in self._reserved_peers:
+            return True
+        if remote_addr:
+            host = remote_addr.rsplit(":", 1)[0] if ":" in remote_addr else remote_addr
+            if host in self._reserved_peers or remote_addr in self._reserved_peers:
+                return True
+        return False
+
+    def _effective_max_peers(self, peer_id: str = "", remote_addr: str = "") -> int:
+        """Return the connection cap for this peer (higher for reserved)."""
+        if self._is_reserved(peer_id, remote_addr):
+            return MAX_PEERS + self._reserved_slots
+        return MAX_PEERS
+
+    # ── Crawl endpoint (rippled /crawl) ──────────────────────────
+
+    def crawl(self) -> dict:
+        """Return topology data for the peer crawler.
+
+        Equivalent to rippled's ``/crawl`` admin endpoint.  Returns
+        connected-peer list, their pubkeys, and uptime info.
+        """
+        overlay: list[dict] = []
+        for peer in self.peers.values():
+            entry: dict = {
+                "node_id": peer.peer_id,
+                "remote_addr": peer.remote_addr,
+                "direction": peer.direction,
+                "uptime": round(time.time() - peer.connected_at, 1),
+                "messages_sent": peer.messages_sent,
+                "messages_received": peer.messages_received,
+            }
+            pubkey = self.peer_pubkeys.get(peer.peer_id)
+            if pubkey:
+                entry["public_key"] = pubkey.hex()
+            overlay.append(entry)
+        return {
+            "overlay": {
+                "active": overlay,
+                "total": len(overlay),
+            },
+            "server": {
+                "node_id": self.node_id,
+                "uptime": round(time.time() - (self._server_start or time.time()), 1),
+                "pubkey": self.node_pubkey.hex() if self.node_pubkey else "",
+            },
+        }
 
     def status(self) -> dict:
         return {

@@ -164,6 +164,8 @@ cdef int _TEC_GLOBAL_FREEZE = 132
 cdef int _TEC_OWNER_RESERVE = 133
 cdef int _TEC_SEQ_TOO_LOW = 134
 cdef int _TEC_DEPOSIT_AUTH = 135
+cdef int _TEC_EXPIRED = 136
+cdef int _TEC_NO_TICKET = 137
 
 TES_SUCCESS      = _TES_SUCCESS
 TEC_UNFUNDED     = _TEC_UNFUNDED
@@ -201,6 +203,8 @@ TEC_GLOBAL_FREEZE = _TEC_GLOBAL_FREEZE
 TEC_OWNER_RESERVE = _TEC_OWNER_RESERVE
 TEC_SEQ_TOO_LOW = _TEC_SEQ_TOO_LOW
 TEC_DEPOSIT_AUTH = _TEC_DEPOSIT_AUTH
+TEC_EXPIRED = _TEC_EXPIRED
+TEC_NO_TICKET = _TEC_NO_TICKET
 
 # Map names to codes for external use
 TX_TYPE_NAMES = {
@@ -295,6 +299,8 @@ RESULT_NAMES = {
     TEC_OWNER_RESERVE:   "tecOWNER_RESERVE",
     TEC_SEQ_TOO_LOW:     "tecSEQ_TOO_LOW",
     TEC_DEPOSIT_AUTH:    "tecDEPOSIT_AUTH",
+    TEC_EXPIRED:         "tecEXPIRED",
+    TEC_NO_TICKET:       "tecNO_TICKET",
 }
 
 
@@ -377,6 +383,14 @@ cdef class Transaction:
     cdef public long long destination_tag   # Destination tag (0 = unset)
     cdef public long long source_tag        # Source tag (0 = unset)
     cdef public double delivered_amount     # Actual amount delivered (partial payments)
+    # LastLedgerSequence / tx expiration (0 = no expiration)
+    cdef public long long last_ledger_sequence
+    # Structured Memos array  [{"MemoType": ..., "MemoData": ...}, ...]
+    cdef public list memos
+    # AccountTxnID — hash of the last tx from this account (optional)
+    cdef public str account_txn_id
+    # TicketSequence — use a ticket instead of Sequence (0 = unused)
+    cdef public long long ticket_sequence
     # Privacy fields for confidential transactions
     cdef public bytes commitment
     cdef public bytes ring_signature
@@ -409,6 +423,10 @@ cdef class Transaction:
         self.destination_tag = 0
         self.source_tag = 0
         self.delivered_amount = -1.0  # -1 means not set
+        self.last_ledger_sequence = 0
+        self.memos = []
+        self.account_txn_id = ""
+        self.ticket_sequence = 0
         # Initialize privacy fields
         self.commitment = b""
         self.ring_signature = b""
@@ -448,7 +466,16 @@ cdef class Transaction:
             buf.extend(struct.pack(">q", self.destination_tag))
         if self.source_tag != 0:
             buf.extend(struct.pack(">q", self.source_tag))
+        if self.last_ledger_sequence != 0:
+            buf.extend(struct.pack(">q", self.last_ledger_sequence))
+        if self.ticket_sequence != 0:
+            buf.extend(struct.pack(">q", self.ticket_sequence))
+        if self.account_txn_id:
+            buf.extend(self.account_txn_id.encode("utf-8"))
         buf.extend(self.memo.encode("utf-8"))
+        if self.memos:
+            import json as _json2
+            buf.extend(_json2.dumps(self.memos, sort_keys=True).encode("utf-8"))
         # Include privacy fields in signing preimage.
         # NOTE: ring_signature is intentionally excluded — a signature must
         # never be part of its own signing preimage.
@@ -522,6 +549,14 @@ cdef class Transaction:
             d["source_tag"] = self.source_tag
         if self.delivered_amount >= 0:
             d["delivered_amount"] = self.delivered_amount
+        if self.last_ledger_sequence != 0:
+            d["LastLedgerSequence"] = self.last_ledger_sequence
+        if self.memos:
+            d["Memos"] = self.memos
+        if self.account_txn_id:
+            d["AccountTxnID"] = self.account_txn_id
+        if self.ticket_sequence != 0:
+            d["TicketSequence"] = self.ticket_sequence
         return d
 
     def __repr__(self):

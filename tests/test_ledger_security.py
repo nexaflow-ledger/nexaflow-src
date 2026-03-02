@@ -96,13 +96,11 @@ class TestBalanceEnforcement(LedgerSecBase):
         self.assertEqual(result, 101)  # tecUNFUNDED
 
     def test_exact_balance_minus_fee(self):
-        """Sending all except fee should succeed (if reserve allows)."""
-        # rAlice has 500; this will fail due to reserve
-        tx = create_payment("rAlice", "rBob", 499.0)
+        """Sending all except fee and reserve should succeed."""
+        # rAlice has 500; reserve is 10 NXF
+        reserve = 10.0
+        tx = create_payment("rAlice", "rBob", 500.0 - reserve - 0.00001)
         result = self.ledger.apply_payment(tx)
-        # May or may not succeed depending on reserve enforcement
-        # The ledger apply_payment checks balance < amt + fee
-        # 500 < 499 + 0.00001 = 499.00001 → passes the raw check
         self.assertEqual(result, 0)
 
     def test_zero_amount_payment(self):

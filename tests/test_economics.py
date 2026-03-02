@@ -312,7 +312,7 @@ class TestNoMoneyFromThinAir(unittest.TestCase):
         for i in range(5):
             acc_a = ledger.get_account("rA")
             bal_a = ledger.get_balance("rA")
-            send_amt = bal_a - 1.0  # keep 1 NXF reserve
+            send_amt = bal_a - 11.0  # keep > 10 NXF base reserve
             if send_amt <= 0:
                 break
             tx_ab = _pay("rA", "rB", send_amt, fee=0.01,
@@ -321,7 +321,7 @@ class TestNoMoneyFromThinAir(unittest.TestCase):
 
             acc_b = ledger.get_account("rB")
             bal_b = ledger.get_balance("rB")
-            send_back = bal_b - 1.0
+            send_back = bal_b - 11.0
             if send_back <= 0:
                 break
             tx_ba = _pay("rB", "rA", send_back, fee=0.01,
@@ -353,16 +353,17 @@ class TestOverspendingProtection(unittest.TestCase):
         self.ledger.apply_payment(tx)
 
     def test_spend_exactly_balance_minus_fee(self):
-        """Alice can spend her entire balance minus fee."""
+        """Alice can spend her entire balance minus fee and reserve."""
         acc = self.ledger.get_account("rAlice")
         bal = self.ledger.get_balance("rAlice")
-        # Spend almost everything, leaving just enough for fee
-        send = bal - 0.01
+        # Spend everything over the reserve, leaving just enough for fee + reserve
+        reserve = 10.0  # BASE_RESERVE
+        send = bal - 0.01 - reserve
         tx = _pay("rAlice", "rGen", send, fee=0.01,
                    seq=acc.sequence, tx_id="exact1")
         result = self.ledger.apply_payment(tx)
         self.assertEqual(result, 0)
-        self.assertAlmostEqual(self.ledger.get_balance("rAlice"), 0.0, places=4)
+        self.assertAlmostEqual(self.ledger.get_balance("rAlice"), reserve, places=4)
 
     def test_spend_one_unit_over_balance_rejected(self):
         """Alice cannot spend even 1 NXF more than she has."""
