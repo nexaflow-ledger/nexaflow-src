@@ -83,7 +83,8 @@ class LedgerStore:
                 amount_json TEXT,
                 fee_json    TEXT,
                 memo        TEXT,
-                timestamp   REAL
+                timestamp   REAL,
+                tx_blob     TEXT
             )
         """)
         c.execute("""
@@ -249,14 +250,15 @@ class LedgerStore:
         fee_json: str = "{}",
         memo: str = "",
         timestamp: float = 0.0,
+        tx_blob: str = "",
     ) -> None:
         self._conn.execute(
             """INSERT OR REPLACE INTO transactions
                (tx_id, ledger_seq, tx_type, account, destination,
-                amount_json, fee_json, memo, timestamp)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                amount_json, fee_json, memo, timestamp, tx_blob)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (tx_id, ledger_seq, tx_type, account, destination,
-             amount_json, fee_json, memo, timestamp),
+             amount_json, fee_json, memo, timestamp, tx_blob),
         )
         self._conn.commit()
 
@@ -271,6 +273,91 @@ class LedgerStore:
                 "SELECT * FROM transactions ORDER BY ledger_seq, rowid"
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def load_tx_blobs(self, from_seq: int = 0) -> list[dict[str, Any]]:
+        """Load all transaction blobs ordered by ledger sequence then rowid.
+
+        Used for ledger replay from genesis.
+        """
+        rows = self._conn.execute(
+            """SELECT tx_id, ledger_seq, tx_type, account, destination,
+                      amount_json, fee_json, memo, timestamp, tx_blob
+               FROM transactions
+               WHERE ledger_seq >= ? AND tx_blob IS NOT NULL AND tx_blob != ''
+               ORDER BY ledger_seq, rowid""",
+            (from_seq,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def replay_from_genesis(self, ledger: Any) -> int:
+        """
+        Replay all stored transaction blobs against a fresh ledger,
+        reconstructing state from genesis.
+
+        Returns the number of transactions successfully replayed.
+        """
+        import json as _json
+        from nexaflow_core.transaction import Transaction, Amount
+
+        blobs = self.load_tx_blobs(from_seq=0)
+        replayed = 0
+
+        for row in blobs:
+            blob_str = row.get("tx_blob", "")
+            if not blob_str:
+                continue
+            try:
+                blob = _json.loads(blob_str)
+            except (ValueError, TypeError):
+                logger.warning(
+                    f"Skipping unparseable tx_blob for {row['tx_id']}"
+                )
+                continue
+
+            # Reconstruct the Transaction object from the blob
+            try:
+                amt_data = blob.get("amount", {})
+                fee_data = blob.get("fee", {})
+                amount = Amount(
+                    value=float(amt_data.get("value", 0)),
+                    currency=amt_data.get("currency", "NXF"),
+                    issuer=amt_data.get("issuer", ""),
+                )
+                fee = Amount(
+                    value=float(fee_data.get("value", 0)),
+                    currency="NXF",
+                )
+                tx = Transaction(
+                    tx_type=blob.get("tx_type", 0),
+                    account=blob.get("account", ""),
+                    destination=blob.get("destination", ""),
+                    amount=amount,
+                    fee=fee,
+                    sequence=blob.get("sequence", 0),
+                    memo=blob.get("memo", ""),
+                )
+                tx.tx_id = blob.get("tx_id", row["tx_id"])
+                if "flags" in blob:
+                    tx.flags = blob["flags"]
+                if "destination_tag" in blob:
+                    tx.destination_tag = blob["destination_tag"]
+                if "source_tag" in blob:
+                    tx.source_tag = blob["source_tag"]
+
+                result = ledger.apply_transaction(tx)
+                if result == 0:
+                    replayed += 1
+                else:
+                    logger.debug(
+                        f"Replay tx {tx.tx_id} returned code {result}"
+                    )
+            except Exception as exc:
+                logger.warning(
+                    f"Failed to replay tx {row['tx_id']}: {exc}"
+                )
+
+        logger.info(f"Replayed {replayed}/{len(blobs)} transactions from genesis")
+        return replayed
 
     # ── stakes ───────────────────────────────────────────────────
 

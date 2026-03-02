@@ -269,7 +269,14 @@ class Ed25519Signer:
             return bytes(sk.sign(message).signature)
         except ImportError:
             # HMAC-SHA512 fallback (NOT real Ed25519, but allows testing)
-            return hmac.new(private_key, message, hashlib.sha512).digest()[:64]
+            # Derive the same key used as public_key for verify consistency
+            h = hashlib.sha512(private_key).digest()
+            clamped = bytearray(h[:32])
+            clamped[0] &= 248
+            clamped[31] &= 127
+            clamped[31] |= 64
+            derived = hashlib.sha256(bytes(clamped)).digest()
+            return hmac.new(derived, message, hashlib.sha512).digest()[:64]
 
     @staticmethod
     def verify(public_key: bytes, message: bytes, signature: bytes) -> bool:
@@ -299,6 +306,7 @@ class Wallet:
         view_public_key: bytes | None = None,
         spend_private_key: bytes | None = None,
         spend_public_key: bytes | None = None,
+        key_type: str = "secp256k1",
     ):
         self.private_key = private_key
         self.public_key = public_key
@@ -307,13 +315,21 @@ class Wallet:
         self.view_public_key = view_public_key
         self.spend_private_key = spend_private_key
         self.spend_public_key = spend_public_key
+        self.key_type = key_type
         self._sequence: int = 1  # track locally for convenience
 
     # ---- factory methods ----
 
     @classmethod
-    def create(cls) -> Wallet:
-        """Generate a brand-new wallet with view and spend keypairs."""
+    def create(cls, key_type: str = "secp256k1") -> Wallet:
+        """Generate a brand-new wallet with view and spend keypairs.
+
+        Args:
+            key_type: "secp256k1" (default) or "ed25519".
+        """
+        if key_type == "ed25519":
+            return cls.create_ed25519()
+        # secp256k1 (default)
         # Main keypair for signing
         priv, pub = generate_keypair()
         # View keypair
@@ -321,7 +337,21 @@ class Wallet:
         # Spend keypair
         spend_priv, spend_pub = generate_keypair()
         return cls(priv, pub, view_private_key=view_priv, view_public_key=view_pub,
-                   spend_private_key=spend_priv, spend_public_key=spend_pub)
+                   spend_private_key=spend_priv, spend_public_key=spend_pub,
+                   key_type="secp256k1")
+
+    @classmethod
+    def create_ed25519(cls) -> "Wallet":
+        """Generate a wallet using Ed25519 keys."""
+        priv, pub = Ed25519Signer.generate_keypair()
+        # Use sha256-based address derivation for Ed25519 public key
+        addr = derive_address(pub)
+        return cls(
+            private_key=priv,
+            public_key=pub,
+            address=addr,
+            key_type="ed25519",
+        )
 
     @classmethod
     def from_seed(cls, seed: str) -> Wallet:
@@ -398,13 +428,19 @@ class Wallet:
     def sign_transaction(self, tx: Transaction) -> Transaction:
         """
         Sign a transaction in-place and assign its tx_id.
+        Supports both secp256k1 and Ed25519 key types.
         Returns the same transaction object for chaining.
         """
         if tx.sequence == 0:
             tx.sequence = self._sequence
 
         msg_hash = tx.hash_for_signing()
-        sig = sign(self.private_key, msg_hash)
+
+        if self.key_type == "ed25519":
+            sig = Ed25519Signer.sign(self.private_key, msg_hash)
+        else:
+            sig = sign(self.private_key, msg_hash)
+
         tx_blob = tx.serialize_for_signing() + sig
         tx_id = generate_tx_id(tx_blob)
         tx.apply_signature(self.public_key, sig, tx_id)
@@ -563,6 +599,7 @@ class Wallet:
             "salt": salt.hex(),
             "kdf": "pbkdf2-hmac-sha256",
             "kdf_iterations": iterations,
+            "key_type": self.key_type,
         }
 
     @classmethod
@@ -622,7 +659,8 @@ class Wallet:
         spend_pub = bytes.fromhex(data["spend_public_key"]) if data.get("spend_public_key") else None
 
         return cls(priv, pub, data.get("address"), view_private_key=view_priv, view_public_key=view_pub,
-                   spend_private_key=spend_priv, spend_public_key=spend_pub)
+                   spend_private_key=spend_priv, spend_public_key=spend_pub,
+                   key_type=data.get("key_type", "secp256k1"))
 
     # ---- AES-256-GCM authenticated encryption ----
 

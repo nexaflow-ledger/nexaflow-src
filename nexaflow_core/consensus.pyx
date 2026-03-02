@@ -27,6 +27,8 @@ import hashlib
 cimport cython
 from libc.time cimport time as c_time
 
+from nexaflow_core.negative_unl import NegativeUNL
+
 
 # ── GIL-free helpers ─────────────────────────────────────────────────────
 
@@ -198,13 +200,15 @@ cdef class ConsensusEngine:
     cdef public bytes my_privkey         # 32-byte privkey for signing own proposals
     cdef public set   byzantine_validators
     cdef public int   max_byzantine_faults
+    cdef public object negative_unl           # NegativeUNL tracker
 
     def __init__(self, list unl, str my_id, long long ledger_seq,
                  int max_rounds=10,
                  double initial_threshold=0.50,
                  double final_threshold=0.80,
                  dict unl_pubkeys=None,
-                 bytes my_privkey=b""):
+                 bytes my_privkey=b"",
+                 object negative_unl=None):
         self.my_id = my_id
         self.ledger_seq = ledger_seq
         self.unl = list(unl)
@@ -229,6 +233,8 @@ cdef class ConsensusEngine:
         # Maximum Byzantine faults: f = floor((n-1)/3) where n = |UNL| + 1
         cdef int n = len(unl) + 1
         self.max_byzantine_faults = (n - 1) // 3
+        # NegativeUNL: track unreliable validators
+        self.negative_unl = negative_unl if negative_unl is not None else NegativeUNL()
 
     # ---- public API ----
 
@@ -355,6 +361,27 @@ cdef class ConsensusEngine:
                 "byzantine_count": len(self.byzantine_validators),
             })
 
+            # ── Record validator participation for NegativeUNL ──
+            participating = set(self.proposals.keys()) - self.byzantine_validators
+            for vid in self.unl:
+                self.negative_unl.record_validation(
+                    vid, vid in participating,
+                )
+            newly_neg = self.negative_unl.check_and_update(
+                self.unl_size + 1, self.ledger_seq,
+            )
+            if newly_neg:
+                _logger.info(
+                    f"[nUNL] Added to Negative UNL: {newly_neg}"
+                )
+            # Auto-remove validators that just participated
+            for vid in list(self.negative_unl.entries.keys()):
+                if vid in participating:
+                    self.negative_unl.remove(vid)
+                    _logger.info(
+                        f"[nUNL] Removed from Negative UNL (back online): {vid}"
+                    )
+
             # If we've reached final threshold and have agreement
             if threshold >= self.final_threshold and len(agreed) > 0:
                 self.phase = PHASE_ACCEPTED
@@ -409,14 +436,22 @@ cdef class ConsensusEngine:
         """
         Compute the set of tx_ids that appear in >= threshold fraction
         of honest (non-Byzantine) UNL proposals.
+
+        Validators on the Negative UNL are excluded from the quorum
+        denominator so the network can make progress even when some
+        validators are offline.
         """
         cdef dict vote_count = {}
         cdef int total = 0
         cdef str tx_id
+        # Determine effective validator set (exclude nUNL + Byzantine)
+        neg_unl_set = set(self.negative_unl.entries.keys()) if self.negative_unl else set()
 
         for vid, prop in self.proposals.items():
             if vid in self.byzantine_validators:
                 continue   # exclude Byzantine voters
+            if vid in neg_unl_set:
+                continue   # exclude Negative-UNL validators
             if vid in self.unl or vid == self.my_id:
                 total += 1
                 for tx_id in (<Proposal>prop).tx_ids:
@@ -425,13 +460,23 @@ cdef class ConsensusEngine:
                     else:
                         vote_count[tx_id] = 1
 
-        if total == 0:
+        # Use adjusted quorum if NegativeUNL is active
+        if self.negative_unl and self.negative_unl.size > 0:
+            adj_quorum = self.negative_unl.adjusted_quorum(
+                self.unl_size + 1, threshold,
+            )
+            # total must still meet the adjusted quorum denominator
+            effective_total = max(total, self.unl_size + 1 - len(neg_unl_set))
+        else:
+            effective_total = total
+
+        if effective_total == 0:
             return set()
 
         cdef set agreed = set()
         cdef int count
         for tx_id, count in vote_count.items():
-            if _vote_passes(count, total, threshold):
+            if _vote_passes(count, effective_total, threshold):
                 agreed.add(tx_id)
         return agreed
 

@@ -42,6 +42,11 @@ from nexaflow_core.xchain import XChainManager
 from nexaflow_core.hooks import HooksManager, HookOn
 from nexaflow_core.invariants import InvariantChecker
 from nexaflow_core.tx_metadata import MetadataBuilder
+from nexaflow_core.order_book import OrderBook
+from nexaflow_core.shamap import SHAMap
+from nexaflow_core.payment_path import PathFinder
+from nexaflow_core.trust_line import TrustGraph
+from nexaflow_core.directory import DirectoryManager
 
 
 # ── GIL-free arithmetic helpers ──────────────────────────────────────────────
@@ -136,6 +141,7 @@ cdef class AccountEntry:
     cdef public str domain           # domain verification string
     cdef public set deposit_preauth  # set of preauthorised addresses
     cdef public list tickets         # list of ticket_ids
+    cdef public str key_type         # "secp256k1" or "ed25519"
 
     def __init__(self, str address, double balance=0.0):
         self.address = address
@@ -157,6 +163,7 @@ cdef class AccountEntry:
         self.domain = ""
         self.deposit_preauth = set()
         self.tickets = []
+        self.key_type = "secp256k1"
 
     cpdef dict to_dict(self):
         cdef dict tl = {}
@@ -314,6 +321,8 @@ cdef class Ledger:
     cdef public object hooks_manager       # HooksManager instance
     cdef public object invariant_checker   # InvariantChecker instance
     cdef public list tx_metadata           # list of TransactionMetadata dicts
+    cdef public object order_book          # OrderBook instance
+    cdef public object directory_manager   # DirectoryManager instance
 
     def __init__(self, double total_supply=100_000_000_000.0,
                  str genesis_account="nGenesisNXF"):
@@ -346,6 +355,8 @@ cdef class Ledger:
         self.hooks_manager = HooksManager()
         self.invariant_checker = InvariantChecker()
         self.tx_metadata = []
+        self.order_book = OrderBook()
+        self.directory_manager = DirectoryManager()
 
         # Create genesis account with full supply
         cdef AccountEntry genesis = AccountEntry(genesis_account, total_supply)
@@ -437,6 +448,13 @@ cdef class Ledger:
             if not hasattr(tx, 'destination_tag') or tx.destination_tag == 0:
                 return 131  # tecDST_TAG_NEEDED
 
+        # ── Deposit Authorization enforcement ──
+        # If destination has deposit_auth enabled, only the account itself
+        # or pre-authorized senders can deposit.
+        if dst_acc.deposit_auth:
+            if src != dst and src not in dst_acc.deposit_preauth:
+                return 135  # tecDEPOSIT_AUTH
+
         # ── Global Freeze enforcement (Tier 1) ──
         # If the source account has global_freeze set, only payments
         # back to the issuer are allowed for IOUs.
@@ -487,7 +505,17 @@ cdef class Ledger:
             if src != iss:
                 tl_src = self.get_trust_line(src, cur, iss)
                 if tl_src is None:
-                    return 103  # tecNO_LINE
+                    # ── Multi-hop rippling fallback ──
+                    # No direct trust line from src to issuer; attempt
+                    # pathfinding through the trust graph.
+                    rc = self._try_multi_hop_payment(
+                        src, dst, cur, iss, amt, tx,
+                    )
+                    if rc == -1:
+                        return 103  # tecNO_LINE – no path found either
+                    # Multi-hop handler already adjusted all balances
+                    src_acc.sequence += 1
+                    return rc
                 # RequireAuth enforcement: issuer demands authorized lines
                 if iss_acc is not None and iss_acc.require_auth:
                     if not tl_src.authorized:
@@ -548,6 +576,109 @@ cdef class Ledger:
 
         # Bump sequence
         src_acc.sequence += 1
+        return 0  # tesSUCCESS
+
+    # ── Multi-hop rippling helpers ──
+
+    cpdef object _build_trust_graph(self):
+        """Build a TrustGraph snapshot from current ledger state."""
+        tg = TrustGraph()
+        tg.build_from_ledger(self)
+        return tg
+
+    cpdef int _try_multi_hop_payment(self, str src, str dst, str cur,
+                                      str iss, double amt, object tx):
+        """
+        Attempt a multi-hop IOU payment by finding a path through the
+        trust graph and executing rippling along each hop.
+
+        Returns:
+            0  on success (all balances adjusted along the path)
+           -1  when no path is found (caller should return tecNO_LINE)
+        """
+        tg = self._build_trust_graph()
+        pf = PathFinder(tg, self, self.order_book)
+        path = pf.find_best_path(src, dst, cur, amt)
+        if path is None:
+            return -1  # no route
+
+        # Execute rippling along the discovered hops.
+        # Each consecutive pair (hop_i, hop_{i+1}) represents an IOU
+        # transfer: hop_i sends currency to hop_{i+1} via their shared
+        # trust line.
+        hops = path.hops
+        remaining = min(amt, path.max_amount)
+        for i in range(len(hops) - 1):
+            sender_addr = hops[i][0]
+            receiver_addr = hops[i + 1][0]
+            hop_cur = hops[i][1]
+            hop_iss = hops[i][2] if hops[i][2] else iss
+
+            if hop_cur == "NXF":
+                # Native leg of a cross-currency bridge
+                s_acc = <AccountEntry>self.accounts.get(sender_addr)
+                r_acc = <AccountEntry>self.accounts.get(receiver_addr)
+                if s_acc is None or r_acc is None:
+                    return -1
+                if s_acc.balance < remaining:
+                    remaining = s_acc.balance
+                    if remaining <= 0:
+                        return -1
+                s_acc.balance -= remaining
+                r_acc.balance += remaining
+            else:
+                # IOU leg: adjust trust-line balances
+                if sender_addr == hop_iss:
+                    # Issuer sending: credit receiver's trust line
+                    tl_r = self.get_trust_line(receiver_addr, hop_cur, hop_iss)
+                    if tl_r is None:
+                        return -1
+                    if tl_r.frozen:
+                        return -1
+                    avail = tl_r.limit - tl_r.balance
+                    if avail < remaining:
+                        remaining = avail
+                        if remaining <= 0:
+                            return -1
+                    tl_r.balance += remaining
+                elif receiver_addr == hop_iss:
+                    # Sending back to issuer: debit sender's trust line
+                    tl_s = self.get_trust_line(sender_addr, hop_cur, hop_iss)
+                    if tl_s is None:
+                        return -1
+                    if tl_s.frozen:
+                        return -1
+                    if tl_s.balance < remaining:
+                        remaining = tl_s.balance
+                        if remaining <= 0:
+                            return -1
+                    tl_s.balance -= remaining
+                else:
+                    # Rippling through an intermediary: debit sender's line,
+                    # credit receiver's line, both toward hop_iss.
+                    tl_s = self.get_trust_line(sender_addr, hop_cur, hop_iss)
+                    tl_r = self.get_trust_line(receiver_addr, hop_cur, hop_iss)
+                    if tl_s is None or tl_r is None:
+                        return -1
+                    if tl_s.frozen or tl_r.frozen:
+                        return -1
+                    if tl_s.no_ripple:
+                        return -1
+                    if tl_s.balance < remaining:
+                        remaining = tl_s.balance
+                        if remaining <= 0:
+                            return -1
+                    avail = tl_r.limit - tl_r.balance
+                    if avail < remaining:
+                        remaining = avail
+                        if remaining <= 0:
+                            return -1
+                    tl_s.balance -= remaining
+                    tl_r.balance += remaining
+
+        # Record delivered amount for partial payments
+        if remaining < amt:
+            tx.delivered_amount = remaining
         return 0  # tesSUCCESS
 
     cpdef int _apply_confidential_payment(self, object tx):
@@ -680,8 +811,28 @@ cdef class Ledger:
             tx.result_code = 109  # tecSTAKE_DUPLICATE (reuse for general dup)
             return 109
 
-        # Capture invariant snapshot before applying
+        # ── Snapshot for rollback on invariant failure ──────────────────
         self.invariant_checker.capture(self)
+        # Deep-copy affected account state for rollback
+        _snapshot_accounts = {}
+        for _addr, _acc in self.accounts.items():
+            _snapshot_accounts[_addr] = (
+                _acc.balance, _acc.sequence, _acc.owner_count,
+            )
+        _snapshot_supply = self.total_supply
+        _snapshot_burned = self.total_burned
+        _snapshot_minted = self.total_minted
+
+        # ── MetadataBuilder ──
+        meta = MetadataBuilder(tx_hash=tx.tx_id or "", tx_index=len(self.pending_txns))
+        # Snapshot touched accounts
+        src_entry = self.accounts.get(tx.account)
+        if src_entry is not None:
+            meta.snapshot_account(tx.account, src_entry)
+        if hasattr(tx, 'destination') and tx.destination:
+            dst_entry = self.accounts.get(tx.destination)
+            if dst_entry is not None:
+                meta.snapshot_account(tx.destination, dst_entry)
 
         if tt == 0:      # Payment
             result = self.apply_payment(tx)
@@ -729,6 +880,8 @@ cdef class Ledger:
             result = self.apply_nftoken_offer_create(tx)
         elif tt == 28:   # NFTokenOfferAccept
             result = self.apply_nftoken_offer_accept(tx)
+        elif tt == 29:   # NFTokenOfferCancel
+            result = self.apply_nftoken_offer_cancel(tx)
         elif tt == 30:   # Stake
             result = self.apply_stake(tx)
         elif tt == 31:   # Unstake (early cancel)
@@ -786,12 +939,37 @@ cdef class Ledger:
         else:
             result = 0   # for simplicity, other types succeed
 
-        # Verify invariants after transaction
+        # Verify invariants after transaction; ROLLBACK on failure
         if result == 0:
             inv_ok, inv_msg = self.invariant_checker.verify(self)
             if not inv_ok:
-                # Invariant violation — reject (would ideally rollback)
+                # ── ROLLBACK all state changes ──
+                self.total_supply = _snapshot_supply
+                self.total_burned = _snapshot_burned
+                self.total_minted = _snapshot_minted
+                for _addr, (_bal, _seq, _oc) in _snapshot_accounts.items():
+                    _racc = self.accounts.get(_addr)
+                    if _racc is not None:
+                        _racc.balance = _bal
+                        _racc.sequence = _seq
+                        _racc.owner_count = _oc
                 result = 128  # tecINVARIANT_FAILED
+
+        # ── Build and store metadata ──
+        if result == 0:
+            # Record final state of touched accounts
+            src_entry = self.accounts.get(tx.account)
+            if src_entry is not None:
+                meta.record_account_modify(tx.account, src_entry)
+            if hasattr(tx, 'destination') and tx.destination:
+                dst_entry = self.accounts.get(tx.destination)
+                if dst_entry is not None:
+                    meta.record_account_modify(tx.destination, dst_entry)
+            if hasattr(tx, 'delivered_amount') and tx.delivered_amount >= 0:
+                meta.set_delivered_amount(tx.delivered_amount)
+        from nexaflow_core.transaction import RESULT_NAMES
+        meta.set_result(result, RESULT_NAMES.get(result, "unknown"))
+        self.tx_metadata.append(meta.build())
 
         tx.result_code = result
         if result == 0:
@@ -841,26 +1019,28 @@ cdef class Ledger:
         # then by sequence (ascending), then by tx_id as tiebreaker.
         self.pending_txns.sort(key=_canonical_tx_sort_key)
 
-        # Transaction merkle hash (simplified: hash of all tx_ids concatenated)
-        cdef bytes tx_blob = b""
+        # Transaction merkle hash — use SHAMap Merkle trie
+        tx_trie = SHAMap()
         for tx in self.pending_txns:
-            tx_blob += tx.tx_id.encode("utf-8")
-        header.tx_hash = hashlib.blake2b(tx_blob, digest_size=32).hexdigest() if tx_blob else "0" * 64
+            tx_id_str = tx.tx_id if tx.tx_id else ""
+            if tx_id_str:
+                tx_trie.insert(tx_id_str.encode("utf-8"), tx_id_str.encode("utf-8"))
+        tx_root = tx_trie.root_hash
+        header.tx_hash = tx_root.hex() if tx_root else "0" * 64
 
-        # State hash (simplified: hash of all account balances + confidential state)
-        cdef bytes state_blob = b""
+        # State hash — use SHAMap Merkle trie over all accounts
+        state_trie = SHAMap()
         for addr in sorted(self.accounts.keys()):
             acc = self.accounts[addr]
-            state_blob += addr.encode("utf-8")
-            state_blob += struct.pack(">d", acc.balance)
-            state_blob += struct.pack(">q", acc.sequence)
-        # Include commitment to confidential UTXOs and spent key images
-        state_blob += struct.pack(">q", len(self.confidential_outputs))
-        state_blob += struct.pack(">q", len(self.spent_key_images))
+            state_val = addr + ":" + str(acc.balance) + ":" + str(acc.sequence)
+            state_trie.insert(addr.encode("utf-8"), state_val.encode("utf-8"))
+        # Include confidential state
         for sa_hex in sorted(self.confidential_outputs.keys()):
             out = self.confidential_outputs[sa_hex]
-            state_blob += out.commitment
-        header.state_hash = hashlib.blake2b(state_blob, digest_size=32).hexdigest()
+            ct_key = ("ct:" + sa_hex).encode("utf-8")
+            state_trie.insert(ct_key, out.commitment.hex().encode("utf-8"))
+        state_root = state_trie.root_hash
+        header.state_hash = state_root.hex() if state_root else "0" * 64
 
         header.total_nxf = self.total_supply
         header.compute_hash()
@@ -875,8 +1055,9 @@ cdef class Ledger:
     cpdef int apply_offer_create(self, object tx):
         """Apply an OfferCreate transaction.
 
-        Validates sequence, deducts fee, records the offer, and
-        increments the account sequence.
+        Validates sequence, deducts fee, records the offer, attempts to
+        cross against existing offers via the OrderBook, and increments
+        the account sequence.
         """
         cdef str src = tx.account
         cdef AccountEntry src_acc = self.accounts.get(src)
@@ -894,7 +1075,6 @@ cdef class Ledger:
         if tx.sequence != 0 and tx.sequence != src_acc.sequence:
             return 105  # tecBAD_SEQ
 
-        # Record the open offer on the account
         # ── Offer execution flags (Tier 1) ──────────────────────────────
         cdef str time_in_force = "GTC"  # default: Good-Til-Cancelled
         cdef bint tf_sell = False
@@ -906,6 +1086,50 @@ cdef class Ledger:
             if tx.flags.get("tfSell"):
                 tf_sell = True
 
+        # ── DEX Offer Crossing via OrderBook ──────────────────────────
+        # Determine pair, side, price from taker_pays / taker_gets
+        taker_pays = tx.taker_pays   # what the offerer pays (what taker receives)
+        taker_gets = tx.taker_gets   # what the offerer receives (what taker pays)
+        base_currency = ""
+        counter_currency = ""
+        price = 0.0
+        quantity = 0.0
+        side = "sell"
+
+        if taker_pays is not None and taker_gets is not None:
+            base_currency = getattr(taker_gets, 'currency', '') or "NXF"
+            counter_currency = getattr(taker_pays, 'currency', '') or "NXF"
+            pair = base_currency + "/" + counter_currency
+            if taker_gets.value > 0:
+                price = taker_pays.value / taker_gets.value
+            quantity = taker_gets.value
+
+            # Check if auto-bridging is needed (cross-currency, neither is NXF)
+            if base_currency != "NXF" and counter_currency != "NXF":
+                fills = self.order_book.submit_auto_bridged_order(
+                    account=src,
+                    src_currency=counter_currency,
+                    dst_currency=base_currency,
+                    side=side,
+                    amount=quantity,
+                    order_id=tx.tx_id,
+                )
+            else:
+                fills = self.order_book.submit_order(
+                    account=src,
+                    pair=pair,
+                    side=side,
+                    price=price,
+                    quantity=quantity,
+                    order_id=tx.tx_id,
+                    time_in_force=time_in_force,
+                )
+
+            # Apply fills to ledger state (settle matched amounts)
+            for fill in fills:
+                self._settle_offer_fill(fill, base_currency, counter_currency)
+
+        # Record the open offer on the account
         src_acc.open_offers.append({
             "taker_pays": tx.taker_pays,
             "taker_gets": tx.taker_gets,
@@ -914,13 +1138,6 @@ cdef class Ledger:
             "tf_sell": tf_sell,
         })
         src_acc.owner_count += 1
-
-        # If IOC: immediately check if any matching counter-offers exist
-        # and remove the offer if it can't be filled right away.
-        if time_in_force == "IOC":
-            # Offer stays only for current ledger close matching — mark for
-            # removal at close if not matched.
-            pass
 
         src_acc.sequence += 1
         return 0  # tesSUCCESS
@@ -957,6 +1174,54 @@ cdef class Ledger:
 
         src_acc.sequence += 1
         return 0  # tesSUCCESS
+
+    def _settle_offer_fill(self, fill, base_currency, counter_currency):
+        """Settle a single DEX fill — transfer assets between maker and taker."""
+        maker_acc = self.accounts.get(fill.maker_order_id.split("-")[0]) if "-" in fill.maker_order_id else None
+        taker_acc = self.accounts.get(fill.taker_order_id.split("-")[0]) if "-" in fill.taker_order_id else None
+
+        # Look up accounts by iterating the order book's order registry
+        maker_order = self.order_book.get_order(fill.maker_order_id)
+        taker_order = self.order_book.get_order(fill.taker_order_id)
+        if maker_order is None or taker_order is None:
+            return
+
+        maker_acc = self.accounts.get(maker_order.account)
+        taker_acc = self.accounts.get(taker_order.account)
+        if maker_acc is None or taker_acc is None:
+            return
+
+        # fill.quantity is in base currency; fill.price * fill.quantity is counter
+        base_amount = fill.quantity
+        counter_amount = fill.price * fill.quantity
+
+        # Taker sells base → taker base decreases, maker base increases
+        # Taker buys counter ← maker counter decreases, taker counter increases
+        if base_currency == "NXF":
+            # Base is native NXF
+            if taker_acc.balance >= base_amount:
+                taker_acc.balance -= base_amount
+                maker_acc.balance += base_amount
+        else:
+            # Base is IOU — adjust trust lines
+            tl_taker = self.get_trust_line(taker_order.account, base_currency, "")
+            tl_maker = self.get_trust_line(maker_order.account, base_currency, "")
+            if tl_taker is not None:
+                tl_taker.balance -= base_amount
+            if tl_maker is not None:
+                tl_maker.balance += base_amount
+
+        if counter_currency == "NXF":
+            if maker_acc.balance >= counter_amount:
+                maker_acc.balance -= counter_amount
+                taker_acc.balance += counter_amount
+        else:
+            tl_maker_c = self.get_trust_line(maker_order.account, counter_currency, "")
+            tl_taker_c = self.get_trust_line(taker_order.account, counter_currency, "")
+            if tl_maker_c is not None:
+                tl_maker_c.balance -= counter_amount
+            if tl_taker_c is not None:
+                tl_taker_c.balance += counter_amount
 
     # ---- staking: apply / cancel / maturity ----
 
@@ -1055,6 +1320,17 @@ cdef class Ledger:
         acc.balance += payout
         self.total_supply -= principal_penalty
         self.total_burned += principal_penalty
+
+        # Interest earned is newly minted NXF; negative means additional
+        # forfeit beyond the principal penalty (burned)
+        cdef double interest_earned = payout - (record.amount - principal_penalty)
+        if interest_earned > 1e-10:
+            self.total_supply += interest_earned
+            self.total_minted += interest_earned
+        elif interest_earned < -1e-10:
+            # Extra forfeit: staker gets back less than principal - penalty
+            self.total_supply += interest_earned   # further reduce supply
+            self.total_burned -= interest_earned   # track as additional burn
 
         acc.sequence += 1
         return 0  # tesSUCCESS
@@ -1728,6 +2004,35 @@ cdef class Ledger:
                 acc.balance += offer.amount
                 if buyer_acc.owner_count > 0:
                     buyer_acc.owner_count -= 1
+        acc.sequence += 1
+        return 0
+
+    cpdef int apply_nftoken_offer_cancel(self, object tx):
+        """Cancel an outstanding NFToken offer owned by the sender."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        offer_id = tx.flags.get("offer_id", "")
+        if not offer_id:
+            return 110  # tecNO_PERMISSION – missing offer_id
+        # Look up and remove the offer via nftoken_manager
+        offer = self.nftoken_manager.offers.get(offer_id)
+        if offer is None:
+            return 117  # tecNO_ENTRY
+        if offer.owner != src:
+            return 110  # tecNO_PERMISSION – not your offer
+        # Remove from manager indices
+        del self.nftoken_manager.offers[offer_id]
+        offer.cancelled = True
+        acc.owner_count = max(0, acc.owner_count - 1)
         acc.sequence += 1
         return 0
 

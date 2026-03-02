@@ -330,6 +330,8 @@ class APIServer:
         app.router.add_post("/admin/stop", self._admin_stop)
         app.router.add_get("/admin/peers", self._admin_peers)
         app.router.add_post("/admin/log_level", self._admin_log_level)
+        # ── Pathfinding ──
+        app.router.add_post("/path_find", self._path_find)
 
     # ── handlers ─────────────────────────────────────────────────
 
@@ -1473,6 +1475,63 @@ class APIServer:
         logging.getLogger("nexaflow").setLevel(getattr(logging, level))
         logging.getLogger("nexaflow_api").setLevel(getattr(logging, level))
         return web.json_response({"status": "ok", "level": level})
+
+    # ── Pathfinding ──────────────────────────────────────────────
+
+    async def _path_find(self, request: web.Request) -> web.Response:
+        """
+        POST /path_find  (ripple_path_find equivalent)
+        Body: {
+          "source": "rSrc",
+          "destination": "rDst",
+          "currency": "USD",
+          "amount": 100.0,
+          "source_currency": "",  // optional, for cross-currency
+          "max_paths": 5          // optional
+        }
+        Returns discovered payment paths with hops and max amounts.
+        """
+        try:
+            body = await request.json()
+        except Exception as exc:
+            raise web.HTTPBadRequest(text="Invalid JSON body") from exc
+
+        source = body.get("source", "")
+        destination = body.get("destination", "")
+        currency = body.get("currency", "NXF")
+        amount = _safe_float(body.get("amount", 0), "amount")
+        source_currency = body.get("source_currency", "")
+        max_paths = int(body.get("max_paths", 5))
+
+        if not source or not destination or amount <= 0:
+            raise web.HTTPBadRequest(
+                text="source, destination, and positive amount required"
+            )
+
+        from nexaflow_core.payment_path import PathFinder
+        from nexaflow_core.trust_line import TrustGraph
+
+        ledger = self.node.ledger
+        tg = TrustGraph()
+        tg.build_from_ledger(ledger)
+        pf = PathFinder(tg, ledger, getattr(ledger, "order_book", None))
+
+        paths = pf.find_paths(
+            source=source,
+            destination=destination,
+            currency=currency,
+            amount=amount,
+            max_paths=max_paths,
+            source_currency=source_currency,
+        )
+
+        return web.json_response({
+            "source": source,
+            "destination": destination,
+            "currency": currency,
+            "amount": amount,
+            "alternatives": [p.to_dict() for p in paths],
+        })
 
 
 def _json_dumps(obj: Any) -> str:
