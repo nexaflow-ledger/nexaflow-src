@@ -468,8 +468,9 @@ class TestAccountDeleteHandler(unittest.TestCase):
 
     def test_delete_transfers_balance(self):
         ledger, acc = _ledger_with_funded()
+        acc.sequence = 256  # must have consumed 256+ seqs to delete
         ledger.create_account("rBob", 50.0)
-        tx = create_account_delete("rAlice", "rBob", fee=5.0, sequence=1)
+        tx = create_account_delete("rAlice", "rBob", fee=5.0, sequence=256)
         rc = _apply(ledger, tx)
         self.assertEqual(rc, 0)
         self.assertFalse(ledger.account_exists("rAlice"))
@@ -479,24 +480,27 @@ class TestAccountDeleteHandler(unittest.TestCase):
 
     def test_delete_with_owned_objects_fails(self):
         ledger, acc = _ledger_with_funded()
+        acc.sequence = 256
         acc.owner_count = 1  # simulate owned object
         ledger.create_account("rBob", 0.0)
-        tx = create_account_delete("rAlice", "rBob", fee=5.0, sequence=1)
+        tx = create_account_delete("rAlice", "rBob", fee=5.0, sequence=256)
         rc = _apply(ledger, tx)
         self.assertEqual(rc, 110)  # tecNO_PERMISSION
 
     def test_delete_with_trust_lines_fails(self):
         ledger, acc = _ledger_with_funded()
+        acc.sequence = 256
         # Set up a trust line
         ledger.set_trust_line("rAlice", "USD", "rIssuer", 1000.0)
         ledger.create_account("rBob", 0.0)
-        tx = create_account_delete("rAlice", "rBob", fee=5.0, sequence=1)
+        tx = create_account_delete("rAlice", "rBob", fee=5.0, sequence=256)
         rc = _apply(ledger, tx)
         self.assertEqual(rc, 110)
 
     def test_delete_to_nonexistent_destination(self):
         ledger, acc = _ledger_with_funded()
-        tx = create_account_delete("rAlice", "rNonExist", fee=5.0, sequence=1)
+        acc.sequence = 256
+        tx = create_account_delete("rAlice", "rNonExist", fee=5.0, sequence=256)
         rc = _apply(ledger, tx)
         self.assertEqual(rc, 101)
 

@@ -16,48 +16,82 @@ from __future__ import annotations
 from nexaflow_core.staking import MIN_STAKE_AMOUNT, StakeTier
 from nexaflow_core.transaction import (
     TEC_AMENDMENT_BLOCKED,
+    TEC_AMM_BALANCE,
     TEC_BAD_SEQ,
     TEC_BAD_SIG,
     TEC_CHECK_EXPIRED,
+    TEC_CLAWBACK_DISABLED,
+    TEC_CREDENTIAL_EXISTS,
+    TEC_DID_EXISTS,
     TEC_ESCROW_BAD_CONDITION,
     TEC_ESCROW_NOT_READY,
     TEC_FROZEN,
+    TEC_HOOKS_REJECTED,
     TEC_INSUF_FEE,
     TEC_KEY_IMAGE_SPENT,
+    TEC_MPT_MAX_SUPPLY,
     TEC_NFTOKEN_EXISTS,
     TEC_NO_ENTRY,
     TEC_NO_LINE,
     TEC_NO_PERMISSION,
     TEC_NO_RIPPLE,
+    TEC_ORACLE_LIMIT,
     TEC_PAYCHAN_EXPIRED,
+    TEC_REQUIRE_AUTH,
     TEC_STAKE_DUPLICATE,
     TEC_STAKE_LOCKED,
     TEC_UNFUNDED,
+    TEC_XCHAIN_NO_QUORUM,
     TES_SUCCESS,
     TT_ACCOUNT_DELETE,
     TT_ACCOUNT_SET,
+    TT_AMM_BID,
+    TT_AMM_CREATE,
+    TT_AMM_DELETE,
+    TT_AMM_DEPOSIT,
+    TT_AMM_VOTE,
+    TT_AMM_WITHDRAW,
     TT_CHECK_CANCEL,
     TT_CHECK_CASH,
     TT_CHECK_CREATE,
+    TT_CLAWBACK,
+    TT_CREDENTIAL_ACCEPT,
+    TT_CREDENTIAL_CREATE,
+    TT_CREDENTIAL_DELETE,
     TT_DEPOSIT_PREAUTH,
+    TT_DID_DELETE,
+    TT_DID_SET,
     TT_ESCROW_CANCEL,
     TT_ESCROW_CREATE,
     TT_ESCROW_FINISH,
+    TT_MPT_AUTHORIZE,
+    TT_MPT_ISSUANCE_CREATE,
+    TT_MPT_ISSUANCE_DESTROY,
+    TT_MPT_ISSUANCE_SET,
     TT_NFTOKEN_BURN,
     TT_NFTOKEN_MINT,
     TT_NFTOKEN_OFFER_ACCEPT,
     TT_NFTOKEN_OFFER_CREATE,
     TT_OFFER_CREATE,
     TT_OFFER_CANCEL,
+    TT_ORACLE_DELETE,
+    TT_ORACLE_SET,
     TT_PAYCHAN_CLAIM,
     TT_PAYCHAN_CREATE,
     TT_PAYCHAN_FUND,
+    TT_SET_HOOK,
     TT_SET_REGULAR_KEY,
     TT_SIGNER_LIST_SET,
     TT_STAKE,
     TT_TICKET_CREATE,
     TT_TRUST_SET,
     TT_UNSTAKE,
+    TT_XCHAIN_ACCOUNT_CREATE,
+    TT_XCHAIN_ADD_ATTESTATION,
+    TT_XCHAIN_CLAIM,
+    TT_XCHAIN_COMMIT,
+    TT_XCHAIN_CREATE_BRIDGE,
+    TT_XCHAIN_CREATE_CLAIM_ID,
     Transaction,
 )
 
@@ -181,6 +215,50 @@ class TransactionValidator:
             elif tx.tx_type in (TT_OFFER_CREATE, TT_OFFER_CANCEL):
                 if src_acc.balance < fee_val:
                     return False, TEC_INSUF_FEE, "Cannot cover fee"
+            elif tx.tx_type == TT_CLAWBACK:
+                return self._validate_clawback(tx, src_acc, fee_val)
+            elif tx.tx_type == TT_AMM_CREATE:
+                return self._validate_amm_create(tx, src_acc, fee_val, required_reserve)
+            elif tx.tx_type in (TT_AMM_DEPOSIT, TT_AMM_WITHDRAW, TT_AMM_VOTE,
+                                TT_AMM_BID, TT_AMM_DELETE):
+                return self._validate_amm_op(tx, src_acc, fee_val)
+            elif tx.tx_type == TT_ORACLE_SET:
+                return self._validate_oracle_set(tx, src_acc, fee_val)
+            elif tx.tx_type == TT_ORACLE_DELETE:
+                return self._validate_oracle_delete(tx, src_acc, fee_val)
+            elif tx.tx_type == TT_DID_SET:
+                return self._validate_did_set(tx, src_acc, fee_val)
+            elif tx.tx_type == TT_DID_DELETE:
+                if src_acc.balance < fee_val:
+                    return False, TEC_INSUF_FEE, "Cannot cover fee"
+            elif tx.tx_type == TT_MPT_ISSUANCE_CREATE:
+                return self._validate_mpt_issuance_create(tx, src_acc, fee_val)
+            elif tx.tx_type == TT_MPT_ISSUANCE_DESTROY:
+                return self._validate_mpt_issuance_destroy(tx, src_acc, fee_val)
+            elif tx.tx_type == TT_MPT_AUTHORIZE:
+                return self._validate_mpt_authorize(tx, src_acc, fee_val)
+            elif tx.tx_type == TT_MPT_ISSUANCE_SET:
+                if src_acc.balance < fee_val:
+                    return False, TEC_INSUF_FEE, "Cannot cover fee"
+            elif tx.tx_type == TT_CREDENTIAL_CREATE:
+                return self._validate_credential_create(tx, src_acc, fee_val)
+            elif tx.tx_type == TT_CREDENTIAL_ACCEPT:
+                return self._validate_credential_accept(tx, src_acc, fee_val)
+            elif tx.tx_type == TT_CREDENTIAL_DELETE:
+                if src_acc.balance < fee_val:
+                    return False, TEC_INSUF_FEE, "Cannot cover fee"
+            elif tx.tx_type == TT_XCHAIN_CREATE_BRIDGE:
+                return self._validate_xchain_create_bridge(tx, src_acc, fee_val, required_reserve)
+            elif tx.tx_type == TT_XCHAIN_CREATE_CLAIM_ID:
+                return self._validate_xchain_create_claim_id(tx, src_acc, fee_val)
+            elif tx.tx_type == TT_XCHAIN_COMMIT:
+                return self._validate_xchain_commit(tx, src_acc, fee_val, required_reserve)
+            elif tx.tx_type in (TT_XCHAIN_CLAIM, TT_XCHAIN_ADD_ATTESTATION,
+                                TT_XCHAIN_ACCOUNT_CREATE):
+                if src_acc.balance < fee_val:
+                    return False, TEC_INSUF_FEE, "Cannot cover fee"
+            elif tx.tx_type == TT_SET_HOOK:
+                return self._validate_set_hook(tx, src_acc, fee_val)
             else:
                 if src_acc.balance < fee_val:
                     return False, TEC_INSUF_FEE, "Cannot cover fee"
@@ -454,6 +532,191 @@ class TransactionValidator:
         if offer.is_sell and offer.amount > 0:
             if src_acc.balance < offer.amount + fee_val:
                 return False, TEC_UNFUNDED, "Insufficient balance to accept sell offer"
+        return True, TES_SUCCESS, "Valid"
+
+    # ---- Tier 1-3 validators ----
+
+    def _validate_clawback(self, tx, src_acc, fee_val):
+        if src_acc.balance < fee_val:
+            return False, TEC_INSUF_FEE, "Cannot cover fee"
+        if not getattr(src_acc, "allow_clawback", False):
+            return False, TEC_CLAWBACK_DISABLED, "Account does not have clawback enabled"
+        if not tx.destination:
+            return False, TEC_NO_PERMISSION, "Clawback requires a destination (holder)"
+        amt = tx.amount
+        if amt.is_native():
+            return False, TEC_NO_PERMISSION, "Cannot clawback native NXF"
+        if amt.issuer != tx.account:
+            return False, TEC_NO_PERMISSION, "Only issuer can clawback"
+        return True, TES_SUCCESS, "Valid"
+
+    def _validate_amm_create(self, tx, src_acc, fee_val, required_reserve):
+        if src_acc.balance < fee_val:
+            return False, TEC_INSUF_FEE, "Cannot cover fee"
+        flags = tx.flags or {}
+        amount_a = flags.get("amount_a", 0)
+        amount_b = flags.get("amount_b", 0)
+        if amount_a <= 0 or amount_b <= 0:
+            return False, TEC_AMM_BALANCE, "Both pool amounts must be positive"
+        asset_a = flags.get("asset_a", "")
+        asset_b = flags.get("asset_b", "")
+        if not asset_a or not asset_b:
+            return False, TEC_AMM_BALANCE, "Both assets must be specified"
+        if asset_a == asset_b:
+            return False, TEC_AMM_BALANCE, "Assets must be different"
+        # If native is involved, check balance covers it
+        if asset_a == "NXF":
+            needed = amount_a + fee_val
+            if src_acc.balance - needed < required_reserve:
+                return False, TEC_UNFUNDED, "Insufficient NXF for pool deposit + reserve"
+        elif asset_b == "NXF":
+            needed = amount_b + fee_val
+            if src_acc.balance - needed < required_reserve:
+                return False, TEC_UNFUNDED, "Insufficient NXF for pool deposit + reserve"
+        return True, TES_SUCCESS, "Valid"
+
+    def _validate_amm_op(self, tx, src_acc, fee_val):
+        """Common validation for AMM deposit/withdraw/vote/bid/delete."""
+        if src_acc.balance < fee_val:
+            return False, TEC_INSUF_FEE, "Cannot cover fee"
+        flags = tx.flags or {}
+        pool_id = flags.get("pool_id", "")
+        if not pool_id:
+            return False, TEC_NO_ENTRY, "Missing pool_id"
+        if hasattr(self.ledger, "amm_manager"):
+            pool = self.ledger.amm_manager.get_pool(pool_id)
+            if pool is None:
+                return False, TEC_NO_ENTRY, f"AMM pool {pool_id} not found"
+        return True, TES_SUCCESS, "Valid"
+
+    def _validate_oracle_set(self, tx, src_acc, fee_val):
+        if src_acc.balance < fee_val:
+            return False, TEC_INSUF_FEE, "Cannot cover fee"
+        flags = tx.flags or {}
+        base_asset = flags.get("base_asset", "")
+        quote_asset = flags.get("quote_asset", "")
+        if not base_asset or not quote_asset:
+            return False, TEC_NO_PERMISSION, "Oracle requires base_asset and quote_asset"
+        prices = flags.get("prices", [])
+        if not prices:
+            return False, TEC_NO_PERMISSION, "Oracle requires at least one price entry"
+        if len(prices) > 10:
+            return False, TEC_ORACLE_LIMIT, "Maximum 10 price entries per oracle"
+        return True, TES_SUCCESS, "Valid"
+
+    def _validate_oracle_delete(self, tx, src_acc, fee_val):
+        if src_acc.balance < fee_val:
+            return False, TEC_INSUF_FEE, "Cannot cover fee"
+        flags = tx.flags or {}
+        oracle_id = flags.get("oracle_id", "")
+        if not oracle_id:
+            return False, TEC_NO_ENTRY, "Missing oracle_id"
+        return True, TES_SUCCESS, "Valid"
+
+    def _validate_did_set(self, tx, src_acc, fee_val):
+        if src_acc.balance < fee_val:
+            return False, TEC_INSUF_FEE, "Cannot cover fee"
+        flags = tx.flags or {}
+        # At least one of document, uri, or data must be set
+        doc = flags.get("document", "")
+        uri = flags.get("uri", "")
+        data = flags.get("data", "")
+        if not doc and not uri and not data:
+            return False, TEC_NO_PERMISSION, "DID requires at least document, uri, or data"
+        return True, TES_SUCCESS, "Valid"
+
+    def _validate_mpt_issuance_create(self, tx, src_acc, fee_val):
+        if src_acc.balance < fee_val:
+            return False, TEC_INSUF_FEE, "Cannot cover fee"
+        flags = tx.flags or {}
+        max_supply = flags.get("max_supply", 0)
+        if max_supply < 0:
+            return False, TEC_MPT_MAX_SUPPLY, "max_supply cannot be negative"
+        return True, TES_SUCCESS, "Valid"
+
+    def _validate_mpt_issuance_destroy(self, tx, src_acc, fee_val):
+        if src_acc.balance < fee_val:
+            return False, TEC_INSUF_FEE, "Cannot cover fee"
+        flags = tx.flags or {}
+        mpt_id = flags.get("mpt_issuance_id", "")
+        if not mpt_id:
+            return False, TEC_NO_ENTRY, "Missing mpt_issuance_id"
+        return True, TES_SUCCESS, "Valid"
+
+    def _validate_mpt_authorize(self, tx, src_acc, fee_val):
+        if src_acc.balance < fee_val:
+            return False, TEC_INSUF_FEE, "Cannot cover fee"
+        flags = tx.flags or {}
+        mpt_id = flags.get("mpt_issuance_id", "")
+        if not mpt_id:
+            return False, TEC_NO_ENTRY, "Missing mpt_issuance_id"
+        return True, TES_SUCCESS, "Valid"
+
+    def _validate_credential_create(self, tx, src_acc, fee_val):
+        if src_acc.balance < fee_val:
+            return False, TEC_INSUF_FEE, "Cannot cover fee"
+        if not tx.destination:
+            return False, TEC_NO_PERMISSION, "Credential requires a subject (destination)"
+        flags = tx.flags or {}
+        cred_type = flags.get("credential_type", "")
+        if not cred_type:
+            return False, TEC_NO_PERMISSION, "Missing credential_type"
+        return True, TES_SUCCESS, "Valid"
+
+    def _validate_credential_accept(self, tx, src_acc, fee_val):
+        if src_acc.balance < fee_val:
+            return False, TEC_INSUF_FEE, "Cannot cover fee"
+        flags = tx.flags or {}
+        credential_id = flags.get("credential_id", "")
+        if not credential_id:
+            return False, TEC_NO_ENTRY, "Missing credential_id"
+        return True, TES_SUCCESS, "Valid"
+
+    def _validate_xchain_create_bridge(self, tx, src_acc, fee_val, required_reserve):
+        if src_acc.balance < fee_val:
+            return False, TEC_INSUF_FEE, "Cannot cover fee"
+        flags = tx.flags or {}
+        locking_chain_door = flags.get("locking_chain_door", "")
+        issuing_chain_door = flags.get("issuing_chain_door", "")
+        if not locking_chain_door or not issuing_chain_door:
+            return False, TEC_NO_PERMISSION, "Bridge requires locking_chain_door and issuing_chain_door"
+        witnesses = flags.get("witness_accounts", [])
+        if len(witnesses) < 1:
+            return False, TEC_XCHAIN_NO_QUORUM, "Bridge requires at least one witness"
+        return True, TES_SUCCESS, "Valid"
+
+    def _validate_xchain_create_claim_id(self, tx, src_acc, fee_val):
+        if src_acc.balance < fee_val:
+            return False, TEC_INSUF_FEE, "Cannot cover fee"
+        flags = tx.flags or {}
+        bridge_id = flags.get("bridge_id", "")
+        if not bridge_id:
+            return False, TEC_NO_ENTRY, "Missing bridge_id"
+        return True, TES_SUCCESS, "Valid"
+
+    def _validate_xchain_commit(self, tx, src_acc, fee_val, required_reserve):
+        if src_acc.balance < fee_val:
+            return False, TEC_INSUF_FEE, "Cannot cover fee"
+        amt_val = tx.amount.value if hasattr(tx.amount, 'value') else float(tx.amount)
+        needed = amt_val + fee_val
+        if src_acc.balance - needed < required_reserve:
+            return False, TEC_UNFUNDED, "Insufficient balance for cross-chain commit + reserve"
+        flags = tx.flags or {}
+        bridge_id = flags.get("bridge_id", "")
+        if not bridge_id:
+            return False, TEC_NO_ENTRY, "Missing bridge_id"
+        return True, TES_SUCCESS, "Valid"
+
+    def _validate_set_hook(self, tx, src_acc, fee_val):
+        if src_acc.balance < fee_val:
+            return False, TEC_INSUF_FEE, "Cannot cover fee"
+        flags = tx.flags or {}
+        hook_hash = flags.get("hook_hash", "")
+        if not hook_hash:
+            # Deleting hooks doesn't need a hash
+            action = flags.get("action", "set")
+            if action == "set":
+                return False, TEC_NO_ENTRY, "Missing hook_hash for SetHook"
         return True, TES_SUCCESS, "Valid"
 
     def validate_batch(self, txns: list) -> list:

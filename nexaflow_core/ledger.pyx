@@ -33,6 +33,15 @@ from nexaflow_core.multi_sign import MultiSignManager
 from nexaflow_core.amendments import AmendmentManager
 from nexaflow_core.nftoken import NFTokenManager
 from nexaflow_core.ticket import TicketManager
+from nexaflow_core.amm import AMMManager
+from nexaflow_core.oracle import OracleManager
+from nexaflow_core.did import DIDManager
+from nexaflow_core.mpt import MPTManager
+from nexaflow_core.credentials import CredentialManager
+from nexaflow_core.xchain import XChainManager
+from nexaflow_core.hooks import HooksManager, HookOn
+from nexaflow_core.invariants import InvariantChecker
+from nexaflow_core.tx_metadata import MetadataBuilder
 
 
 # ── GIL-free arithmetic helpers ──────────────────────────────────────────────
@@ -121,6 +130,8 @@ cdef class AccountEntry:
     cdef public bint default_ripple  # asfDefaultRipple
     cdef public bint global_freeze   # asfGlobalFreeze
     cdef public bint deposit_auth    # asfDepositAuth
+    cdef public bint allow_clawback  # asfAllowClawback (XLS-39)
+    cdef public bint require_auth    # asfRequireAuth
     cdef public str regular_key      # SetRegularKey address
     cdef public str domain           # domain verification string
     cdef public set deposit_preauth  # set of preauthorised addresses
@@ -140,6 +151,8 @@ cdef class AccountEntry:
         self.default_ripple = False
         self.global_freeze = False
         self.deposit_auth = False
+        self.allow_clawback = False
+        self.require_auth = False
         self.regular_key = ""
         self.domain = ""
         self.deposit_preauth = set()
@@ -258,6 +271,10 @@ cdef class LedgerHeader:
 #  Main Ledger
 # ===================================================================
 
+def _canonical_tx_sort_key(tx):
+    """Sort key for deterministic transaction ordering in closed ledgers."""
+    return (tx.tx_type, tx.account, tx.sequence, tx.tx_id)
+
 cdef class Ledger:
     """
     The current mutable ledger state plus history of closed ledgers.
@@ -288,6 +305,15 @@ cdef class Ledger:
     cdef public object amendment_manager   # AmendmentManager instance
     cdef public object nftoken_manager     # NFTokenManager instance
     cdef public object ticket_manager      # TicketManager instance
+    cdef public object amm_manager         # AMMManager instance
+    cdef public object oracle_manager      # OracleManager instance
+    cdef public object did_manager         # DIDManager instance
+    cdef public object mpt_manager         # MPTManager instance
+    cdef public object credential_manager  # CredentialManager instance
+    cdef public object xchain_manager      # XChainManager instance
+    cdef public object hooks_manager       # HooksManager instance
+    cdef public object invariant_checker   # InvariantChecker instance
+    cdef public list tx_metadata           # list of TransactionMetadata dicts
 
     def __init__(self, double total_supply=100_000_000_000.0,
                  str genesis_account="nGenesisNXF"):
@@ -311,6 +337,15 @@ cdef class Ledger:
         self.amendment_manager = AmendmentManager()
         self.nftoken_manager = NFTokenManager()
         self.ticket_manager = TicketManager()
+        self.amm_manager = AMMManager()
+        self.oracle_manager = OracleManager()
+        self.did_manager = DIDManager()
+        self.mpt_manager = MPTManager()
+        self.credential_manager = CredentialManager()
+        self.xchain_manager = XChainManager()
+        self.hooks_manager = HooksManager()
+        self.invariant_checker = InvariantChecker()
+        self.tx_metadata = []
 
         # Create genesis account with full supply
         cdef AccountEntry genesis = AccountEntry(genesis_account, total_supply)
@@ -395,6 +430,20 @@ cdef class Ledger:
         if tx.sequence != 0 and tx.sequence != src_acc.sequence:
             return 105  # tecBAD_SEQ
 
+        # ── RequireDest enforcement (Tier 1) ──
+        # If destination has asfRequireDest set, payment MUST carry a
+        # non-zero destination_tag.
+        if dst_acc.require_dest:
+            if not hasattr(tx, 'destination_tag') or tx.destination_tag == 0:
+                return 131  # tecDST_TAG_NEEDED
+
+        # ── Global Freeze enforcement (Tier 1) ──
+        # If the source account has global_freeze set, only payments
+        # back to the issuer are allowed for IOUs.
+        if src_acc.global_freeze and not amount.is_native():
+            if dst != amount.issuer:
+                return 132  # tecGLOBAL_FREEZE
+
         cdef double amt = amount.value
         cdef double fee_val = fee.value
         cdef str cur
@@ -424,35 +473,78 @@ cdef class Ledger:
             self.total_supply -= fee_val
             self.total_burned += fee_val
 
+            # ── Issuer-level freeze / auth checks (Tier 1) ──
+            iss_acc = self.accounts.get(iss)
+            if iss_acc is not None:
+                # Global freeze on issuer blocks ALL IOU movement except
+                # payments returning tokens to the issuer.
+                if iss_acc.global_freeze:
+                    if src != iss and dst != iss:
+                        return 132  # tecGLOBAL_FREEZE
+
             # Check sender's trust line (or sender is issuer)
             effective_amt = amt
             if src != iss:
                 tl_src = self.get_trust_line(src, cur, iss)
                 if tl_src is None:
                     return 103  # tecNO_LINE
+                # RequireAuth enforcement: issuer demands authorized lines
+                if iss_acc is not None and iss_acc.require_auth:
+                    if not tl_src.authorized:
+                        return 130  # tecREQUIRE_AUTH
                 # noRipple enforcement: if set, sender cannot ripple through
                 if tl_src.no_ripple:
                     return 115  # tecNO_RIPPLE
-                # Frozen trust line check
+                # Frozen trust line check (individual freeze)
                 if tl_src.frozen:
                     return 116  # tecFROZEN
                 # Apply transfer_rate if sender is not the issuer
-                iss_acc = self.accounts.get(iss)
                 if iss_acc is not None and iss_acc.transfer_rate > 1.0:
                     effective_amt = amt * iss_acc.transfer_rate
+                # Apply quality_out on sender's trust line
+                if tl_src.quality_out != 1.0 and tl_src.quality_out > 0.0:
+                    effective_amt = effective_amt * tl_src.quality_out
                 if tl_src.balance < effective_amt:
-                    return 101  # tecUNFUNDED
+                    # ── Partial payment support (Tier 1) ──
+                    is_partial = False
+                    if hasattr(tx, 'flags') and tx.flags and tx.flags.get('tfPartialPayment'):
+                        is_partial = True
+                    if is_partial:
+                        # Deliver as much as possible
+                        amt = tl_src.balance / (iss_acc.transfer_rate if (iss_acc and iss_acc.transfer_rate > 1.0) else 1.0)
+                        if tl_src.quality_out != 1.0 and tl_src.quality_out > 0.0:
+                            amt = amt / tl_src.quality_out
+                        if amt <= 0:
+                            return 129  # tecPARTIAL_PAYMENT — nothing to deliver
+                        effective_amt = tl_src.balance
+                        tx.delivered_amount = amt
+                    else:
+                        return 101  # tecUNFUNDED
                 tl_src.balance -= effective_amt
             # Credit receiver's trust line (or receiver is issuer)
             if dst != iss:
                 tl_dst = self.get_trust_line(dst, cur, iss)
                 if tl_dst is None:
                     return 103  # tecNO_LINE
+                # RequireAuth on receiver's line too
+                if iss_acc is not None and iss_acc.require_auth:
+                    if not tl_dst.authorized:
+                        return 130  # tecREQUIRE_AUTH
                 if tl_dst.frozen:
                     return 116  # tecFROZEN
-                if tl_dst.balance + amt > tl_dst.limit:
-                    return 101  # tecUNFUNDED — would exceed trust
-                tl_dst.balance += amt
+                # Apply quality_in on receiver's trust line
+                credit_amt = amt
+                if tl_dst.quality_in != 1.0 and tl_dst.quality_in > 0.0:
+                    credit_amt = amt * tl_dst.quality_in
+                if tl_dst.balance + credit_amt > tl_dst.limit:
+                    if hasattr(tx, 'flags') and tx.flags and tx.flags.get('tfPartialPayment'):
+                        credit_amt = max(0.0, tl_dst.limit - tl_dst.balance)
+                        if credit_amt <= 0:
+                            return 129  # tecPARTIAL_PAYMENT
+                        tx.delivered_amount = credit_amt
+                    else:
+                        return 101  # tecUNFUNDED — would exceed trust
+                tl_dst.balance += credit_amt
 
         # Bump sequence
         src_acc.sequence += 1
@@ -548,6 +640,34 @@ cdef class Ledger:
 
         cdef object la = tx.limit_amount
         self.set_trust_line(src, la.currency, la.issuer, la.value)
+
+        # ── Process TrustSet flags (Tier 1) ──────────────────────────────
+        cdef object tl = self.get_trust_line(src, la.currency, la.issuer)
+        if tl is not None and tx.flags:
+            # tfSetfAuth: issuer authorizes this trust line
+            if tx.flags.get("tfSetfAuth"):
+                tl.authorized = True
+            # tfClearfAuth: revoke authorization
+            if tx.flags.get("tfClearfAuth"):
+                tl.authorized = False
+            # tfSetNoRipple / tfClearNoRipple
+            if tx.flags.get("tfSetNoRipple"):
+                tl.no_ripple = True
+            if tx.flags.get("tfClearNoRipple"):
+                tl.no_ripple = False
+            # tfSetFreeze / tfClearFreeze (individual trust-line freeze)
+            if tx.flags.get("tfSetFreeze"):
+                tl.frozen = True
+            if tx.flags.get("tfClearFreeze"):
+                tl.frozen = False
+            # QualityIn / QualityOut (Tier 1)
+            if "quality_in" in tx.flags:
+                qv = tx.flags["quality_in"]
+                tl.quality_in = max(0.0, float(qv))
+            if "quality_out" in tx.flags:
+                qv = tx.flags["quality_out"]
+                tl.quality_out = max(0.0, float(qv))
+
         src_acc.sequence += 1
         return 0
 
@@ -559,6 +679,10 @@ cdef class Ledger:
         if tx.tx_id and tx.tx_id in self.applied_tx_ids:
             tx.result_code = 109  # tecSTAKE_DUPLICATE (reuse for general dup)
             return 109
+
+        # Capture invariant snapshot before applying
+        self.invariant_checker.capture(self)
+
         if tt == 0:      # Payment
             result = self.apply_payment(tx)
         elif tt == 1:    # EscrowCreate
@@ -609,8 +733,66 @@ cdef class Ledger:
             result = self.apply_stake(tx)
         elif tt == 31:   # Unstake (early cancel)
             result = self.apply_unstake(tx)
+        elif tt == 33:   # Clawback
+            result = self.apply_clawback(tx)
+        elif tt == 34:   # AMMCreate
+            result = self.apply_amm_create(tx)
+        elif tt == 35:   # AMMDeposit
+            result = self.apply_amm_deposit(tx)
+        elif tt == 36:   # AMMWithdraw
+            result = self.apply_amm_withdraw(tx)
+        elif tt == 37:   # AMMVote
+            result = self.apply_amm_vote(tx)
+        elif tt == 38:   # AMMBid
+            result = self.apply_amm_bid(tx)
+        elif tt == 39:   # AMMDelete
+            result = self.apply_amm_delete(tx)
+        elif tt == 40:   # OracleSet
+            result = self.apply_oracle_set(tx)
+        elif tt == 41:   # OracleDelete
+            result = self.apply_oracle_delete(tx)
+        elif tt == 42:   # DIDSet
+            result = self.apply_did_set(tx)
+        elif tt == 43:   # DIDDelete
+            result = self.apply_did_delete(tx)
+        elif tt == 44:   # MPTokenIssuanceCreate
+            result = self.apply_mpt_issuance_create(tx)
+        elif tt == 45:   # MPTokenIssuanceDestroy
+            result = self.apply_mpt_issuance_destroy(tx)
+        elif tt == 46:   # MPTokenAuthorize
+            result = self.apply_mpt_authorize(tx)
+        elif tt == 47:   # MPTokenIssuanceSet
+            result = self.apply_mpt_issuance_set(tx)
+        elif tt == 48:   # CredentialCreate
+            result = self.apply_credential_create(tx)
+        elif tt == 49:   # CredentialAccept
+            result = self.apply_credential_accept(tx)
+        elif tt == 50:   # CredentialDelete
+            result = self.apply_credential_delete(tx)
+        elif tt == 51:   # XChainCreateBridge
+            result = self.apply_xchain_create_bridge(tx)
+        elif tt == 52:   # XChainCreateClaimID
+            result = self.apply_xchain_create_claim_id(tx)
+        elif tt == 53:   # XChainCommit
+            result = self.apply_xchain_commit(tx)
+        elif tt == 54:   # XChainClaim
+            result = self.apply_xchain_claim(tx)
+        elif tt == 55:   # XChainAddAttestation
+            result = self.apply_xchain_add_attestation(tx)
+        elif tt == 56:   # XChainAccountCreate
+            result = self.apply_xchain_account_create(tx)
+        elif tt == 57:   # SetHook
+            result = self.apply_set_hook(tx)
         else:
             result = 0   # for simplicity, other types succeed
+
+        # Verify invariants after transaction
+        if result == 0:
+            inv_ok, inv_msg = self.invariant_checker.verify(self)
+            if not inv_ok:
+                # Invariant violation — reject (would ideally rollback)
+                result = 128  # tecINVARIANT_FAILED
+
         tx.result_code = result
         if result == 0:
             self.pending_txns.append(tx)
@@ -651,6 +833,13 @@ cdef class Ledger:
                 # Interest is newly minted — adds to circulating supply
                 self.total_supply += mat_interest
                 self.total_minted += mat_interest
+
+        # ── Canonical transaction ordering (Tier 3) ──────────────────
+        # Sort pending transactions deterministically before hashing
+        # so that all validators produce the same ledger hash.
+        # Ordering: by tx_type (ascending), then by account (lexicographic),
+        # then by sequence (ascending), then by tx_id as tiebreaker.
+        self.pending_txns.sort(key=_canonical_tx_sort_key)
 
         # Transaction merkle hash (simplified: hash of all tx_ids concatenated)
         cdef bytes tx_blob = b""
@@ -706,12 +895,32 @@ cdef class Ledger:
             return 105  # tecBAD_SEQ
 
         # Record the open offer on the account
+        # ── Offer execution flags (Tier 1) ──────────────────────────────
+        cdef str time_in_force = "GTC"  # default: Good-Til-Cancelled
+        cdef bint tf_sell = False
+        if tx.flags:
+            if tx.flags.get("tfImmediateOrCancel"):
+                time_in_force = "IOC"
+            elif tx.flags.get("tfFillOrKill"):
+                time_in_force = "FOK"
+            if tx.flags.get("tfSell"):
+                tf_sell = True
+
         src_acc.open_offers.append({
             "taker_pays": tx.taker_pays,
             "taker_gets": tx.taker_gets,
             "tx_id": tx.tx_id,
+            "time_in_force": time_in_force,
+            "tf_sell": tf_sell,
         })
         src_acc.owner_count += 1
+
+        # If IOC: immediately check if any matching counter-offers exist
+        # and remove the offer if it can't be filled right away.
+        if time_in_force == "IOC":
+            # Offer stays only for current ledger close matching — mark for
+            # removal at close if not matched.
+            pass
 
         src_acc.sequence += 1
         return 0  # tesSUCCESS
@@ -867,6 +1076,24 @@ cdef class Ledger:
             return 105  # tecBAD_SEQ
         return 0
 
+    # ── Owner reserve enforcement (Tier 3) ──────────────────────────
+
+    # Constants (in NXF; corresponds to rippled's 10 XRP base / 2 XRP inc)
+    BASE_RESERVE = 10.0           # minimum account balance
+    OWNER_RESERVE_INC = 2.0       # per owned object increment
+
+    cpdef double owner_reserve(self, object acc):
+        """Calculate the total reserve an account must maintain."""
+        return self.BASE_RESERVE + self.OWNER_RESERVE_INC * max(0, acc.owner_count)
+
+    cpdef bint check_owner_reserve(self, object acc, int additional=0):
+        """
+        Return True if the account's balance meets the reserve
+        requirement (optionally including *additional* new objects).
+        """
+        cdef double required = self.BASE_RESERVE + self.OWNER_RESERVE_INC * max(0, acc.owner_count + additional)
+        return acc.balance >= required
+
     # ---- escrow handlers ----
 
     cpdef int apply_escrow_create(self, object tx):
@@ -997,6 +1224,10 @@ cdef class Ledger:
             acc.global_freeze = True
         if set_flags.get("asfDepositAuth"):
             acc.deposit_auth = True
+        if set_flags.get("asfAllowClawback"):
+            acc.allow_clawback = True
+        if set_flags.get("asfRequireAuth"):
+            acc.require_auth = True
         # Process clear_flags
         if clear_flags.get("asfRequireDest"):
             acc.require_dest = False
@@ -1008,6 +1239,10 @@ cdef class Ledger:
             acc.global_freeze = False
         if clear_flags.get("asfDepositAuth"):
             acc.deposit_auth = False
+        if clear_flags.get("asfAllowClawback"):
+            acc.allow_clawback = False
+        if clear_flags.get("asfRequireAuth"):
+            acc.require_auth = False
         # Transfer rate
         cdef double tr = tx.flags.get("transfer_rate", 0.0)
         if tr > 0.0:
@@ -1323,6 +1558,11 @@ cdef class Ledger:
         rc = self._check_seq(tx, acc)
         if rc:
             return rc
+        # ── AccountDelete rules (Tier 3) ──────────────────────────────
+        # Account must have consumed at least 256 sequence numbers
+        # (prevents rapid create-delete spam).
+        if acc.sequence < 256:
+            return 134  # tecSEQ_TOO_LOW
         # Must have no owned objects
         if acc.owner_count > 0:
             return 110  # tecNO_PERMISSION — has owned objects
@@ -1488,6 +1728,629 @@ cdef class Ledger:
                 acc.balance += offer.amount
                 if buyer_acc.owner_count > 0:
                     buyer_acc.owner_count -= 1
+        acc.sequence += 1
+        return 0
+
+    # ---- Clawback (XLS-39) handler ----
+
+    cpdef int apply_clawback(self, object tx):
+        """Claw back issued IOU tokens from a holder."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        if not acc.allow_clawback:
+            return 121  # tecCLAWBACK_DISABLED
+        cdef str holder_addr = tx.destination
+        cdef double amt = tx.amount.value
+        cdef str cur = tx.amount.currency
+        cdef str iss = tx.amount.issuer
+        # Issuer must be the clawback account
+        if iss and iss != src:
+            return 110  # tecNO_PERMISSION
+        tl = self.get_trust_line(holder_addr, cur, src)
+        if tl is None:
+            return 103  # tecNO_LINE
+        actual = min(amt, tl.balance)
+        tl.balance -= actual
+        acc.sequence += 1
+        return 0
+
+    # ---- AMM (XLS-30) handlers ----
+
+    cpdef int apply_amm_create(self, object tx):
+        """Create a new AMM liquidity pool."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        a1c = tx.flags.get("asset1_currency", "NXF")
+        a1i = tx.flags.get("asset1_issuer", "")
+        a2c = tx.flags.get("asset2_currency", "")
+        a2i = tx.flags.get("asset2_issuer", "")
+        amt1 = tx.flags.get("amount1", 0.0)
+        amt2 = tx.flags.get("amount2", 0.0)
+        tfee = tx.flags.get("trading_fee", 0)
+        # Debit amounts from account (for native NXF side)
+        if a1c == "NXF" and acc.balance < amt1:
+            return 101
+        if a1c == "NXF":
+            acc.balance -= amt1
+        ok, msg, pool = self.amm_manager.create_pool(
+            src, a1c, a1i, a2c, a2i, amt1, amt2, tfee,
+        )
+        if not ok:
+            return 120  # tecAMM_BALANCE
+        acc.owner_count += 1
+        acc.sequence += 1
+        return 0
+
+    cpdef int apply_amm_deposit(self, object tx):
+        """Deposit liquidity into an AMM pool."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        pool_id = tx.flags.get("pool_id", "")
+        amt1 = tx.flags.get("amount1", 0.0)
+        amt2 = tx.flags.get("amount2", 0.0)
+        lp_out = tx.flags.get("lp_token_out", 0.0)
+        a1 = amt1 if amt1 > 0 else None
+        a2 = amt2 if amt2 > 0 else None
+        lp = lp_out if lp_out > 0 else None
+        ok, msg, lp_minted = self.amm_manager.deposit(pool_id, src, a1, a2, lp)
+        if not ok:
+            return 120
+        acc.sequence += 1
+        return 0
+
+    cpdef int apply_amm_withdraw(self, object tx):
+        """Withdraw liquidity from an AMM pool."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        pool_id = tx.flags.get("pool_id", "")
+        lp_tokens = tx.flags.get("lp_tokens", 0.0)
+        amt1 = tx.flags.get("amount1", 0.0)
+        amt2 = tx.flags.get("amount2", 0.0)
+        lp = lp_tokens if lp_tokens > 0 else None
+        a1 = amt1 if amt1 > 0 else None
+        a2 = amt2 if amt2 > 0 else None
+        ok, msg, w1, w2 = self.amm_manager.withdraw(pool_id, src, lp, a1, a2)
+        if not ok:
+            return 120
+        acc.sequence += 1
+        return 0
+
+    cpdef int apply_amm_vote(self, object tx):
+        """Vote on AMM pool trading fee."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        pool_id = tx.flags.get("pool_id", "")
+        fee_val_vote = tx.flags.get("fee_val", 0)
+        ok, msg = self.amm_manager.vote(pool_id, src, fee_val_vote)
+        if not ok:
+            return 120
+        acc.sequence += 1
+        return 0
+
+    cpdef int apply_amm_bid(self, object tx):
+        """Bid for AMM auction slot."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        pool_id = tx.flags.get("pool_id", "")
+        bid_amount = tx.flags.get("bid_amount", 0.0)
+        ok, msg = self.amm_manager.bid(pool_id, src, bid_amount)
+        if not ok:
+            return 120
+        acc.sequence += 1
+        return 0
+
+    cpdef int apply_amm_delete(self, object tx):
+        """Delete an empty AMM pool."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        pool_id = tx.flags.get("pool_id", "")
+        ok, msg = self.amm_manager.delete_pool(pool_id, src)
+        if not ok:
+            return 120
+        acc.owner_count = max(0, acc.owner_count - 1)
+        acc.sequence += 1
+        return 0
+
+    # ---- Oracle (XLS-47) handlers ----
+
+    cpdef int apply_oracle_set(self, object tx):
+        """Create or update a price oracle."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        doc_id = tx.flags.get("document_id", -1)
+        doc_id = doc_id if doc_id >= 0 else None
+        ok, msg, oracle = self.oracle_manager.set_oracle(
+            owner=src,
+            document_id=doc_id,
+            provider=tx.flags.get("provider", ""),
+            asset_class=tx.flags.get("asset_class", ""),
+            uri=tx.flags.get("uri", ""),
+            prices=tx.flags.get("prices", []),
+        )
+        if not ok:
+            return 126  # tecORACLE_LIMIT
+        acc.owner_count += 1
+        acc.sequence += 1
+        return 0
+
+    cpdef int apply_oracle_delete(self, object tx):
+        """Delete a price oracle."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        doc_id = tx.flags.get("document_id", 0)
+        ok, msg = self.oracle_manager.delete_oracle(src, doc_id)
+        if not ok:
+            return 117  # tecNO_ENTRY
+        acc.owner_count = max(0, acc.owner_count - 1)
+        acc.sequence += 1
+        return 0
+
+    # ---- DID (XLS-40) handlers ----
+
+    cpdef int apply_did_set(self, object tx):
+        """Create or update a DID document."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        ok, msg, did = self.did_manager.set_did(
+            account=src,
+            uri=tx.flags.get("uri", ""),
+            data=tx.flags.get("data", ""),
+            attestations=tx.flags.get("attestations", None),
+        )
+        if not ok:
+            return 127  # tecDID_EXISTS
+        acc.sequence += 1
+        return 0
+
+    cpdef int apply_did_delete(self, object tx):
+        """Delete a DID document."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        ok, msg = self.did_manager.delete_did(src)
+        if not ok:
+            return 117
+        acc.sequence += 1
+        return 0
+
+    # ---- MPT (XLS-33) handlers ----
+
+    cpdef int apply_mpt_issuance_create(self, object tx):
+        """Create a new MPT issuance."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        ok, msg, iss = self.mpt_manager.create_issuance(
+            issuer=src,
+            max_supply=tx.flags.get("max_supply", 0.0),
+            transfer_fee=tx.flags.get("transfer_fee", 0),
+            metadata=tx.flags.get("metadata", ""),
+            flags=tx.flags.get("mpt_flags", 0),
+        )
+        if not ok:
+            return 124  # tecMPT_MAX_SUPPLY
+        acc.owner_count += 1
+        acc.sequence += 1
+        return 0
+
+    cpdef int apply_mpt_issuance_destroy(self, object tx):
+        """Destroy an MPT issuance."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        issuance_id = tx.flags.get("issuance_id", "")
+        ok, msg = self.mpt_manager.destroy_issuance(src, issuance_id)
+        if not ok:
+            return 117
+        acc.owner_count = max(0, acc.owner_count - 1)
+        acc.sequence += 1
+        return 0
+
+    cpdef int apply_mpt_authorize(self, object tx):
+        """Authorize a holder for an MPT issuance."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        issuance_id = tx.flags.get("issuance_id", "")
+        holder = tx.flags.get("holder", src)
+        issuer_action = tx.flags.get("issuer_action", False)
+        ok, msg = self.mpt_manager.authorize(
+            issuance_id, holder, issuer_action, src,
+        )
+        if not ok:
+            return 110
+        acc.sequence += 1
+        return 0
+
+    cpdef int apply_mpt_issuance_set(self, object tx):
+        """Update MPT issuance settings."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        issuance_id = tx.flags.get("issuance_id", "")
+        lock = tx.flags.get("lock", None)
+        ok, msg = self.mpt_manager.set_issuance(src, issuance_id, lock)
+        if not ok:
+            return 110
+        acc.sequence += 1
+        return 0
+
+    # ---- Credential handlers ----
+
+    cpdef int apply_credential_create(self, object tx):
+        """Create a credential."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        ok, msg, cred = self.credential_manager.create(
+            issuer=src,
+            subject=tx.destination,
+            credential_type=tx.flags.get("credential_type", ""),
+            uri=tx.flags.get("uri", ""),
+            expiration=tx.flags.get("expiration", 0.0),
+        )
+        if not ok:
+            return 125  # tecCREDENTIAL_EXISTS
+        acc.owner_count += 1
+        acc.sequence += 1
+        return 0
+
+    cpdef int apply_credential_accept(self, object tx):
+        """Accept a credential."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        credential_id = tx.flags.get("credential_id", "")
+        ok, msg = self.credential_manager.accept(src, credential_id)
+        if not ok:
+            return 117
+        acc.sequence += 1
+        return 0
+
+    cpdef int apply_credential_delete(self, object tx):
+        """Delete a credential."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        credential_id = tx.flags.get("credential_id", "")
+        ok, msg = self.credential_manager.delete(src, credential_id)
+        if not ok:
+            return 117
+        acc.owner_count = max(0, acc.owner_count - 1)
+        acc.sequence += 1
+        return 0
+
+    # ---- XChain Bridge handlers ----
+
+    cpdef int apply_xchain_create_bridge(self, object tx):
+        """Create a cross-chain bridge."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        ok, msg, bridge = self.xchain_manager.create_bridge(
+            locking_chain_door=src,
+            issuing_chain_door=tx.destination,
+            locking_chain_issue=tx.flags.get("locking_chain_issue", {"currency": "NXF", "issuer": ""}),
+            issuing_chain_issue=tx.flags.get("issuing_chain_issue", {"currency": "NXF", "issuer": ""}),
+            min_account_create_amount=tx.flags.get("min_account_create_amount", 10.0),
+            signal_reward=tx.flags.get("signal_reward", 0.01),
+        )
+        if not ok:
+            return 110
+        acc.owner_count += 1
+        acc.sequence += 1
+        return 0
+
+    cpdef int apply_xchain_create_claim_id(self, object tx):
+        """Reserve a cross-chain claim ID."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        bridge_id = tx.flags.get("bridge_id", "")
+        dest = tx.flags.get("destination", "")
+        ok, msg, claim_id = self.xchain_manager.create_claim_id(bridge_id, src, dest)
+        if not ok:
+            return 117
+        acc.owner_count += 1
+        acc.sequence += 1
+        return 0
+
+    cpdef int apply_xchain_commit(self, object tx):
+        """Commit assets to a cross-chain bridge."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double amt = tx.amount.value
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        if acc.balance < amt:
+            return 101
+        bridge_id = tx.flags.get("bridge_id", "")
+        claim_id = tx.flags.get("claim_id", 0)
+        dest = tx.flags.get("destination", "")
+        ok, msg = self.xchain_manager.commit(bridge_id, src, amt, claim_id, dest)
+        if not ok:
+            return 123  # tecXCHAIN_NO_QUORUM
+        acc.balance -= amt
+        acc.sequence += 1
+        return 0
+
+    cpdef int apply_xchain_claim(self, object tx):
+        """Claim assets from a cross-chain bridge."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        bridge_id = tx.flags.get("bridge_id", "")
+        claim_id = tx.flags.get("claim_id", 0)
+        dest = tx.destination
+        ok, msg, amount = self.xchain_manager.claim(bridge_id, claim_id, dest)
+        if not ok:
+            return 123
+        # Credit destination
+        if dest not in self.accounts:
+            self.create_account(dest)
+        dst_acc = <AccountEntry>self.accounts[dest]
+        dst_acc.balance += amount
+        self.total_supply += amount  # minted on issuing chain
+        self.total_minted += amount
+        acc.sequence += 1
+        return 0
+
+    cpdef int apply_xchain_add_attestation(self, object tx):
+        """Add an attestation to a cross-chain claim."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        bridge_id = tx.flags.get("bridge_id", "")
+        claim_id = tx.flags.get("claim_id", 0)
+        witness = tx.flags.get("witness", src)
+        sig = tx.flags.get("signature", "")
+        ok, msg = self.xchain_manager.add_attestation(bridge_id, claim_id, witness, sig)
+        if not ok:
+            return 123
+        acc.sequence += 1
+        return 0
+
+    cpdef int apply_xchain_account_create(self, object tx):
+        """Fund a new account via cross-chain bridge."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double amt = tx.amount.value
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        if acc.balance < amt:
+            return 101
+        bridge_id = tx.flags.get("bridge_id", "")
+        dest = tx.destination
+        ok, msg = self.xchain_manager.account_create_commit(bridge_id, src, amt, dest)
+        if not ok:
+            return 123
+        acc.balance -= amt
+        acc.sequence += 1
+        return 0
+
+    # ---- Hooks handler ----
+
+    cpdef int apply_set_hook(self, object tx):
+        """Install or update a hook on an account."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        hook_hash = tx.flags.get("hook_hash", "")
+        position = tx.flags.get("position", 0)
+        parameters = tx.flags.get("parameters", {})
+        hook_on_str = tx.flags.get("hook_on", "before")
+        hook_on = HookOn.BEFORE if hook_on_str == "before" else HookOn.AFTER
+        ok, msg = self.hooks_manager.set_hook(src, position, hook_hash, parameters, hook_on)
+        if not ok:
+            return 122  # tecHOOKS_REJECTED
         acc.sequence += 1
         return 0
 
