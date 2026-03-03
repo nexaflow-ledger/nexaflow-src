@@ -21,11 +21,14 @@ import time
 import unittest
 
 from nexaflow_core.pmc import (
+    DEFAULT_BASE_REWARD,
     DEFAULT_FLAGS,
     DEFAULT_POW_DIFFICULTY,
+    MAX_BASE_REWARD,
     MAX_COIN_SYMBOL_LEN,
     MAX_POW_DIFFICULTY,
     MAX_RULES,
+    MIN_BASE_REWARD,
     MIN_POW_DIFFICULTY,
     PMCDefinition,
     PMCFlag,
@@ -35,7 +38,7 @@ from nexaflow_core.pmc import (
     PMCRule,
     RuleType,
     RuleViolation,
-    adjust_difficulty,
+    compute_block_reward,
     compute_pow_hash,
     estimate_hashrate_to_difficulty,
     evaluate_mint_rules,
@@ -61,6 +64,7 @@ def _quick_coin(mgr: PMCManager, issuer: str = "rAlice",
                 symbol: str = "TEST", name: str = "Test Coin",
                 max_supply: float = 1_000_000.0,
                 pow_difficulty: int = 1,
+                base_reward: float = DEFAULT_BASE_REWARD,
                 flags: int = int(DEFAULT_FLAGS),
                 rules: list[dict] | None = None,
                 now: float = 1_000_000.0) -> PMCDefinition:
@@ -68,6 +72,7 @@ def _quick_coin(mgr: PMCManager, issuer: str = "rAlice",
     ok, msg, coin = mgr.create_coin(
         issuer=issuer, symbol=symbol, name=name,
         max_supply=max_supply, pow_difficulty=pow_difficulty,
+        base_reward=base_reward,
         flags=flags, rules=rules, now=now,
     )
     assert ok, msg
@@ -75,12 +80,13 @@ def _quick_coin(mgr: PMCManager, issuer: str = "rAlice",
 
 
 def _mint_quick(mgr: PMCManager, coin: PMCDefinition, miner: str,
-                amount: float = 100.0, now: float = 1_000_001.0) -> float:
-    """Find a nonce and mint tokens. Returns minted amount."""
+                now: float = 1_000_001.0) -> float:
+    """Find a nonce and mint tokens.  Reward is automatic (difficulty-scaled).
+    Returns minted amount."""
     prev_hash = mgr._last_pow_hash.get(coin.coin_id, coin.coin_id)
     nonce = _find_valid_nonce(coin.coin_id, miner, coin.pow_difficulty, prev_hash)
     assert nonce is not None, "Could not find valid nonce"
-    ok, msg, minted = mgr.mint(coin.coin_id, miner, nonce, amount, now=now)
+    ok, msg, minted = mgr.mint(coin.coin_id, miner, nonce, now=now)
     assert ok, msg
     return minted
 
@@ -211,43 +217,31 @@ class TestPoWHelpers(unittest.TestCase):
         self.assertAlmostEqual(estimate_hashrate_to_difficulty(1), 16.0)
         self.assertAlmostEqual(estimate_hashrate_to_difficulty(4), 65536.0)
 
-    def test_adjust_difficulty_insufficient_data(self):
-        coin = PMCDefinition(
-            coin_id="c", symbol="T", name="T", issuer="r",
-            pow_difficulty=4,
-        )
-        coin._mint_timestamps = [1.0, 2.0]  # < window
-        self.assertEqual(adjust_difficulty(coin), 4)
+    # ── Block reward formula ──
 
-    def test_adjust_difficulty_increase(self):
-        """Mints too fast → difficulty should increase."""
-        coin = PMCDefinition(
-            coin_id="c", symbol="T", name="T", issuer="r",
-            pow_difficulty=4,
-        )
-        # 10 mints 1 second apart (target is 60s)
-        coin._mint_timestamps = [float(i) for i in range(10)]
-        self.assertEqual(adjust_difficulty(coin), 5)
+    def test_compute_block_reward_diff1(self):
+        self.assertAlmostEqual(compute_block_reward(50.0, 1), 50.0)
 
-    def test_adjust_difficulty_decrease(self):
-        """Mints too slow → difficulty should decrease."""
-        coin = PMCDefinition(
-            coin_id="c", symbol="T", name="T", issuer="r",
-            pow_difficulty=4,
-        )
-        # 10 mints 200 seconds apart
-        coin._mint_timestamps = [float(i * 200) for i in range(10)]
-        self.assertEqual(adjust_difficulty(coin), 3)
+    def test_compute_block_reward_diff2(self):
+        self.assertAlmostEqual(compute_block_reward(50.0, 2), 100.0)
 
-    def test_adjust_difficulty_stays(self):
-        """Mints close to target → no change."""
+    def test_compute_block_reward_diff4(self):
+        self.assertAlmostEqual(compute_block_reward(50.0, 4), 400.0)
+
+    def test_compute_block_reward_custom_base(self):
+        self.assertAlmostEqual(compute_block_reward(10.0, 3), 40.0)
+
+    def test_compute_block_reward_diff1_identity(self):
+        """At difficulty 1, reward == base_reward exactly."""
+        for br in (1.0, 50.0, 100.0, 0.00000001):
+            self.assertAlmostEqual(compute_block_reward(br, 1), br)
+
+    def test_block_reward_property_on_definition(self):
         coin = PMCDefinition(
             coin_id="c", symbol="T", name="T", issuer="r",
-            pow_difficulty=4,
+            pow_difficulty=3, base_reward=25.0,
         )
-        # 10 mints ~60s apart
-        coin._mint_timestamps = [float(i * 60) for i in range(10)]
-        self.assertEqual(adjust_difficulty(coin), 4)
+        self.assertAlmostEqual(coin.block_reward, 100.0)  # 25 * 2^2
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -540,7 +534,8 @@ class TestPMCManagerMinting(unittest.TestCase):
         self.coin = _quick_coin(self.mgr)
 
     def test_mint_basic(self):
-        minted = _mint_quick(self.mgr, self.coin, "rMiner", 50.0, now=1_000_001.0)
+        minted = _mint_quick(self.mgr, self.coin, "rMiner", now=1_000_001.0)
+        # difficulty=1, base_reward=50 → reward = 50 * 2^0 = 50
         self.assertAlmostEqual(minted, 50.0)
         self.assertAlmostEqual(self.mgr.get_balance(self.coin.coin_id, "rMiner"), 50.0)
         self.assertAlmostEqual(self.coin.total_minted, 50.0)
@@ -551,17 +546,24 @@ class TestPMCManagerMinting(unittest.TestCase):
         new = self.mgr._last_pow_hash[self.coin.coin_id]
         self.assertNotEqual(prev, new)
 
+    def test_mint_increments_total_mints(self):
+        self.assertEqual(self.coin.total_mints, 0)
+        _mint_quick(self.mgr, self.coin, "rMiner")
+        self.assertEqual(self.coin.total_mints, 1)
+        _mint_quick(self.mgr, self.coin, "rMiner", now=1_000_002.0)
+        self.assertEqual(self.coin.total_mints, 2)
+
     def test_mint_invalid_nonce(self):
         ok, msg, _ = self.mgr.mint(
             self.coin.coin_id, "rMiner", nonce=99999999,
-            amount=10.0, now=1_000_001.0,
+            now=1_000_001.0,
         )
         # Overwhelmingly likely to be invalid, but not guaranteed
         # For safety, we just check that we got a boolean result
         self.assertIsInstance(ok, bool)
 
     def test_mint_coin_not_found(self):
-        ok, msg, _ = self.mgr.mint("nonexistent", "rMiner", 0, 10.0, now=1000.0)
+        ok, msg, _ = self.mgr.mint("nonexistent", "rMiner", 0, now=1000.0)
         self.assertFalse(ok)
         self.assertIn("not found", msg.lower())
 
@@ -570,37 +572,52 @@ class TestPMCManagerMinting(unittest.TestCase):
             self.mgr, symbol="NOMINT",
             flags=int(PMCFlag.TRANSFERABLE | PMCFlag.BURNABLE),
         )
-        ok, msg, _ = self.mgr.mint(coin.coin_id, "rMiner", 0, 10.0, now=1000.0)
+        ok, msg, _ = self.mgr.mint(coin.coin_id, "rMiner", 0, now=1000.0)
         self.assertFalse(ok)
         self.assertIn("disabled", msg.lower())
 
     def test_mint_frozen_coin(self):
         self.coin.frozen = True
-        ok, msg, _ = self.mgr.mint(self.coin.coin_id, "rMiner", 0, 10.0, now=1000.0)
+        ok, msg, _ = self.mgr.mint(self.coin.coin_id, "rMiner", 0, now=1000.0)
         self.assertFalse(ok)
         self.assertIn("frozen", msg.lower())
 
-    def test_mint_zero_amount(self):
-        ok, msg, _ = self.mgr.mint(self.coin.coin_id, "rMiner", 0, 0.0, now=1000.0)
-        self.assertFalse(ok)
-
     def test_mint_supply_cap(self):
-        coin = _quick_coin(self.mgr, symbol="CAP", max_supply=50.0, pow_difficulty=1)
-        # Mint up to the cap
-        _mint_quick(self.mgr, coin, "rMiner", 50.0, now=1_000_001.0)
+        # base_reward=50, diff=1 → reward per mine = 50
+        coin = _quick_coin(self.mgr, symbol="CAP", max_supply=50.0,
+                           pow_difficulty=1, base_reward=50.0)
+        # One mint → exactly fills the cap
+        _mint_quick(self.mgr, coin, "rMiner", now=1_000_001.0)
         # Next mint should fail — supply exhausted
-        ok, msg, _ = self.mgr.mint(coin.coin_id, "rMiner", 0, 10.0, now=1_000_002.0)
+        ok, msg, _ = self.mgr.mint(coin.coin_id, "rMiner", 0, now=1_000_002.0)
         self.assertFalse(ok)
         self.assertIn("max supply", msg.lower())
 
     def test_mint_clamps_to_remaining_supply(self):
-        coin = _quick_coin(self.mgr, symbol="CLP", max_supply=80.0, pow_difficulty=1)
-        minted = _mint_quick(self.mgr, coin, "rMiner", 100.0, now=1_000_001.0)
-        self.assertAlmostEqual(minted, 80.0)
+        # base_reward=50, diff=1 → computed reward is 50, but cap is only 30
+        coin = _quick_coin(self.mgr, symbol="CLP", max_supply=30.0,
+                           pow_difficulty=1, base_reward=50.0)
+        minted = _mint_quick(self.mgr, coin, "rMiner", now=1_000_001.0)
+        self.assertAlmostEqual(minted, 30.0)
 
-    def test_mint_records_timestamp(self):
-        _mint_quick(self.mgr, self.coin, "rMiner", 10.0, now=5000.0)
-        self.assertIn(5000.0, self.coin._mint_timestamps)
+    def test_mint_reward_scales_with_difficulty(self):
+        """Higher difficulty → exponentially higher reward."""
+        coin_d1 = _quick_coin(self.mgr, symbol="D1", pow_difficulty=1, base_reward=10.0)
+        coin_d3 = _quick_coin(self.mgr, symbol="D3", pow_difficulty=3, base_reward=10.0)
+        m1 = _mint_quick(self.mgr, coin_d1, "rMiner", now=1_000_001.0)
+        m3 = _mint_quick(self.mgr, coin_d3, "rMiner", now=1_000_002.0)
+        self.assertAlmostEqual(m1, 10.0)   # 10 * 2^0
+        self.assertAlmostEqual(m3, 40.0)   # 10 * 2^2
+
+    def test_base_reward_validation(self):
+        ok, msg, _ = self.mgr.create_coin(
+            "rAlice", "BR1", "Bad Reward", base_reward=0.0, now=2000.0,
+        )
+        self.assertFalse(ok)
+        ok2, msg2, _ = self.mgr.create_coin(
+            "rAlice", "BR2", "Too High", base_reward=2e9, now=2001.0,
+        )
+        self.assertFalse(ok2)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -611,8 +628,9 @@ class TestPMCManagerTransfer(unittest.TestCase):
 
     def setUp(self):
         self.mgr = PMCManager()
-        self.coin = _quick_coin(self.mgr)
-        _mint_quick(self.mgr, self.coin, "rAlice", 500.0, now=1_000_001.0)
+        # base_reward=500 at difficulty=1 → 500 tokens per mint
+        self.coin = _quick_coin(self.mgr, base_reward=500.0)
+        _mint_quick(self.mgr, self.coin, "rAlice", now=1_000_001.0)
 
     def test_transfer_basic(self):
         ok, msg, royalty = self.mgr.transfer(
@@ -648,10 +666,10 @@ class TestPMCManagerTransfer(unittest.TestCase):
 
     def test_transfer_disabled(self):
         coin = _quick_coin(
-            self.mgr, symbol="NOXFER",
+            self.mgr, symbol="NOXFER", base_reward=100.0,
             flags=int(PMCFlag.BURNABLE | PMCFlag.MINTABLE),
         )
-        _mint_quick(self.mgr, coin, "rAlice", 100.0, now=1_000_002.0)
+        _mint_quick(self.mgr, coin, "rAlice", now=1_000_002.0)
         ok, msg, _ = self.mgr.transfer(
             coin.coin_id, "rAlice", "rBob", 10.0, now=1_000_010.0,
         )
@@ -686,10 +704,10 @@ class TestPMCManagerTransfer(unittest.TestCase):
 
     def test_transfer_with_royalty(self):
         coin = _quick_coin(
-            self.mgr, symbol="ROY",
+            self.mgr, symbol="ROY", base_reward=100.0,
             rules=[{"rule_type": "ROYALTY_PCT", "value": 10}],
         )
-        _mint_quick(self.mgr, coin, "rSender", 100.0, now=1_000_001.0)
+        _mint_quick(self.mgr, coin, "rSender", now=1_000_001.0)
         ok, msg, royalty = self.mgr.transfer(
             coin.coin_id, "rSender", "rBob", 100.0, now=1_000_010.0,
         )
@@ -716,8 +734,8 @@ class TestPMCManagerBurn(unittest.TestCase):
 
     def setUp(self):
         self.mgr = PMCManager()
-        self.coin = _quick_coin(self.mgr)
-        _mint_quick(self.mgr, self.coin, "rAlice", 200.0, now=1_000_001.0)
+        self.coin = _quick_coin(self.mgr, base_reward=200.0)
+        _mint_quick(self.mgr, self.coin, "rAlice", now=1_000_001.0)
 
     def test_burn_basic(self):
         ok, msg = self.mgr.burn(self.coin.coin_id, "rAlice", 50.0, now=1_000_010.0)
@@ -736,10 +754,10 @@ class TestPMCManagerBurn(unittest.TestCase):
 
     def test_burn_disabled(self):
         coin = _quick_coin(
-            self.mgr, symbol="NOBURN",
+            self.mgr, symbol="NOBURN", base_reward=100.0,
             flags=int(PMCFlag.TRANSFERABLE | PMCFlag.MINTABLE),
         )
-        _mint_quick(self.mgr, coin, "rAlice", 100.0, now=1_000_002.0)
+        _mint_quick(self.mgr, coin, "rAlice", now=1_000_002.0)
         ok, msg = self.mgr.burn(coin.coin_id, "rAlice", 10.0)
         self.assertFalse(ok)
         self.assertIn("disabled", msg.lower())
@@ -793,8 +811,8 @@ class TestPMCManagerDEX(unittest.TestCase):
 
     def setUp(self):
         self.mgr = PMCManager()
-        self.coin = _quick_coin(self.mgr)
-        _mint_quick(self.mgr, self.coin, "rSeller", 1000.0, now=1_000_001.0)
+        self.coin = _quick_coin(self.mgr, base_reward=1000.0)
+        _mint_quick(self.mgr, self.coin, "rSeller", now=1_000_001.0)
 
     # ── Create offer ──
 
@@ -980,10 +998,10 @@ class TestPMCCrossTrade(unittest.TestCase):
 
     def setUp(self):
         self.mgr = PMCManager()
-        self.coin_a = _quick_coin(self.mgr, symbol="ALPHA", name="Alpha")
-        self.coin_b = _quick_coin(self.mgr, symbol="BETA", name="Beta")
-        _mint_quick(self.mgr, self.coin_a, "rAlice", 500.0, now=1_000_001.0)
-        _mint_quick(self.mgr, self.coin_b, "rBob", 500.0, now=1_000_002.0)
+        self.coin_a = _quick_coin(self.mgr, symbol="ALPHA", name="Alpha", base_reward=500.0)
+        self.coin_b = _quick_coin(self.mgr, symbol="BETA", name="Beta", base_reward=500.0)
+        _mint_quick(self.mgr, self.coin_a, "rAlice", now=1_000_001.0)
+        _mint_quick(self.mgr, self.coin_b, "rBob", now=1_000_002.0)
 
     def test_cross_trade_sell(self):
         """Alice sells 100 ALPHA for 2 BETA each."""
@@ -1045,10 +1063,10 @@ class TestPMCManagerFreeze(unittest.TestCase):
     def setUp(self):
         self.mgr = PMCManager()
         self.coin = _quick_coin(
-            self.mgr,
+            self.mgr, base_reward=100.0,
             flags=int(DEFAULT_FLAGS | PMCFlag.FREEZABLE),
         )
-        _mint_quick(self.mgr, self.coin, "rHolder", 100.0, now=1_000_001.0)
+        _mint_quick(self.mgr, self.coin, "rHolder", now=1_000_001.0)
 
     def test_freeze_holder(self):
         ok, msg = self.mgr.freeze_holder(self.coin.coin_id, "rAlice", "rHolder")
@@ -1105,9 +1123,10 @@ class TestPMCManagerQueries(unittest.TestCase):
 
     def setUp(self):
         self.mgr = PMCManager()
-        self.coin = _quick_coin(self.mgr)
-        _mint_quick(self.mgr, self.coin, "rAlice", 300.0, now=1_000_001.0)
-        _mint_quick(self.mgr, self.coin, "rBob", 100.0, now=1_000_002.0)
+        # base_reward=300 at diff=1 → each mint yields 300
+        self.coin = _quick_coin(self.mgr, base_reward=300.0)
+        _mint_quick(self.mgr, self.coin, "rAlice", now=1_000_001.0)
+        _mint_quick(self.mgr, self.coin, "rBob", now=1_000_002.0)
 
     def test_get_coin(self):
         c = self.mgr.get_coin(self.coin.coin_id)
@@ -1130,7 +1149,7 @@ class TestPMCManagerQueries(unittest.TestCase):
     def test_get_holder(self):
         h = self.mgr.get_holder(self.coin.coin_id, "rAlice")
         self.assertIsNotNone(h)
-        self.assertAlmostEqual(h.balance, 300.0)
+        self.assertAlmostEqual(h.balance, 300.0)  # base_reward=300 at diff=1
 
     def test_get_balance(self):
         self.assertAlmostEqual(
@@ -1235,18 +1254,19 @@ class TestPMCLifecycle(unittest.TestCase):
     def test_full_lifecycle(self):
         mgr = PMCManager()
 
-        # 1. Create coin
+        # 1. Create coin (base_reward=500 at diff=1 → 500 per mine)
         ok, _, coin = mgr.create_coin(
             "rIssuer", "LIFE", "Lifecycle Coin",
-            max_supply=10_000.0, pow_difficulty=1, now=1000.0,
+            max_supply=10_000.0, pow_difficulty=1, base_reward=500.0,
+            now=1000.0,
         )
         self.assertTrue(ok)
 
-        # 2. Mine some supply
-        minted = _mint_quick(mgr, coin, "rMiner1", 500.0, now=1001.0)
+        # 2. Mine some supply — each mint yields 500
+        minted = _mint_quick(mgr, coin, "rMiner1", now=1001.0)
         self.assertAlmostEqual(minted, 500.0)
-        minted2 = _mint_quick(mgr, coin, "rMiner2", 300.0, now=1002.0)
-        self.assertAlmostEqual(minted2, 300.0)
+        minted2 = _mint_quick(mgr, coin, "rMiner2", now=1002.0)
+        self.assertAlmostEqual(minted2, 500.0)
 
         # 3. Transfer
         ok, _, royalty = mgr.transfer(
@@ -1275,7 +1295,7 @@ class TestPMCLifecycle(unittest.TestCase):
         self.assertTrue(ok)
         self.assertAlmostEqual(mgr.get_balance(coin.coin_id, "rBuyer"), 40.0)
         self.assertAlmostEqual(coin.total_burned, 10.0)
-        self.assertAlmostEqual(coin.circulating, 790.0)
+        self.assertAlmostEqual(coin.circulating, 990.0)  # 1000 minted - 10 burned
 
         # 7. Portfolio check
         portfolio = mgr.get_portfolio("rBuyer")
@@ -1298,9 +1318,10 @@ class TestPMCEdgeCases(unittest.TestCase):
 
     def test_multiple_miners_same_coin(self):
         mgr = PMCManager()
-        coin = _quick_coin(mgr, pow_difficulty=1)
-        m1 = _mint_quick(mgr, coin, "rMiner1", 100.0, now=1_000_001.0)
-        m2 = _mint_quick(mgr, coin, "rMiner2", 100.0, now=1_000_002.0)
+        # base_reward=100 at diff=1 → 100 per mine
+        coin = _quick_coin(mgr, pow_difficulty=1, base_reward=100.0)
+        m1 = _mint_quick(mgr, coin, "rMiner1", now=1_000_001.0)
+        m2 = _mint_quick(mgr, coin, "rMiner2", now=1_000_002.0)
         self.assertAlmostEqual(m1, 100.0)
         self.assertAlmostEqual(m2, 100.0)
         self.assertAlmostEqual(mgr.get_balance(coin.coin_id, "rMiner1"), 100.0)
@@ -1309,14 +1330,14 @@ class TestPMCEdgeCases(unittest.TestCase):
 
     def test_unlimited_supply(self):
         mgr = PMCManager()
-        coin = _quick_coin(mgr, max_supply=0.0, pow_difficulty=1)
-        m = _mint_quick(mgr, coin, "rMiner", 1_000_000.0, now=1_000_001.0)
+        coin = _quick_coin(mgr, max_supply=0.0, pow_difficulty=1, base_reward=1_000_000.0)
+        m = _mint_quick(mgr, coin, "rMiner", now=1_000_001.0)
         self.assertAlmostEqual(m, 1_000_000.0)
 
     def test_offer_expiration(self):
         mgr = PMCManager()
-        coin = _quick_coin(mgr)
-        _mint_quick(mgr, coin, "rAlice", 100.0, now=1_000_001.0)
+        coin = _quick_coin(mgr, base_reward=100.0)
+        _mint_quick(mgr, coin, "rAlice", now=1_000_001.0)
         # Use a far-future expiration so the offer is active now
         far_future = time.time() + 999_999.0
         _, _, offer = mgr.create_offer(
@@ -1331,8 +1352,8 @@ class TestPMCEdgeCases(unittest.TestCase):
 
     def test_transfer_creates_receiver_holder(self):
         mgr = PMCManager()
-        coin = _quick_coin(mgr)
-        _mint_quick(mgr, coin, "rAlice", 100.0, now=1_000_001.0)
+        coin = _quick_coin(mgr, base_reward=100.0)
+        _mint_quick(mgr, coin, "rAlice", now=1_000_001.0)
         self.assertIsNone(mgr.get_holder(coin.coin_id, "rBob"))
         mgr.transfer(coin.coin_id, "rAlice", "rBob", 10.0, now=1_000_010.0)
         self.assertIsNotNone(mgr.get_holder(coin.coin_id, "rBob"))

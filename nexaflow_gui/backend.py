@@ -34,6 +34,7 @@ from nexaflow_core.transaction import (
     create_pmc_offer_cancel,
 )
 from nexaflow_core.wallet import Wallet
+from nexaflow_core.mining_api import MiningNode, MiningCoordinator, PoolConfig
 
 logger = logging.getLogger("nexaflow_gui.backend")
 
@@ -63,6 +64,7 @@ class NodeBackend(QObject):
     wallet_created = pyqtSignal(dict)              # wallet info
     staking_changed = pyqtSignal()                 # any staking state change
     pmc_changed = pyqtSignal()                       # PMC state change
+    mining_pool_changed = pyqtSignal()               # mining pool state change
     p2p_status_updated = pyqtSignal(dict)            # real-time P2P snapshot
     ledger_reset = pyqtSignal()                      # ledger data wiped
 
@@ -85,6 +87,9 @@ class NodeBackend(QObject):
         self.wallets: dict[str, Wallet] = {}       # address → Wallet
         self.wallet_names: dict[str, str] = {}     # address → friendly name
         self.tx_history: list[dict] = []
+
+        # ── Mining pool (Stratum server for Bitcoin hardware) ───────────
+        self.mining_node: MiningNode | None = None
 
         # Derive validator set: this node + one per peer
         self._validators = self._build_validator_list()
@@ -704,6 +709,7 @@ class NodeBackend(QObject):
         max_supply: float = 0.0,
         decimals: int = 8,
         pow_difficulty: int = 4,
+        base_reward: float = 50.0,
         pmc_flags: int = 0x004F,
         metadata: str = "",
         rules: list | None = None,
@@ -718,7 +724,8 @@ class NodeBackend(QObject):
             tx = create_pmc_create(
                 account=address, symbol=symbol, name=name,
                 max_supply=max_supply, decimals=decimals,
-                pow_difficulty=pow_difficulty, pmc_flags=pmc_flags,
+                pow_difficulty=pow_difficulty, base_reward=base_reward,
+                pmc_flags=pmc_flags,
                 metadata=metadata, rules=rules or [],
                 sequence=seq,
             )
@@ -740,9 +747,13 @@ class NodeBackend(QObject):
             return None
 
     def pmc_mint(
-        self, address: str, coin_id: str, nonce: int, amount: float
+        self, address: str, coin_id: str, nonce: int,
     ) -> dict | None:
-        """Mint new PMC supply via Proof-of-Work."""
+        """Mint new PMC supply via Proof-of-Work.
+
+        The reward amount is computed automatically from the coin's
+        difficulty and base_reward — miners do not choose it.
+        """
         wallet = self.wallets.get(address)
         if not wallet:
             self.error_occurred.emit(f"No wallet found for {address}")
@@ -751,7 +762,7 @@ class NodeBackend(QObject):
             seq = self._account_seq(address)
             tx = create_pmc_mint(
                 account=address, coin_id=coin_id,
-                nonce=nonce, amount=amount, sequence=seq,
+                nonce=nonce, sequence=seq,
             )
             wallet.sign_transaction(tx)
             results = self.network.broadcast_transaction(tx)
@@ -759,7 +770,7 @@ class NodeBackend(QObject):
             if accepted:
                 self._apply_immediately()
                 self.pmc_changed.emit()
-                self._log(f"PMC Minted: {amount} | coin={coin_id[:12]}… | miner={address[:12]}…")
+                self._log(f"PMC Mined: coin={coin_id[:12]}… | miner={address[:12]}…")
             else:
                 msgs = [m for _, _, m in results.values()]
                 self.error_occurred.emit(f"PMCMint rejected: {msgs[0]}")
@@ -960,6 +971,155 @@ class NodeBackend(QObject):
         """Return PoW mining info for a coin."""
         mgr = self._primary_node.ledger.pmc_manager
         return mgr.get_pow_info(coin_id)
+
+    # ── Mining Pool (Bitcoin Stratum API) ───────────────────────────────
+
+    def mining_pool_start(
+        self,
+        host: str = "0.0.0.0",
+        port: int = 3333,
+        coin_ids: list[str] | None = None,
+    ) -> bool:
+        """
+        Start the built-in Stratum mining server.
+
+        Once running, Bitcoin miners can connect via:
+            stratum+tcp://<your-ip>:<port>
+        with worker name: ``<wallet_address>.<worker_name>``
+
+        Parameters
+        ----------
+        host : str
+            Interface to bind (default all interfaces).
+        port : int
+            TCP port (default 3333 — standard Stratum).
+        coin_ids : list[str], optional
+            Coins to enable for mining.  If empty, registers all mintable coins.
+        """
+        import asyncio
+
+        if self.mining_node and self.mining_node.is_running:
+            self.error_occurred.emit("Mining pool is already running")
+            return False
+
+        mgr = self._primary_node.ledger.pmc_manager
+
+        # Create a mint callback that routes through the ledger properly
+        def _sync_mint(coin_id: str, miner: str, nonce: int) -> float:
+            ok, msg, amount = mgr.mint(coin_id, miner, nonce)
+            if ok:
+                self.pmc_changed.emit()
+                self.mining_pool_changed.emit()
+                return amount
+            return 0.0
+
+        self.mining_node = MiningNode(mgr, mint_callback=_sync_mint)
+
+        # Register coins
+        registered = 0
+        if coin_ids:
+            for cid in coin_ids:
+                if self.mining_node.add_coin(cid):
+                    registered += 1
+        else:
+            # Auto-register all mintable coins
+            for coin in mgr.list_coins():
+                if coin.has_flag(coin.__class__.flags.__class__(0x0004)):
+                    pass  # flag check below
+                info = mgr.get_pow_info(coin.coin_id)
+                if info.get("mintable"):
+                    if self.mining_node.add_coin(coin.coin_id):
+                        registered += 1
+
+        if registered == 0:
+            self.error_occurred.emit("No minable coins found. Create a coin first.")
+            self.mining_node = None
+            return False
+
+        # Start the async server in a background thread event loop
+        import threading
+
+        def _run_server():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(
+                    self.mining_node.start(host=host, port=port)
+                )
+                loop.run_forever()
+            except Exception as exc:
+                logger.error("Mining pool error: %s", exc)
+            finally:
+                loop.close()
+
+        self._mining_thread = threading.Thread(
+            target=_run_server, daemon=True, name="mining-pool",
+        )
+        self._mining_thread.start()
+
+        self._log(
+            f"Mining pool started on {host}:{port} | "
+            f"{registered} coin(s) registered | "
+            f"Connect miners via stratum+tcp://{host}:{port}"
+        )
+        self.mining_pool_changed.emit()
+        return True
+
+    def mining_pool_stop(self) -> None:
+        """Stop the mining pool server."""
+        import asyncio
+
+        if not self.mining_node or not self.mining_node.is_running:
+            return
+        # Stop the server from the mining thread's event loop
+        try:
+            loop = asyncio.new_event_loop()
+            loop.run_until_complete(self.mining_node.stop())
+            loop.close()
+        except Exception as exc:
+            logger.warning("Error stopping mining pool: %s", exc)
+        self.mining_node = None
+        self._log("Mining pool stopped")
+        self.mining_pool_changed.emit()
+
+    def mining_pool_add_coin(self, coin_id: str) -> bool:
+        """Register an additional coin for mining."""
+        if not self.mining_node:
+            return False
+        ok = self.mining_node.add_coin(coin_id)
+        if ok:
+            self.mining_pool_changed.emit()
+        return ok
+
+    def mining_pool_remove_coin(self, coin_id: str) -> None:
+        """Remove a coin from the mining pool."""
+        if self.mining_node:
+            self.mining_node.remove_coin(coin_id)
+            self.mining_pool_changed.emit()
+
+    def mining_pool_get_info(self) -> dict:
+        """Return current mining pool server status."""
+        if self.mining_node:
+            return self.mining_node.get_info()
+        return {"running": False}
+
+    def mining_pool_get_stats(self) -> dict:
+        """Return pool-wide mining statistics."""
+        if self.mining_node:
+            return self.mining_node.get_pool_stats()
+        return {}
+
+    def mining_pool_get_miners(self) -> list[dict]:
+        """Return per-miner statistics."""
+        if self.mining_node:
+            return self.mining_node.get_miner_stats()
+        return []
+
+    def mining_pool_list_coins(self) -> list[dict]:
+        """Return info for all coins being mined."""
+        if self.mining_node:
+            return self.mining_node.list_coins()
+        return []
 
     def get_demand_multiplier(self) -> float:
         """Return the current demand multiplier for dynamic APY."""

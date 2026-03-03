@@ -86,8 +86,15 @@ class _CreateCoinDialog(QDialog):
 
         # PoW Difficulty
         self.diff_edit = QLineEdit("4")
-        self.diff_edit.setPlaceholderText("1–32 (leading hex zeros)")
+        self.diff_edit.setPlaceholderText("1–32 (leading hex zeros, higher = harder & more reward)")
         form.addRow("PoW Difficulty:", self.diff_edit)
+
+        # Base Reward
+        self.base_reward_edit = QLineEdit("50")
+        self.base_reward_edit.setPlaceholderText(
+            "Tokens per solve at diff=1.  Actual reward = base × 2^(diff−1)"
+        )
+        form.addRow("Base Reward:", self.base_reward_edit)
 
         # Decimals
         self.decimals_edit = QLineEdit("8")
@@ -414,9 +421,6 @@ class PMCTab(QWidget):
         mine_form.addRow("Miner Wallet:", self.mine_wallet_combo)
         self.mine_coin_combo = QComboBox()
         mine_form.addRow("Coin:", self.mine_coin_combo)
-        self.mine_amount_edit = QLineEdit("1.0")
-        self.mine_amount_edit.setPlaceholderText("Tokens to mint per solve")
-        mine_form.addRow("Mint Amount:", self.mine_amount_edit)
 
         mine_lay.addLayout(mine_form)
 
@@ -444,6 +448,77 @@ class PMCTab(QWidget):
 
         self.sub_tabs.addTab(mine_widget, "PoW Mining")
 
+        # Sub-tab 5: Mining Pool (Stratum API for Bitcoin hardware)
+        pool_widget = QWidget()
+        pool_lay = QVBoxLayout(pool_widget)
+        pool_lay.setContentsMargins(0, 6, 0, 0)
+
+        pool_header = QLabel(
+            "<b>Bitcoin Mining Pool</b> — Run a Stratum server so Bitcoin "
+            "ASIC/GPU miners can mine your PMC coins directly."
+        )
+        pool_header.setWordWrap(True)
+        pool_header.setStyleSheet("color: #8b949e; font-size: 12px; margin-bottom: 8px;")
+        pool_lay.addWidget(pool_header)
+
+        pool_form = QFormLayout()
+        self.pool_host_edit = QLineEdit("0.0.0.0")
+        self.pool_host_edit.setPlaceholderText("Bind address (0.0.0.0 = all interfaces)")
+        pool_form.addRow("Host:", self.pool_host_edit)
+        self.pool_port_edit = QLineEdit("3333")
+        self.pool_port_edit.setPlaceholderText("Standard Stratum port")
+        pool_form.addRow("Port:", self.pool_port_edit)
+        pool_lay.addLayout(pool_form)
+
+        pool_btn_row = QHBoxLayout()
+        self.btn_pool_start = make_primary_button("▶ Start Mining Pool")
+        self.btn_pool_stop = make_primary_button("■ Stop")
+        self.btn_pool_stop.setEnabled(False)
+        self.btn_pool_refresh = make_primary_button("↻ Refresh Stats")
+        pool_btn_row.addWidget(self.btn_pool_start)
+        pool_btn_row.addWidget(self.btn_pool_stop)
+        pool_btn_row.addWidget(self.btn_pool_refresh)
+        pool_btn_row.addStretch()
+        pool_lay.addLayout(pool_btn_row)
+
+        # Connection string display
+        self.pool_connect_label = QLabel("")
+        self.pool_connect_label.setWordWrap(True)
+        self.pool_connect_label.setTextInteractionFlags(
+            self.pool_connect_label.textInteractionFlags()
+            | Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.pool_connect_label.setStyleSheet(
+            "color: #58a6ff; font-family: monospace; font-size: 13px; "
+            "margin: 8px 0; padding: 8px; background: #0d1117; "
+            "border: 1px solid #30363d; border-radius: 4px;"
+        )
+        pool_lay.addWidget(self.pool_connect_label)
+
+        # Pool stats
+        self.pool_stats_label = QLabel("Pool not running.")
+        self.pool_stats_label.setWordWrap(True)
+        self.pool_stats_label.setStyleSheet("color: #8b949e; font-size: 12px;")
+        pool_lay.addWidget(self.pool_stats_label)
+
+        # Miners table
+        miners_label = QLabel("<b>Connected Miners</b>")
+        miners_label.setStyleSheet("color: #c9d1d9; margin-top: 8px;")
+        pool_lay.addWidget(miners_label)
+
+        self.miners_table = QTableWidget(0, 6)
+        self.miners_table.setHorizontalHeaderLabels([
+            "Worker", "Wallet", "IP", "Accepted", "Rejected", "Uptime",
+        ])
+        self.miners_table.horizontalHeader().setStretchLastSection(True)
+        self.miners_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.miners_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.miners_table.setMaximumHeight(200)
+        pool_lay.addWidget(self.miners_table)
+
+        pool_lay.addStretch()
+        self.sub_tabs.addTab(pool_widget, "Mining Pool")
+
         root.addWidget(self.sub_tabs, 1)
 
     # ── Signals ─────────────────────────────────────────────────────
@@ -461,6 +536,12 @@ class PMCTab(QWidget):
         self.mine_coin_combo.currentIndexChanged.connect(self._update_mine_info)
         self.backend.pmc_changed.connect(self._refresh)
         self.backend.accounts_changed.connect(self._refresh_combos)
+        # Mining pool signals
+        self.btn_pool_start.clicked.connect(self._on_pool_start)
+        self.btn_pool_stop.clicked.connect(self._on_pool_stop)
+        self.btn_pool_refresh.clicked.connect(self._refresh_pool_stats)
+        if hasattr(self.backend, "mining_pool_changed"):
+            self.backend.mining_pool_changed.connect(self._refresh_pool_stats)
 
     # ── Refresh helpers ─────────────────────────────────────────────
 
@@ -637,6 +718,10 @@ class PMCTab(QWidget):
         except ValueError:
             diff = 4
         try:
+            base_reward = float(dlg.base_reward_edit.text() or "50")
+        except ValueError:
+            base_reward = 50.0
+        try:
             decimals = int(dlg.decimals_edit.text() or "8")
         except ValueError:
             decimals = 8
@@ -646,8 +731,8 @@ class PMCTab(QWidget):
         result = self.backend.pmc_create_coin(
             address=addr, symbol=symbol, name=name,
             max_supply=max_supply, decimals=decimals,
-            pow_difficulty=diff, pmc_flags=flags,
-            metadata=metadata,
+            pow_difficulty=diff, base_reward=base_reward,
+            pmc_flags=flags, metadata=metadata,
         )
         if result:
             QMessageBox.information(
@@ -851,10 +936,6 @@ class PMCTab(QWidget):
         if not addr or not coin_id:
             QMessageBox.warning(self, "Missing", "Select wallet and coin.")
             return
-        try:
-            mint_amount = float(self.mine_amount_edit.text() or "1")
-        except ValueError:
-            mint_amount = 1.0
 
         # Get PoW info
         pow_info = self.backend.pmc_get_pow_info(coin_id)
@@ -865,13 +946,15 @@ class PMCTab(QWidget):
         difficulty = pow_info["difficulty"]
         prev_hash = pow_info.get("prev_hash", "")
         target = "0" * difficulty
+        block_reward = pow_info.get("block_reward", 0)
 
         self.mine_log.append(
             f"⛏ Mining {pow_info['symbol']} | difficulty={difficulty} "
+            f"| reward={block_reward:,.8f} | algo=double-SHA256 "
             f"| target={'0'*difficulty}... | est. hashes: {pow_info['estimated_hashes']:,.0f}"
         )
 
-        # Brute-force nonce (limited iterations for GUI responsiveness)
+        # Brute-force nonce using Bitcoin-style double-SHA256
         import hashlib as _hl
 
         found = False
@@ -882,7 +965,7 @@ class PMCTab(QWidget):
         for start in range(0, max_iters, batch):
             for n in range(start, min(start + batch, max_iters)):
                 blob = f"{coin_id}:{addr}:{n}:{prev_hash}".encode()
-                h = _hl.blake2b(blob, digest_size=32).hexdigest()
+                h = _hl.sha256(_hl.sha256(blob).digest()).hexdigest()
                 if h[:difficulty] == target:
                     nonce = n
                     found = True
@@ -902,11 +985,11 @@ class PMCTab(QWidget):
         self.mine_log.append(f"✓ Found nonce={nonce} — submitting mint transaction…")
 
         result = self.backend.pmc_mint(
-            address=addr, coin_id=coin_id, nonce=nonce, amount=mint_amount,
+            address=addr, coin_id=coin_id, nonce=nonce,
         )
         if result:
             self.mine_log.append(
-                f"✓ Minted {mint_amount} tokens! tx={result.get('tx_id', '?')[:16]}…"
+                f"✓ Mined {block_reward:,.8f} tokens! tx={result.get('tx_id', '?')[:16]}…"
             )
             self._update_mine_info()
             self._refresh()
@@ -927,13 +1010,16 @@ class PMCTab(QWidget):
             remaining = "∞"
         else:
             remaining = f"{remaining:,.8f}"
+        reward = info.get('block_reward', 0)
+        algo = info.get('algorithm', 'double-SHA256')
         self.mine_info.setText(
             f"<b>{info['symbol']}</b> | "
+            f"Algorithm: <b>{algo}</b> | "
             f"Difficulty: <b>{info['difficulty']}</b> | "
+            f"Block Reward: <b>{reward:,.8f}</b> | "
             f"Est. hashes: <b>{info['estimated_hashes']:,.0f}</b> | "
             f"Minted: <b>{info['total_minted']:,.8f}</b> | "
-            f"Remaining: <b>{remaining}</b> | "
-            f"Mintable: <b>{'Yes' if info['mintable'] else 'No'}</b>"
+            f"Remaining: <b>{remaining}</b>"
         )
 
     def _load_order_book(self) -> None:
@@ -970,3 +1056,64 @@ class PMCTab(QWidget):
         t.verticalHeader().setVisible(False)
         t.setAlternatingRowColors(True)
         return t
+
+    # ── Mining Pool handlers ────────────────────────────────────────
+
+    def _on_pool_start(self) -> None:
+        """Start the Stratum mining pool server."""
+        host = self.pool_host_edit.text().strip() or "0.0.0.0"
+        try:
+            port = int(self.pool_port_edit.text().strip() or "3333")
+        except ValueError:
+            port = 3333
+
+        ok = self.backend.mining_pool_start(host=host, port=port)
+        if ok:
+            self.btn_pool_start.setEnabled(False)
+            self.btn_pool_stop.setEnabled(True)
+            self.pool_connect_label.setText(
+                f"stratum+tcp://{host}:{port}\n"
+                f"Worker format: <wallet_address>.<worker_name>"
+            )
+            self._refresh_pool_stats()
+
+    def _on_pool_stop(self) -> None:
+        """Stop the mining pool server."""
+        self.backend.mining_pool_stop()
+        self.btn_pool_start.setEnabled(True)
+        self.btn_pool_stop.setEnabled(False)
+        self.pool_connect_label.setText("")
+        self.pool_stats_label.setText("Pool not running.")
+        self.miners_table.setRowCount(0)
+
+    def _refresh_pool_stats(self) -> None:
+        """Refresh mining pool statistics display."""
+        info = self.backend.mining_pool_get_info()
+        if not info.get("running"):
+            return
+
+        stats = info.get("pool_stats", {})
+        coins_count = info.get("minable_coins", 0)
+        sessions = info.get("active_sessions", 0)
+
+        self.pool_stats_label.setText(
+            f"<b>Status:</b> Running | "
+            f"<b>Miners:</b> {sessions} | "
+            f"<b>Coins:</b> {coins_count} | "
+            f"<b>Shares:</b> {stats.get('total_shares_accepted', 0)} accepted / "
+            f"{stats.get('total_shares_rejected', 0)} rejected | "
+            f"<b>Blocks Found:</b> {stats.get('total_blocks_found', 0)} | "
+            f"<b>Total Mined:</b> {stats.get('total_coins_mined', 0):,.8f} | "
+            f"<b>Uptime:</b> {stats.get('uptime_seconds', 0):,.0f}s"
+        )
+
+        # Update miners table
+        miners = self.backend.mining_pool_get_miners()
+        self.miners_table.setRowCount(len(miners))
+        for i, m in enumerate(miners):
+            self.miners_table.setItem(i, 0, QTableWidgetItem(m.get("worker_name", "")))
+            self.miners_table.setItem(i, 1, QTableWidgetItem(m.get("wallet_address", "")[:20]))
+            self.miners_table.setItem(i, 2, QTableWidgetItem(m.get("ip", "")))
+            self.miners_table.setItem(i, 3, QTableWidgetItem(str(m.get("shares_accepted", 0))))
+            self.miners_table.setItem(i, 4, QTableWidgetItem(str(m.get("shares_rejected", 0))))
+            self.miners_table.setItem(i, 5, QTableWidgetItem(f"{m.get('uptime_seconds', 0):.0f}s"))

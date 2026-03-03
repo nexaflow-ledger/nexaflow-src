@@ -1222,7 +1222,8 @@ cpdef object create_set_hook(str account, str hook_hash, int position=0,
 
 cpdef object create_pmc_create(str account, str symbol, str name,
                                double max_supply=0.0, int decimals=8,
-                               int pow_difficulty=4, int pmc_flags=0x004F,
+                               int pow_difficulty=4, double base_reward=50.0,
+                               int pmc_flags=0x004F,
                                str metadata="", list rules=None,
                                double fee=0.00001, long long sequence=0):
     """Create a new Programmable Micro Coin definition."""
@@ -1235,6 +1236,7 @@ cpdef object create_pmc_create(str account, str symbol, str name,
         "max_supply": max_supply,
         "decimals": decimals,
         "pow_difficulty": pow_difficulty,
+        "base_reward": base_reward,
         "pmc_flags": pmc_flags,
         "metadata": metadata,
         "rules": rules or [],
@@ -1242,13 +1244,14 @@ cpdef object create_pmc_create(str account, str symbol, str name,
     return tx
 
 cpdef object create_pmc_mint(str account, str coin_id, int nonce,
-                             double amount, double fee=0.00001,
+                             double fee=0.00001,
                              long long sequence=0):
-    """Mint new PMC supply via Proof-of-Work."""
+    """Mint new PMC supply via Proof-of-Work.  Reward is computed
+    automatically from the coin's difficulty and base_reward."""
     cdef Transaction tx = Transaction(
-        TT_PMC_MINT, account, "", Amount(amount), Amount(fee), sequence,
+        TT_PMC_MINT, account, "", Amount(0.0), Amount(fee), sequence,
     )
-    tx.flags = {"coin_id": coin_id, "nonce": nonce, "amount": amount}
+    tx.flags = {"coin_id": coin_id, "nonce": nonce}
     return tx
 
 cpdef object create_pmc_transfer(str account, str destination, str coin_id,

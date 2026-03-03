@@ -2902,6 +2902,7 @@ cdef class Ledger:
             max_supply=float(flags_d.get("max_supply", 0)),
             decimals=int(flags_d.get("decimals", 8)),
             pow_difficulty=int(flags_d.get("pow_difficulty", 4)),
+            base_reward=float(flags_d.get("base_reward", 50.0)),
             flags=int(flags_d.get("pmc_flags", 0x004F)),
             metadata=flags_d.get("metadata", ""),
             rules=rules_raw,
@@ -2929,9 +2930,8 @@ cdef class Ledger:
         flags_d = tx.flags or {}
         coin_id = flags_d.get("coin_id", "")
         nonce = int(flags_d.get("nonce", 0))
-        amount = float(flags_d.get("amount", 0))
         ok, msg, minted = self.pmc_manager.mint(
-            coin_id=coin_id, miner=src, nonce=nonce, amount=amount,
+            coin_id=coin_id, miner=src, nonce=nonce,
         )
         if not ok:
             if "Proof-of-Work" in msg:

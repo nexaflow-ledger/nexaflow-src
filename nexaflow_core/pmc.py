@@ -4,9 +4,12 @@ Programmable Micro Coin (PMC) engine for NexaFlow.
 PMC enables anyone to create lightweight, programmable tokens that live
 on the NexaFlow ledger.  Each micro coin has:
 
-  - **Proof-of-Work minting**: new supply is mined by solving a hash
-    puzzle (BLAKE2b partial pre-image).  Difficulty auto-adjusts per
-    coin based on recent block rate.
+  - **Proof-of-Work minting**: new supply is mined by solving a
+    Bitcoin-compatible double-SHA256 hash puzzle.  The coin creator
+    sets a fixed difficulty; miners are rewarded proportionally to
+    the work performed — higher difficulty yields exponentially
+    larger block rewards.  Uses the same hash algorithm as Bitcoin
+    so existing ASIC / GPU mining hardware works out of the box.
   - **Programmable rules**: the issuer attaches rules that govern
     transfers, burns, and minting behaviour (max per-mint, cooldowns,
     whitelist/blacklist, royalty-on-transfer, expiry, etc.).
@@ -54,9 +57,16 @@ DEFAULT_DECIMALS = 8
 MIN_POW_DIFFICULTY = 1          # at least 1 leading hex zero
 MAX_POW_DIFFICULTY = 32         # 32 hex zeros ≈ 128-bit security
 DEFAULT_POW_DIFFICULTY = 4      # 4 leading hex zeros (~65 k hashes)
-DIFFICULTY_ADJUST_WINDOW = 10   # recalc every N mints
-TARGET_MINT_INTERVAL = 60.0     # target seconds between mints
 MAX_SUPPLY_CAP = 1_000_000_000_000_000.0  # absolute ceiling
+
+# ── Reward scaling ───────────────────────────────────────────────────
+# Reward formula:  reward = base_reward * 2^(difficulty - 1)
+# Difficulty 1 → 1× base_reward, Difficulty 2 → 2×, 3 → 4×, 4 → 8×, …
+# This gives coins mined at higher difficulty exponentially more value,
+# making the coin creator's difficulty choice a core economic lever.
+DEFAULT_BASE_REWARD = 50.0     # default tokens per PoW solve at diff=1
+MIN_BASE_REWARD = 0.00000001   # 1 satoshi-equivalent
+MAX_BASE_REWARD = 1_000_000_000.0
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -139,16 +149,21 @@ class PMCDefinition:
     total_burned: float = 0.0
     flags: int = int(DEFAULT_FLAGS)
     pow_difficulty: int = DEFAULT_POW_DIFFICULTY
+    base_reward: float = DEFAULT_BASE_REWARD   # tokens per PoW at diff=1
     metadata: str = ""                    # JSON / URI
     rules: list[PMCRule] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
     frozen: bool = False
-    # PoW difficulty adjustment state
-    _mint_timestamps: list[float] = field(default_factory=list)
+    total_mints: int = 0                  # number of successful PoW solves
 
     @property
     def circulating(self) -> float:
         return self.total_minted - self.total_burned
+
+    @property
+    def block_reward(self) -> float:
+        """Current reward per PoW solve: base_reward * 2^(difficulty-1)."""
+        return self.base_reward * (2 ** (self.pow_difficulty - 1))
 
     def has_flag(self, flag: PMCFlag) -> bool:
         return bool(self.flags & flag)
@@ -173,6 +188,9 @@ class PMCDefinition:
             "flags": self.flags,
             "flag_names": [f.name for f in PMCFlag if self.flags & f],
             "pow_difficulty": self.pow_difficulty,
+            "base_reward": self.base_reward,
+            "block_reward": self.block_reward,
+            "total_mints": self.total_mints,
             "metadata": self.metadata,
             "rules": [r.to_dict() for r in self.rules],
             "created_at": self.created_at,
@@ -262,21 +280,24 @@ class PMCOffer:
 
 def compute_pow_hash(coin_id: str, miner: str, nonce: int, prev_hash: str = "") -> str:
     """
-    Compute the PoW hash for a mint attempt.
+    Compute the PoW hash for a mint attempt using **Bitcoin-style
+    double-SHA256** so that existing Bitcoin ASIC / GPU mining
+    hardware can be used directly.
 
-    hash = BLAKE2b-256( coin_id || miner || nonce || prev_hash )
+    hash = SHA256( SHA256( coin_id || miner || nonce || prev_hash ) )
 
-    Returns the hex digest.
+    Returns the hex digest (64 hex chars, 256-bit).
     """
     blob = f"{coin_id}:{miner}:{nonce}:{prev_hash}".encode("utf-8")
-    return hashlib.blake2b(blob, digest_size=32).hexdigest()
+    first = hashlib.sha256(blob).digest()
+    return hashlib.sha256(first).hexdigest()
 
 
 def verify_pow(coin_id: str, miner: str, nonce: int,
                difficulty: int, prev_hash: str = "") -> bool:
     """
-    Verify that the nonce produces a hash with at least ``difficulty``
-    leading hex zeros.
+    Verify that the nonce produces a double-SHA256 hash with at least
+    ``difficulty`` leading hex zeros.
     """
     h = compute_pow_hash(coin_id, miner, nonce, prev_hash)
     return h[:difficulty] == "0" * difficulty
@@ -287,27 +308,15 @@ def estimate_hashrate_to_difficulty(difficulty: int) -> float:
     return 16.0 ** difficulty
 
 
-def adjust_difficulty(coin: PMCDefinition) -> int:
+def compute_block_reward(base_reward: float, difficulty: int) -> float:
+    """Reward = base_reward * 2^(difficulty - 1).
+
+    Higher difficulty exponentially increases the reward, reflecting
+    the greater computational work required.  This makes the coin
+    creator's difficulty choice the primary economic lever — a coin
+    with difficulty 8 pays 128× the base reward per solve.
     """
-    Auto-adjust PoW difficulty based on recent mint timestamps.
-
-    If mints are too fast (< target), increase difficulty.
-    If too slow (> target), decrease difficulty.
-    """
-    stamps = coin._mint_timestamps
-    if len(stamps) < DIFFICULTY_ADJUST_WINDOW:
-        return coin.pow_difficulty
-
-    recent = stamps[-DIFFICULTY_ADJUST_WINDOW:]
-    avg_interval = (recent[-1] - recent[0]) / (len(recent) - 1)
-
-    if avg_interval < TARGET_MINT_INTERVAL * 0.5:
-        # too fast → harder
-        return min(coin.pow_difficulty + 1, MAX_POW_DIFFICULTY)
-    elif avg_interval > TARGET_MINT_INTERVAL * 2.0:
-        # too slow → easier
-        return max(coin.pow_difficulty - 1, MIN_POW_DIFFICULTY)
-    return coin.pow_difficulty
+    return base_reward * (2 ** (difficulty - 1))
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -493,6 +502,7 @@ class PMCManager:
         max_supply: float = 0.0,
         decimals: int = DEFAULT_DECIMALS,
         pow_difficulty: int = DEFAULT_POW_DIFFICULTY,
+        base_reward: float = DEFAULT_BASE_REWARD,
         flags: int = int(DEFAULT_FLAGS),
         metadata: str = "",
         rules: list[dict] | None = None,
@@ -528,6 +538,10 @@ class PMCManager:
         if pow_difficulty < MIN_POW_DIFFICULTY or pow_difficulty > MAX_POW_DIFFICULTY:
             return False, f"Difficulty must be {MIN_POW_DIFFICULTY}-{MAX_POW_DIFFICULTY}", None
 
+        # Validate base reward
+        if base_reward < MIN_BASE_REWARD or base_reward > MAX_BASE_REWARD:
+            return False, f"Base reward must be {MIN_BASE_REWARD}-{MAX_BASE_REWARD}", None
+
         # Validate metadata length
         if metadata and len(metadata) > MAX_METADATA_LEN:
             return False, f"Metadata exceeds {MAX_METADATA_LEN} chars", None
@@ -556,6 +570,7 @@ class PMCManager:
             max_supply=max_supply,
             flags=flags,
             pow_difficulty=pow_difficulty,
+            base_reward=base_reward,
             metadata=metadata,
             rules=parsed_rules,
             created_at=now if now is not None else time.time(),
@@ -577,11 +592,18 @@ class PMCManager:
         coin_id: str,
         miner: str,
         nonce: int,
-        amount: float,
         now: float | None = None,
     ) -> tuple[bool, str, float]:
         """
         Attempt to mint new supply via Proof-of-Work.
+
+        The minter does **not** choose the reward amount — it is computed
+        automatically from the coin's difficulty and base_reward:
+
+            reward = base_reward * 2^(difficulty - 1)
+
+        This means harder PoW puzzles pay exponentially more, making
+        difficulty the economic backbone of each micro coin.
 
         Returns (success, message, minted_amount).
         """
@@ -598,55 +620,49 @@ class PMCManager:
         if coin.frozen:
             return False, "Coin is frozen", 0.0
 
-        if amount <= 0:
-            return False, "Mint amount must be positive", 0.0
+        # Compute reward from difficulty
+        reward = compute_block_reward(coin.base_reward, coin.pow_difficulty)
 
         # Check supply cap
         if coin.max_supply > 0:
             remaining = coin.max_supply - coin.total_minted
             if remaining <= 0:
                 return False, "Max supply reached", 0.0
-            amount = min(amount, remaining)
+            reward = min(reward, remaining)
+
+        if reward <= 0:
+            return False, "Max supply reached", 0.0
 
         # Get/create holder
         holder = self._get_or_create_holder(coin_id, miner, now)
 
         # Evaluate mint rules
         try:
-            evaluate_mint_rules(coin, holder, amount, now)
+            evaluate_mint_rules(coin, holder, reward, now)
         except RuleViolation as exc:
             return False, str(exc), 0.0
 
-        # Verify Proof-of-Work
+        # Verify Proof-of-Work (Bitcoin-style double-SHA256)
         prev_hash = self._last_pow_hash.get(coin_id, coin_id)
         if not verify_pow(coin_id, miner, nonce, coin.pow_difficulty, prev_hash):
             return False, "Invalid Proof-of-Work", 0.0
 
         # Round to coin decimals
         factor = 10 ** coin.decimals
-        amount = math.floor(amount * factor) / factor
+        reward = math.floor(reward * factor) / factor
 
         # Apply mint
-        holder.balance += amount
+        holder.balance += reward
         holder.last_mint_at = now
-        coin.total_minted += amount
-
-        # Record timestamp for difficulty adjustment
-        coin._mint_timestamps.append(now)
-        if len(coin._mint_timestamps) > DIFFICULTY_ADJUST_WINDOW * 2:
-            coin._mint_timestamps = coin._mint_timestamps[-DIFFICULTY_ADJUST_WINDOW * 2:]
+        coin.total_minted += reward
+        coin.total_mints += 1
 
         # Update PoW chain hash
         self._last_pow_hash[coin_id] = compute_pow_hash(
             coin_id, miner, nonce, prev_hash
         )
 
-        # Auto-adjust difficulty
-        new_diff = adjust_difficulty(coin)
-        if new_diff != coin.pow_difficulty:
-            coin.pow_difficulty = new_diff
-
-        return True, f"Minted {amount} {coin.symbol}", amount
+        return True, f"Minted {reward} {coin.symbol} (difficulty {coin.pow_difficulty})", reward
 
     # ── Transfer ────────────────────────────────────────────────────
 
@@ -1135,16 +1151,23 @@ class PMCManager:
         if coin is None:
             return {}
         remaining = (coin.max_supply - coin.total_minted) if coin.max_supply > 0 else float("inf")
+        reward = compute_block_reward(coin.base_reward, coin.pow_difficulty)
+        if coin.max_supply > 0:
+            reward = min(reward, max(0.0, coin.max_supply - coin.total_minted))
         return {
             "coin_id": coin_id,
             "symbol": coin.symbol,
             "difficulty": coin.pow_difficulty,
+            "base_reward": coin.base_reward,
+            "block_reward": reward,
             "estimated_hashes": estimate_hashrate_to_difficulty(coin.pow_difficulty),
             "total_minted": coin.total_minted,
+            "total_mints": coin.total_mints,
             "max_supply": coin.max_supply,
             "remaining_supply": remaining,
             "prev_hash": self._last_pow_hash.get(coin_id, ""),
             "mintable": coin.has_flag(PMCFlag.MINTABLE) and not coin.frozen,
+            "algorithm": "double-SHA256",
         }
 
     # ── Internal helpers ────────────────────────────────────────────

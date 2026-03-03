@@ -27,6 +27,7 @@ __all__ = [
     "invariants",
     "ledger",
     "mpt",
+    "mining_api",
     "multi_sign",
     "negative_unl",
     "network",
