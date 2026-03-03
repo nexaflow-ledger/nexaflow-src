@@ -140,9 +140,9 @@ class TestPMCSyncRoundtrip:
         # Miner should have balance
         miner_bal = mgr.get_balance(coin.coin_id, "rMiner")
         assert miner_bal > 0
-        # Trader should have 10.0
+        # Trader received 10.0, but 5.0 are escrowed in a sell offer
         trader_bal = mgr.get_balance(coin.coin_id, "rTrader")
-        assert trader_bal == 10.0
+        assert trader_bal == 5.0
 
     def test_full_snapshot_roundtrip_pmc_offers(self, pmc_source_ledger, empty_ledger):
         ledger, coin = pmc_source_ledger

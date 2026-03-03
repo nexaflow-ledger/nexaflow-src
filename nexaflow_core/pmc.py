@@ -1821,8 +1821,17 @@ class PMCManager:
 
         # Validate seller has coins
         s_holder = self._holders.get(offer.coin_id, {}).get(seller)
-        if s_holder is None or s_holder.balance < qty:
-            return False, "Seller has insufficient coin balance", {}
+        if offer.is_sell:
+            # Sell offer: tokens were escrowed at create_offer time.
+            # Seller balance was already deducted — only check remaining.
+            if s_holder is None:
+                return False, "Seller has insufficient coin balance", {}
+            if offer.remaining < qty:
+                return False, "Offer has insufficient remaining quantity", {}
+        else:
+            # Buy offer: taker is selling; they haven't escrowed.
+            if s_holder is None or s_holder.balance < qty:
+                return False, "Seller has insufficient coin balance", {}
         if s_holder.frozen:
             return False, "Seller account is frozen", {}
 
@@ -1830,10 +1839,17 @@ class PMCManager:
         counter_coin_id = offer.counter_coin_id
 
         if counter_coin_id:
-            # Buyer pays with counter coin
-            b_counter = self._holders.get(counter_coin_id, {}).get(buyer)
-            if b_counter is None or b_counter.balance < total_cost:
-                return False, "Buyer has insufficient counter-coin balance", {}
+            if not offer.is_sell and offer.owner == buyer:
+                # Buy offer: buyer (offer.owner) already escrowed counter-coin
+                # at create_offer time — just verify counter holder exists.
+                b_counter = self._holders.get(counter_coin_id, {}).get(buyer)
+                if b_counter is None:
+                    return False, "Buyer has insufficient counter-coin balance", {}
+            else:
+                # Buyer pays with counter coin (not escrowed)
+                b_counter = self._holders.get(counter_coin_id, {}).get(buyer)
+                if b_counter is None or b_counter.balance < total_cost:
+                    return False, "Buyer has insufficient counter-coin balance", {}
 
         # Evaluate transfer rules on the coin being traded
         royalty = 0.0
@@ -1852,7 +1868,13 @@ class PMCManager:
         # ── Execute settlement atomically ──
 
         # 1. Move coins: seller → buyer
-        s_holder.balance -= qty
+        if offer.is_sell:
+            # Sell offer: tokens already escrowed at create_offer time.
+            # Do NOT deduct again — just credit the buyer.
+            pass
+        else:
+            # Buy offer: seller is the taker, hasn't escrowed tokens.
+            s_holder.balance -= qty
         s_holder.last_transfer_at = now
         r_holder.balance += net_qty
 
@@ -1863,8 +1885,12 @@ class PMCManager:
 
         # 2. Move payment: buyer → seller
         if counter_coin_id:
-            b_counter = self._holders[counter_coin_id][buyer]
-            b_counter.balance -= total_cost
+            if not offer.is_sell and offer.owner == buyer:
+                # Buy offer: buyer already escrowed counter-coin — don't deduct again.
+                pass
+            else:
+                b_counter = self._holders[counter_coin_id][buyer]
+                b_counter.balance -= total_cost
             s_counter = self._get_or_create_holder(counter_coin_id, seller, now)
             s_counter.balance += total_cost
         # If NXF-based, the ledger layer handles NXF balance moves

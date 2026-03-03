@@ -298,6 +298,8 @@ class TestTXPayloadTampering(unittest.TestCase):
                 "tx_id": "tampered_tx",
                 "amount": 999999,  # tampered
                 "original_amount": 1,
+                "signature": "ab" * 32,
+                "signing_pub_key": "cd" * 16,
             },
         }
         self._run(node._dispatch(FakePeer(), msg))
@@ -341,6 +343,7 @@ class TestProposalSpoofing(unittest.TestCase):
                 "validator_id": "trusted_validator",  # spoofed
                 "ledger_seq": 5,
                 "tx_ids": ["malicious_tx"],
+                "signature": "ab" * 32,
             },
         }
         self._run(node._dispatch(FakePeer(), msg))
@@ -363,11 +366,11 @@ class TestProposalSpoofing(unittest.TestCase):
 
         msg1 = {
             "type": "PROPOSAL",
-            "payload": {"validator_id": "v2", "ledger_seq": 5, "tx_ids": ["tx1"]},
+            "payload": {"validator_id": "v2", "ledger_seq": 5, "tx_ids": ["tx1"], "signature": "ab" * 32},
         }
         msg2 = {
             "type": "PROPOSAL",
-            "payload": {"validator_id": "v2", "ledger_seq": 5, "tx_ids": ["tx2"]},
+            "payload": {"validator_id": "v2", "ledger_seq": 5, "tx_ids": ["tx2"], "signature": "ab" * 32},
         }
 
         self._run(node._dispatch(FakePeer(), msg1))

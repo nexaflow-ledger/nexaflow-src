@@ -220,50 +220,85 @@ class TestServerStateMachine(unittest.TestCase):
 # ═════════════════════════════════════════════════════════════════════
 
 class TestManifestAndUNL(unittest.TestCase):
+    """Manifest tests use real Ed25519 key pairs for signature verification."""
+
+    @classmethod
+    def setUpClass(cls):
+        from nacl.signing import SigningKey
+        # Generate 3 master key pairs
+        cls._keys = []
+        for _ in range(3):
+            sk = SigningKey.generate()
+            cls._keys.append((sk, sk.verify_key))
+        # Ephemeral keys (just more ed25519 pairs)
+        cls._eph_keys = []
+        for _ in range(3):
+            sk = SigningKey.generate()
+            cls._eph_keys.append((sk, sk.verify_key))
+
+    def _pk_hex(self, idx):
+        return bytes(self._keys[idx][1]).hex()
+
+    def _eph_hex(self, idx):
+        return bytes(self._eph_keys[idx][1]).hex()
+
+    def _sign_manifest(self, manifest, key_idx):
+        """Sign a manifest blob with the master key at key_idx."""
+        blob = manifest.signing_blob()
+        sig = self._keys[key_idx][0].sign(blob).signature
+        return sig.hex()
+
     def test_manifest_cache_apply_and_get(self):
         from nexaflow_core.manifest import ManifestCache, ValidatorManifest
         cache = ManifestCache()
         m = ValidatorManifest(
-            master_public_key="pk_master_1",
-            ephemeral_public_key="pk_eph_1",
+            master_public_key=self._pk_hex(0),
+            ephemeral_public_key=self._eph_hex(0),
             sequence=1,
             domain="example.com",
-            master_signature="sig1",
         )
+        m.master_signature = self._sign_manifest(m, 0)
         cache.apply(m)
-        result = cache.get("pk_master_1")
+        result = cache.get(self._pk_hex(0))
         self.assertIsNotNone(result)
-        self.assertEqual(result.ephemeral_public_key, "pk_eph_1")
+        self.assertEqual(result.ephemeral_public_key, self._eph_hex(0))
 
     def test_manifest_sequence_revocation(self):
         from nexaflow_core.manifest import ManifestCache, ValidatorManifest
         cache = ManifestCache()
-        m1 = ValidatorManifest("pk_m", "pk_e1", sequence=1)
-        m2 = ValidatorManifest("pk_m", "pk_e2", sequence=5)
+        m1 = ValidatorManifest(self._pk_hex(0), self._eph_hex(0), sequence=1)
+        m1.master_signature = self._sign_manifest(m1, 0)
+        m2 = ValidatorManifest(self._pk_hex(0), self._eph_hex(1), sequence=5)
+        m2.master_signature = self._sign_manifest(m2, 0)
         cache.apply(m1)
         cache.apply(m2)
-        result = cache.get("pk_m")
+        result = cache.get(self._pk_hex(0))
         self.assertEqual(result.sequence, 5)
-        self.assertEqual(result.ephemeral_public_key, "pk_e2")
+        self.assertEqual(result.ephemeral_public_key, self._eph_hex(1))
 
     def test_manifest_get_ephemeral_key(self):
         from nexaflow_core.manifest import ManifestCache, ValidatorManifest
         cache = ManifestCache()
-        m = ValidatorManifest("pk_m", "pk_e", sequence=1)
+        m = ValidatorManifest(self._pk_hex(0), self._eph_hex(0), sequence=1)
+        m.master_signature = self._sign_manifest(m, 0)
         cache.apply(m)
-        self.assertEqual(cache.get_ephemeral_key("pk_m"), "pk_e")
+        self.assertEqual(cache.get_ephemeral_key(self._pk_hex(0)), self._eph_hex(0))
         self.assertEqual(cache.get_ephemeral_key("unknown"), "")
 
     def test_manifest_all_active(self):
         from nexaflow_core.manifest import ManifestCache, ValidatorManifest
         cache = ManifestCache()
         for i in range(3):
-            cache.apply(ValidatorManifest(f"pk_m{i}", f"pk_e{i}", sequence=1))
+            m = ValidatorManifest(self._pk_hex(i), self._eph_hex(i), sequence=1)
+            m.master_signature = self._sign_manifest(m, i)
+            cache.apply(m)
         self.assertEqual(len(cache.all_active()), 3)
 
     def test_unl_publisher_and_subscriber(self):
         from nexaflow_core.manifest import UNLPublisher, UNLSubscriber
-        pub = UNLPublisher(publisher_key="pub_key_1")
+        sk_hex = bytes(self._keys[0][0]).hex()
+        pk_hex = self._pk_hex(0)
+        pub = UNLPublisher(publisher_key=pk_hex, private_key=sk_hex)
         vl = pub.publish(
             validator_keys=["v1", "v2", "v3"],
             expiration_hours=1.0,
@@ -271,9 +306,9 @@ class TestManifestAndUNL(unittest.TestCase):
         self.assertEqual(len(vl.validators), 3)
 
         sub = UNLSubscriber()
-        sub.add_publisher("pub_key_1")
-        ok = sub.apply_list(vl)
-        self.assertTrue(ok)
+        sub.add_publisher(pk_hex)
+        ok, msg = sub.apply_list(vl)
+        self.assertTrue(ok, msg)
         self.assertEqual(len(sub.trusted_validators), 3)
         self.assertIn("v1", sub.trusted_validators)
 

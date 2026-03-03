@@ -1,6 +1,10 @@
 """Tests for the cross-chain bridge module."""
 
+import hashlib
+import struct
+
 import pytest
+from nacl.signing import SigningKey
 
 from nexaflow_core.xchain import (
     XChainManager,
@@ -13,6 +17,25 @@ from nexaflow_core.xchain import (
 @pytest.fixture
 def xchain():
     return XChainManager()
+
+
+# Generate a deterministic Ed25519 witness key pair
+_WITNESS_SK = SigningKey(b"\x01" * 32)
+_WITNESS_PK_HEX = _WITNESS_SK.verify_key.encode().hex()
+
+
+def _sign_attestation(bridge_id: str, claim_id: int, amount: float,
+                      witness_pk_hex: str, sk: SigningKey) -> str:
+    """Compute a real Ed25519 attestation signature."""
+    claim_blob = (
+        bridge_id.encode("utf-8")
+        + struct.pack(">i", claim_id)
+        + struct.pack(">d", amount)
+        + witness_pk_hex.encode("utf-8")
+    )
+    claim_hash = hashlib.sha256(claim_blob).digest()
+    sig = sk.sign(claim_hash).signature
+    return sig.hex()
 
 
 NXF_ISSUE = {"currency": "NXF", "issuer": ""}
@@ -76,8 +99,10 @@ class TestXChainAttestation:
             "rDoor", "rIssueDoor", NXF_ISSUE, NXF_ISSUE)
         _, _, claim_id = xchain.create_claim_id(bridge.bridge_id, "rSender")
         xchain.commit(bridge.bridge_id, "rSender", 100.0, claim_id, "rDest")
+        sig = _sign_attestation(bridge.bridge_id, claim_id, 100.0,
+                                _WITNESS_PK_HEX, _WITNESS_SK)
         ok2, msg2 = xchain.add_attestation(bridge.bridge_id, claim_id,
-                                            "rW1", "sig1")
+                                            _WITNESS_PK_HEX, sig)
         assert ok2 is True
 
     def test_duplicate_attestation_fails(self, xchain):
@@ -85,9 +110,11 @@ class TestXChainAttestation:
             "rDoor", "rIssueDoor", NXF_ISSUE, NXF_ISSUE)
         _, _, claim_id = xchain.create_claim_id(bridge.bridge_id, "rSender")
         xchain.commit(bridge.bridge_id, "rSender", 100.0, claim_id, "rDest")
-        xchain.add_attestation(bridge.bridge_id, claim_id, "rW1", "sig1")
+        sig = _sign_attestation(bridge.bridge_id, claim_id, 100.0,
+                                _WITNESS_PK_HEX, _WITNESS_SK)
+        xchain.add_attestation(bridge.bridge_id, claim_id, _WITNESS_PK_HEX, sig)
         ok2, msg2 = xchain.add_attestation(bridge.bridge_id, claim_id,
-                                            "rW1", "sig1")
+                                            _WITNESS_PK_HEX, sig)
         assert ok2 is False
 
 
@@ -97,7 +124,9 @@ class TestXChainClaim:
             "rDoor", "rIssueDoor", NXF_ISSUE, NXF_ISSUE)
         _, _, claim_id = xchain.create_claim_id(bridge.bridge_id, "rSender")
         xchain.commit(bridge.bridge_id, "rSender", 100.0, claim_id, "rDest")
-        xchain.add_attestation(bridge.bridge_id, claim_id, "rW1", "sig1")
+        sig = _sign_attestation(bridge.bridge_id, claim_id, 100.0,
+                                _WITNESS_PK_HEX, _WITNESS_SK)
+        xchain.add_attestation(bridge.bridge_id, claim_id, _WITNESS_PK_HEX, sig)
         ok2, msg2, amount = xchain.claim(bridge.bridge_id, claim_id, "rDest")
         assert ok2 is True
         assert amount > 0
@@ -108,7 +137,9 @@ class TestXChainClaim:
             "rDoor", "rIssueDoor", NXF_ISSUE, NXF_ISSUE)
         _, _, claim_id = xm.create_claim_id(bridge.bridge_id, "rSender")
         xm.commit(bridge.bridge_id, "rSender", 100.0, claim_id, "rDest")
-        xm.add_attestation(bridge.bridge_id, claim_id, "rW1", "sig1")
+        sig = _sign_attestation(bridge.bridge_id, claim_id, 100.0,
+                                _WITNESS_PK_HEX, _WITNESS_SK)
+        xm.add_attestation(bridge.bridge_id, claim_id, _WITNESS_PK_HEX, sig)
         # Need 2 witnesses, only 1 attested
         ok2, msg2, amount = xm.claim(bridge.bridge_id, claim_id, "rDest")
         assert ok2 is False

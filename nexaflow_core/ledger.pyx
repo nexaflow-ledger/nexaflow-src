@@ -443,11 +443,13 @@ cdef class Ledger:
             self.create_account(dst)
         cdef AccountEntry dst_acc = self.accounts[dst]
 
-        # Check sequence (sequence=0 only allowed with a ticket)
+        # Check sequence (sequence=0 means "auto-fill from account")
         if tx.sequence == 0:
-            if not getattr(tx, 'ticket_sequence', 0):
-                return 105  # tecBAD_SEQ
-        elif tx.sequence != src_acc.sequence:
+            if getattr(tx, 'ticket_sequence', 0):
+                pass  # ticket-based: sequence 0 is valid
+            else:
+                tx.sequence = src_acc.sequence
+        if tx.sequence != src_acc.sequence:
             return 105  # tecBAD_SEQ
 
         # ── RequireDest enforcement (Tier 1) ──
@@ -952,14 +954,18 @@ cdef class Ledger:
         _snapshot_supply = self.total_supply
         _snapshot_burned = self.total_burned
         _snapshot_minted = self.total_minted
-        # Snapshot trust lines for complete rollback
+        # Snapshot trust lines (per-account) for complete rollback
         _snapshot_trust_lines = {}
-        for _tl_key, _tl in self.trust_lines.items():
-            _snapshot_trust_lines[_tl_key] = (
-                _tl.balance, _tl.limit, _tl.frozen, _tl.authorized,
-            )
+        for _addr, _acc in self.accounts.items():
+            for _tl_key, _tl in _acc.trust_lines.items():
+                _snapshot_trust_lines[(_addr, _tl_key)] = (
+                    _tl.balance, _tl.limit, _tl.frozen, _tl.authorized,
+                )
         # Snapshot open offers count per account
-        _snapshot_offers = dict(self.open_offers) if hasattr(self, 'open_offers') else {}
+        _snapshot_offers = {}
+        for _addr, _acc in self.accounts.items():
+            if _acc.open_offers:
+                _snapshot_offers[_addr] = list(_acc.open_offers)
 
         # ── MetadataBuilder ──
         meta = MetadataBuilder(tx_hash=tx.tx_id or "", tx_index=len(self.pending_txns))
@@ -1107,17 +1113,21 @@ cdef class Ledger:
                         _racc.balance = _bal
                         _racc.sequence = _seq
                         _racc.owner_count = _oc
-                # Restore trust lines
-                for _tl_key, (_tl_bal, _tl_lim, _tl_frz, _tl_auth) in _snapshot_trust_lines.items():
-                    _rtl = self.trust_lines.get(_tl_key)
-                    if _rtl is not None:
-                        _rtl.balance = _tl_bal
-                        _rtl.limit = _tl_lim
-                        _rtl.frozen = _tl_frz
-                        _rtl.authorized = _tl_auth
-                # Restore open offers
-                if hasattr(self, 'open_offers') and _snapshot_offers is not None:
-                    self.open_offers = _snapshot_offers
+                # Restore trust lines (per-account)
+                for (_tl_addr, _tl_key), (_tl_bal, _tl_lim, _tl_frz, _tl_auth) in _snapshot_trust_lines.items():
+                    _racc = self.accounts.get(_tl_addr)
+                    if _racc is not None:
+                        _rtl = _racc.trust_lines.get(_tl_key)
+                        if _rtl is not None:
+                            _rtl.balance = _tl_bal
+                            _rtl.limit = _tl_lim
+                            _rtl.frozen = _tl_frz
+                            _rtl.authorized = _tl_auth
+                # Restore open offers (per-account)
+                for _off_addr, _off_list in _snapshot_offers.items():
+                    _racc = self.accounts.get(_off_addr)
+                    if _racc is not None:
+                        _racc.open_offers = _off_list
                 result = 128  # tecINVARIANT_FAILED
 
         # ── Build and store metadata ──
@@ -1577,13 +1587,14 @@ cdef class Ledger:
     cdef int _check_seq(self, object tx, object acc):
         """Verify sequence number. Returns 0 on match, 105 on mismatch.
 
-        sequence=0 is only accepted when a ticket_sequence is set on the tx.
+        sequence=0 means "auto-fill from account" unless a ticket_sequence
+        is set (ticket-based transactions legitimately use sequence 0).
         """
         if tx.sequence == 0:
-            # Only allow sequence=0 if a ticket was used (already validated)
-            if not getattr(tx, 'ticket_sequence', 0):
-                return 105  # tecBAD_SEQ — sequence=0 without ticket
-            return 0
+            if getattr(tx, 'ticket_sequence', 0):
+                return 0  # ticket-based: sequence 0 is valid
+            # Auto-fill from account's current sequence
+            tx.sequence = acc.sequence
         if tx.sequence != acc.sequence:
             return 105  # tecBAD_SEQ
         return 0

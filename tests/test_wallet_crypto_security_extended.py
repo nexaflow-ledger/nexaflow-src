@@ -61,16 +61,16 @@ class TestPrivateKeyExposure(unittest.TestCase):
 
     def test_to_dict_contains_private_key(self):
         """
-        VULN: to_dict() includes private_key in plaintext.
-        This is dangerous if the dict is ever logged, serialized, or
-        sent over the network.
+        FIXED: to_dict() no longer includes private_key in plaintext.
+        Private keys are only available via export_encrypted().
         """
         w = Wallet.create()
         d = w.to_dict()
-        self.assertIn("private_key", d)
-        self.assertEqual(len(d["private_key"]), 64)  # 32 bytes hex
-        self.assertIn("view_private_key", d)
-        self.assertIn("spend_private_key", d)
+        self.assertNotIn("private_key", d)
+        self.assertNotIn("view_private_key", d)
+        self.assertNotIn("spend_private_key", d)
+        self.assertIn("public_key", d)
+        self.assertIn("address", d)
 
     def test_repr_does_not_contain_private_key(self):
         w = Wallet.create()
@@ -78,9 +78,10 @@ class TestPrivateKeyExposure(unittest.TestCase):
         self.assertNotIn(w.private_key.hex(), r)
 
     def test_to_dict_private_key_matches_wallet(self):
+        """to_dict() no longer exposes private keys — verify public key instead."""
         w = Wallet.create()
         d = w.to_dict()
-        self.assertEqual(bytes.fromhex(d["private_key"]), w.private_key)
+        self.assertEqual(d["public_key"], w.public_key.hex())
 
 
 # ═══════════════════════════════════════════════════════════════════

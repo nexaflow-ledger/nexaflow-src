@@ -397,6 +397,8 @@ class TestSyncManagerLogic:
         mgr_dest = LedgerSyncManager(FakeP2P(), empty_ledger)
 
         # Simulate LEDGER_REQ → LEDGER_RES flow
+        # Mark sync as in-progress so the response is accepted
+        mgr_dest._sync_in_progress = True
         response = mgr_source.handle_ledger_request("peer_x")
         mgr_dest.handle_ledger_response(response, "peer_y")
 

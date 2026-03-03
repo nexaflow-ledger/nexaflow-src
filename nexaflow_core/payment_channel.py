@@ -82,13 +82,10 @@ def create_claim_signature(
 
     # Ed25519 (32-byte key)
     if len(priv_bytes) == 32:
-        try:
-            from nacl.signing import SigningKey
-            sk = SigningKey(priv_bytes)
-            sig = sk.sign(msg_hash).signature
-            return sig.hex()
-        except ImportError:
-            pass
+        from nacl.signing import SigningKey
+        sk = SigningKey(priv_bytes)
+        sig = sk.sign(msg_hash).signature
+        return sig.hex()
 
     # secp256k1 / ECDSA
     try:

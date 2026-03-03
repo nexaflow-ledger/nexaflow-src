@@ -268,49 +268,49 @@ class TestDEXDoubleSpend(unittest.TestCase):
         self.assertFalse(ok)
 
     def test_spend_after_list_sell_offer(self):
-        """Seller transfers all coins after listing — accept must fail."""
+        """Escrow prevents seller from spending listed tokens; offer remains fillable."""
         _, _, offer = self.mgr.create_offer(
             self.coin.coin_id, "rSeller", is_sell=True,
             amount=500.0, price=1.0, now=1_000_010.0,
         )
-        # Seller spends the coins
+        # Seller tries to transfer ALL 1000 — fails because 500 are escrowed
         ok_xfer, _, _ = self.mgr.transfer(
             self.coin.coin_id, "rSeller", "rDrain", 1000.0, now=1_000_011.0,
         )
-        self.assertTrue(ok_xfer)
+        self.assertFalse(ok_xfer)
+
+        # Seller can transfer the non-escrowed portion
+        ok_xfer2, _, _ = self.mgr.transfer(
+            self.coin.coin_id, "rSeller", "rDrain", 500.0, now=1_000_012.0,
+        )
+        self.assertTrue(ok_xfer2)
         self.assertAlmostEqual(self.mgr.get_balance(self.coin.coin_id, "rSeller"), 0.0)
 
-        # Offer is still technically "active" but accept should fail
+        # Offer is still fillable because escrowed tokens are protected
         ok, msg, _ = self.mgr.accept_offer(offer.offer_id, "rBuyer", now=1_000_020.0)
-        self.assertFalse(ok)
-        self.assertIn("insufficient", msg.lower())
+        self.assertTrue(ok)
 
     def test_multiple_sell_offers_exceeding_balance(self):
-        """Creating multiple sell offers whose sum exceeds balance.
-        Only the first ones to fill should succeed."""
+        """Creating sell offers that exceed available (non-escrowed) balance fails."""
         # rSeller has 1000 tokens
         _, _, offer1 = self.mgr.create_offer(
             self.coin.coin_id, "rSeller", is_sell=True,
             amount=800.0, price=1.0, now=1_000_010.0,
         )
-        # Second offer for 800 — sum is 1600, seller only has 1000
-        _, _, offer2 = self.mgr.create_offer(
+        self.assertIsNotNone(offer1)
+
+        # Second offer for 800 — seller only has 200 after first escrow
+        ok2, msg2, offer2 = self.mgr.create_offer(
             self.coin.coin_id, "rSeller", is_sell=True,
             amount=800.0, price=1.0, now=1_000_011.0,
         )
-        # Both offers were created (no escrow)
-        self.assertIsNotNone(offer1)
-        self.assertIsNotNone(offer2)
+        self.assertFalse(ok2)
+        self.assertIsNone(offer2)
 
-        # Fill first — should succeed
+        # First offer is still fillable
         ok1, _, _ = self.mgr.accept_offer(offer1.offer_id, "rBuyer1", now=1_000_020.0)
         self.assertTrue(ok1)
         self.assertAlmostEqual(self.mgr.get_balance(self.coin.coin_id, "rSeller"), 200.0)
-
-        # Fill second — should fail (only 200 left, needs 800)
-        ok2, msg, _ = self.mgr.accept_offer(offer2.offer_id, "rBuyer2", now=1_000_021.0)
-        self.assertFalse(ok2)
-        self.assertIn("insufficient", msg.lower())
 
     def test_accept_cancelled_offer(self):
         """Accepting a cancelled offer must fail."""

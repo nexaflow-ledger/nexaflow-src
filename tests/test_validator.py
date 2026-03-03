@@ -34,20 +34,66 @@ class ValidatorTestBase(unittest.TestCase):
 
     def setUp(self):
         self.ledger = Ledger(total_supply=100_000.0, genesis_account="rGen")
-        # rAlice has enough for reserves + payments
-        self.ledger.create_account("rAlice", 1000.0)
-        self.ledger.create_account("rBob", 100.0)
+        # Create wallets for signing
+        self.wallet_alice = Wallet.from_seed("alice-seed")
+        self.wallet_bob = Wallet.from_seed("bob-seed")
+        self.addr_alice = self.wallet_alice.address
+        self.addr_bob = self.wallet_bob.address
+        # Fund accounts using the wallet addresses
+        self.ledger.create_account(self.addr_alice, 1000.0)
+        self.ledger.create_account(self.addr_bob, 100.0)
         self.validator = TransactionValidator(self.ledger)
-        self.wallet = Wallet.from_seed("alice-seed")
+        self.wallet = self.wallet_alice  # alias for compat
+
+    def _signed_payment(self, src_addr, dst_addr, amount, currency=None,
+                        issuer=None, fee=None, sequence=None):
+        """Create and sign a payment transaction."""
+        args = [src_addr, dst_addr, amount]
+        if currency is not None:
+            args.append(currency)
+            if issuer is not None:
+                args.append(issuer)
+        kwargs = {}
+        if fee is not None:
+            kwargs["fee"] = fee
+        if sequence is not None:
+            kwargs["sequence"] = sequence
+        tx = create_payment(*args, **kwargs)
+        # Find the matching wallet to sign
+        wallets = {
+            self.addr_alice: self.wallet_alice,
+            self.addr_bob: self.wallet_bob,
+        }
+        for extra_name in ("wallet_gw", "wallet_broke", "wallet_poor", "wallet_ghost"):
+            w = getattr(self, extra_name, None)
+            if w:
+                wallets[w.address] = w
+        w = wallets.get(src_addr)
+        if w:
+            w.sign_transaction(tx)
+        return tx
+
+    def _signed_trust_set(self, account, currency, issuer, limit):
+        """Create and sign a TrustSet transaction."""
+        tx = create_trust_set(account, currency, issuer, limit)
+        wallets = {
+            self.addr_alice: self.wallet_alice,
+            self.addr_bob: self.wallet_bob,
+        }
+        for extra_name in ("wallet_gw", "wallet_broke", "wallet_poor"):
+            w = getattr(self, extra_name, None)
+            if w:
+                wallets[w.address] = w
+        w = wallets.get(account)
+        if w:
+            w.sign_transaction(tx)
+        return tx
 
 
 class TestValidatorSignature(ValidatorTestBase):
 
     def test_valid_signature_passes(self):
-        tx = create_payment(self.wallet.address, "rBob", 1.0)
-        self.wallet.sign_transaction(tx)
-        # Need the wallet address to exist in ledger
-        self.ledger.create_account(self.wallet.address, 1000.0)
+        tx = self._signed_payment(self.addr_alice, self.addr_bob, 1.0)
         ok, code, _msg = self.validator.validate(tx)
         self.assertTrue(ok)
         self.assertEqual(code, TES_SUCCESS)
@@ -57,7 +103,7 @@ class TestValidatorSignature(ValidatorTestBase):
         w1 = Wallet.from_seed("key1")
         w2 = Wallet.from_seed("key2")
         self.ledger.create_account(w1.address, 1000.0)
-        tx = create_payment(w1.address, "rBob", 1.0)
+        tx = create_payment(w1.address, self.addr_bob, 1.0)
         w1.sign_transaction(tx)
         # Replace the pubkey with w2's key — signature won't match
         tx.signing_pub_key = w2.public_key
@@ -65,23 +111,25 @@ class TestValidatorSignature(ValidatorTestBase):
         self.assertFalse(ok)
         self.assertEqual(code, TEC_BAD_SIG)
 
-    def test_no_signature_skips_check(self):
-        """Without signature/pubkey, the check is skipped — not a failure."""
-        tx = create_payment("rAlice", "rBob", 1.0)
-        ok, _code, _msg = self.validator.validate(tx)
-        self.assertTrue(ok)
+    def test_no_signature_rejected(self):
+        """Without signature/pubkey, the transaction is now rejected (CR-1 fix)."""
+        tx = create_payment(self.addr_alice, self.addr_bob, 1.0)
+        ok, code, _msg = self.validator.validate(tx)
+        self.assertFalse(ok)
+        self.assertEqual(code, TEC_BAD_SIG)
 
 
 class TestValidatorAccountExists(ValidatorTestBase):
 
     def test_nonexistent_source_fails(self):
-        tx = create_payment("rGhost", "rBob", 1.0)
+        self.wallet_ghost = Wallet.from_seed("ghost-seed")
+        tx = self._signed_payment(self.wallet_ghost.address, self.addr_bob, 1.0)
         ok, code, _msg = self.validator.validate(tx)
         self.assertFalse(ok)
         self.assertEqual(code, TEC_UNFUNDED)
 
     def test_existing_source_passes(self):
-        tx = create_payment("rAlice", "rBob", 1.0)
+        tx = self._signed_payment(self.addr_alice, self.addr_bob, 1.0)
         ok, _code, _ = self.validator.validate(tx)
         self.assertTrue(ok)
 
@@ -89,18 +137,18 @@ class TestValidatorAccountExists(ValidatorTestBase):
 class TestValidatorFee(ValidatorTestBase):
 
     def test_fee_below_minimum_fails(self):
-        tx = create_payment("rAlice", "rBob", 1.0, fee=0.000001)
+        tx = self._signed_payment(self.addr_alice, self.addr_bob, 1.0, fee=0.000001)
         ok, code, _ = self.validator.validate(tx)
         self.assertFalse(ok)
         self.assertEqual(code, TEC_INSUF_FEE)
 
     def test_fee_at_minimum_passes(self):
-        tx = create_payment("rAlice", "rBob", 1.0, fee=MIN_FEE)
+        tx = self._signed_payment(self.addr_alice, self.addr_bob, 1.0, fee=MIN_FEE)
         ok, _code, _ = self.validator.validate(tx)
         self.assertTrue(ok)
 
     def test_fee_above_minimum_passes(self):
-        tx = create_payment("rAlice", "rBob", 1.0, fee=1.0)
+        tx = self._signed_payment(self.addr_alice, self.addr_bob, 1.0, fee=1.0)
         ok, _code, _ = self.validator.validate(tx)
         self.assertTrue(ok)
 
@@ -108,18 +156,18 @@ class TestValidatorFee(ValidatorTestBase):
 class TestValidatorSequence(ValidatorTestBase):
 
     def test_correct_sequence_passes(self):
-        acc = self.ledger.get_account("rAlice")
-        tx = create_payment("rAlice", "rBob", 1.0, sequence=acc.sequence)
+        acc = self.ledger.get_account(self.addr_alice)
+        tx = self._signed_payment(self.addr_alice, self.addr_bob, 1.0, sequence=acc.sequence)
         ok, _code, _ = self.validator.validate(tx)
         self.assertTrue(ok)
 
     def test_zero_sequence_skips_check(self):
-        tx = create_payment("rAlice", "rBob", 1.0, sequence=0)
+        tx = self._signed_payment(self.addr_alice, self.addr_bob, 1.0, sequence=0)
         ok, _code, _ = self.validator.validate(tx)
         self.assertTrue(ok)
 
     def test_wrong_sequence_fails(self):
-        tx = create_payment("rAlice", "rBob", 1.0, sequence=999)
+        tx = self._signed_payment(self.addr_alice, self.addr_bob, 1.0, sequence=999)
         ok, code, _ = self.validator.validate(tx)
         self.assertFalse(ok)
         self.assertEqual(code, TEC_BAD_SEQ)
@@ -128,23 +176,19 @@ class TestValidatorSequence(ValidatorTestBase):
 class TestValidatorBalance(ValidatorTestBase):
 
     def test_sufficient_balance_passes(self):
-        # rAlice has 1000, reserve = 20 + 0*5 = 20, payment 1 + fee 0.00001
-        tx = create_payment("rAlice", "rBob", 1.0)
+        tx = self._signed_payment(self.addr_alice, self.addr_bob, 1.0)
         ok, _code, _ = self.validator.validate(tx)
         self.assertTrue(ok)
 
     def test_insufficient_balance_after_reserve_fails(self):
-        # rAlice has 1000, reserve=20, try to send 981 (1000 - 981 - 0.00001 < 20)
-        tx = create_payment("rAlice", "rBob", 981.0)
+        tx = self._signed_payment(self.addr_alice, self.addr_bob, 981.0)
         ok, code, _ = self.validator.validate(tx)
         self.assertFalse(ok)
         self.assertEqual(code, TEC_UNFUNDED)
 
     def test_balance_exactly_at_reserve(self):
-        # Send exactly what would leave balance at reserve
-        # balance = 1000, reserve = 20, max_send = 1000 - 20 - fee
         max_send = 1000.0 - ACCOUNT_RESERVE - 0.00001
-        tx = create_payment("rAlice", "rBob", max_send)
+        tx = self._signed_payment(self.addr_alice, self.addr_bob, max_send)
         ok, _code, _ = self.validator.validate(tx)
         self.assertTrue(ok)
 
@@ -153,30 +197,32 @@ class TestValidatorIOU(ValidatorTestBase):
 
     def setUp(self):
         super().setUp()
-        self.ledger.create_account("rGW", 1000.0)
-        self.ledger.set_trust_line("rAlice", "USD", "rGW", 500.0)
+        self.wallet_gw = Wallet.from_seed("gw-seed")
+        self.addr_gw = self.wallet_gw.address
+        self.ledger.create_account(self.addr_gw, 1000.0)
+        self.ledger.set_trust_line(self.addr_alice, "USD", self.addr_gw, 500.0)
 
     def test_iou_with_trust_line_passes(self):
-        tx = create_payment("rAlice", "rBob", 10.0, "USD", "rGW")
+        tx = self._signed_payment(self.addr_alice, self.addr_bob, 10.0, "USD", self.addr_gw)
         ok, _code, _ = self.validator.validate(tx)
         self.assertTrue(ok)
 
     def test_iou_without_trust_line_fails(self):
-        tx = create_payment("rBob", "rAlice", 10.0, "USD", "rGW")
+        tx = self._signed_payment(self.addr_bob, self.addr_alice, 10.0, "USD", self.addr_gw)
         ok, code, _ = self.validator.validate(tx)
         self.assertFalse(ok)
         self.assertEqual(code, TEC_NO_LINE)
 
     def test_iou_issuer_can_send_without_trust_line(self):
-        tx = create_payment("rGW", "rAlice", 10.0, "USD", "rGW")
+        tx = self._signed_payment(self.addr_gw, self.addr_alice, 10.0, "USD", self.addr_gw)
         ok, _code, _ = self.validator.validate(tx)
         self.assertTrue(ok)
 
     def test_iou_no_native_for_fee(self):
-        # Create account with 0 native balance
-        self.ledger.create_account("rBroke", 0.0)
-        self.ledger.set_trust_line("rBroke", "USD", "rGW", 100.0)
-        tx = create_payment("rBroke", "rAlice", 10.0, "USD", "rGW")
+        self.wallet_broke = Wallet.from_seed("broke-seed")
+        self.ledger.create_account(self.wallet_broke.address, 0.0)
+        self.ledger.set_trust_line(self.wallet_broke.address, "USD", self.addr_gw, 100.0)
+        tx = self._signed_payment(self.wallet_broke.address, self.addr_alice, 10.0, "USD", self.addr_gw)
         ok, code, _ = self.validator.validate(tx)
         self.assertFalse(ok)
         self.assertEqual(code, TEC_INSUF_FEE)
@@ -185,13 +231,14 @@ class TestValidatorIOU(ValidatorTestBase):
 class TestValidatorTrustSet(ValidatorTestBase):
 
     def test_trust_set_valid(self):
-        tx = create_trust_set("rAlice", "EUR", "rBank", 500.0)
+        tx = self._signed_trust_set(self.addr_alice, "EUR", "rBank", 500.0)
         ok, _code, _ = self.validator.validate(tx)
         self.assertTrue(ok)
 
     def test_trust_set_no_balance_for_fee(self):
-        self.ledger.create_account("rPoor", 0.0)
-        tx = create_trust_set("rPoor", "EUR", "rBank", 500.0)
+        self.wallet_poor = Wallet.from_seed("poor-seed")
+        self.ledger.create_account(self.wallet_poor.address, 0.0)
+        tx = self._signed_trust_set(self.wallet_poor.address, "EUR", "rBank", 500.0)
         ok, code, _ = self.validator.validate(tx)
         self.assertFalse(ok)
         self.assertEqual(code, TEC_INSUF_FEE)
@@ -200,13 +247,13 @@ class TestValidatorTrustSet(ValidatorTestBase):
 class TestValidateBatch(ValidatorTestBase):
 
     def test_batch_returns_list(self):
-        tx1 = create_payment("rAlice", "rBob", 1.0)
-        tx2 = create_payment("rGhost", "rBob", 1.0)
+        self.wallet_ghost = Wallet.from_seed("ghost-seed")
+        tx1 = self._signed_payment(self.addr_alice, self.addr_bob, 1.0)
+        tx2 = self._signed_payment(self.wallet_ghost.address, self.addr_bob, 1.0)
         results = self.validator.validate_batch([tx1, tx2])
         self.assertEqual(len(results), 2)
-        # First should pass, second should fail
         self.assertTrue(results[0][1])   # valid
-        self.assertFalse(results[1][1])  # invalid
+        self.assertFalse(results[1][1])  # invalid (unfunded)
 
     def test_batch_empty(self):
         results = self.validator.validate_batch([])

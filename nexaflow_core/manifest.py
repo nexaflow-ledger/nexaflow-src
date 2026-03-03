@@ -249,15 +249,20 @@ class UNLPublisher:
     validators and signs the list for distribution.
     """
 
-    def __init__(self, publisher_key: str):
+    def __init__(self, publisher_key: str, private_key: str = ""):
         self.publisher_key = publisher_key
+        self._private_key = private_key
         self._current_list: ValidatorList | None = None
         self._sequence: int = 0
 
     def publish(self, validator_keys: list[str],
                 expiration_hours: float = 168.0,
                 signature: str = "") -> ValidatorList:
-        """Create a new signed UNL."""
+        """Create a new signed UNL.
+
+        If *signature* is provided it is used as-is.  Otherwise the blob
+        is signed with ``self._private_key`` (Ed25519 hex).
+        """
         self._sequence += 1
         entries = [UNLEntry(validator_public_key=k) for k in validator_keys]
         vl = ValidatorList(
@@ -269,6 +274,12 @@ class UNLPublisher:
         )
         blob = vl.signing_blob()
         vl.blob_hash = hashlib.sha256(blob).hexdigest()
+
+        if not vl.signature and self._private_key:
+            from nacl.signing import SigningKey
+            sk = SigningKey(bytes.fromhex(self._private_key))
+            vl.signature = sk.sign(blob).signature.hex()
+
         self._current_list = vl
         return vl
 

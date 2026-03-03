@@ -188,7 +188,7 @@ class TestDispatch(unittest.TestCase):
             peer_id = "p1"
             async def send(self, *a, **kw): return True
 
-        msg = {"type": "TX", "payload": {"tx_id": "tx_abc"}}
+        msg = {"type": "TX", "payload": {"tx_id": "tx_abc", "signature": "ab" * 32, "signing_pub_key": "cd" * 16}}
         self._run(node._dispatch(FakePeer(), msg))
         self._run(node._dispatch(FakePeer(), msg))  # dupe
         self.assertEqual(len(calls), 1)
@@ -202,7 +202,7 @@ class TestDispatch(unittest.TestCase):
             peer_id = "p1"
             async def send(self, *a, **kw): return True
 
-        msg = {"type": "PROPOSAL", "payload": {"validator_id": "v2", "ledger_seq": 5}}
+        msg = {"type": "PROPOSAL", "payload": {"validator_id": "v2", "ledger_seq": 5, "signature": "ab" * 32}}
         self._run(node._dispatch(FakePeer(), msg))
         self._run(node._dispatch(FakePeer(), msg))  # dupe
         self.assertEqual(len(calls), 1)
@@ -261,12 +261,14 @@ class TestDispatch(unittest.TestCase):
         node = P2PNode("v1")
         results = []
         node.on_consensus_result = lambda payload, pid: results.append(payload)
+        # Register the peer's public key so CONSENSUS_OK is accepted
+        node.peer_pubkeys["p1"] = "ab" * 32
 
         class FakePeer:
             peer_id = "p1"
             async def send(self, *a, **kw): return True
 
-        msg = {"type": "CONSENSUS_OK", "payload": {"txns": ["tx1"]}}
+        msg = {"type": "CONSENSUS_OK", "payload": {"tx_set": ["tx1"], "ledger_seq": 1}}
         self._run(node._dispatch(FakePeer(), msg))
         self.assertEqual(len(results), 1)
 

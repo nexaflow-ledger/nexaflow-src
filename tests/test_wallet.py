@@ -100,7 +100,9 @@ class TestWalletSerialization(unittest.TestCase):
         d = w.to_dict()
         self.assertIn("address", d)
         self.assertIn("public_key", d)
-        self.assertIn("private_key", d)
+        # to_dict() intentionally excludes private keys (H-2 fix)
+        self.assertNotIn("private_key", d)
+        self.assertIn("key_type", d)
         self.assertEqual(d["address"], w.address)
 
     def test_export_encrypted_has_fields(self):

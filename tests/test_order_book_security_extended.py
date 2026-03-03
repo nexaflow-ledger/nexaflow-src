@@ -88,27 +88,22 @@ class TestZeroNegativeValues(OrderBookTestBase):
 
 class TestSelfTrading(OrderBookTestBase):
 
-    def test_self_trade_allowed(self):
+    def test_self_trade_prevented(self):
         """
-        VULN: Same account can trade against itself.
-        This enables wash trading for volume inflation.
+        FIXED: Same account can no longer trade against itself.
+        Self-trade prevention blocks wash trading for volume inflation.
         """
         self.ob.submit_order("alice", "NXF/USD", "sell", 1.0, 100.0)
         fills = self.ob.submit_order("alice", "NXF/USD", "buy", 1.0, 100.0)
-        self.assertEqual(len(fills), 1)
-        self.assertEqual(fills[0].quantity, 100.0)
-        # Both maker and taker are the same account
-        maker = self.ob.get_order(fills[0].maker_order_id)
-        taker = self.ob.get_order(fills[0].taker_order_id)
-        self.assertEqual(maker.account, taker.account)
+        self.assertEqual(len(fills), 0)
 
-    def test_wash_trading_inflates_volume(self):
-        """Repeated self-trades inflate fill history."""
+    def test_wash_trading_blocked(self):
+        """Repeated self-trades are all blocked by self-trade prevention."""
         for i in range(100):
             self.ob.submit_order("alice", "NXF/USD", "sell", 1.0, 10.0, f"s{i}")
             self.ob.submit_order("alice", "NXF/USD", "buy", 1.0, 10.0, f"b{i}")
         fills = self.ob.get_fills(limit=200)
-        self.assertEqual(len(fills), 100)
+        self.assertEqual(len(fills), 0)
 
 
 # ═══════════════════════════════════════════════════════════════════

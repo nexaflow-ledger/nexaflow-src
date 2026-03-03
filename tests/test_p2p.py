@@ -103,8 +103,13 @@ class TestP2PConnection(unittest.TestCase):
             await n1.connect_to_peer("127.0.0.1", 19006)
             await asyncio.sleep(0.3)
 
-            # Broadcast a TX message from n1
-            await n1.broadcast_transaction({"tx_id": "test123", "amount": 10.0})
+            # Broadcast a TX message from n1 (must include signature fields)
+            await n1.broadcast_transaction({
+                "tx_id": "test123",
+                "amount": 10.0,
+                "signature": "ab" * 32,
+                "signing_pub_key": "cd" * 16,
+            })
             await asyncio.sleep(0.3)
 
             # n2 should have received the TX via on_transaction callback

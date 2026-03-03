@@ -225,39 +225,21 @@ class HDNode:
 # ===================================================================
 
 class Ed25519Signer:
-    """
-    Ed25519 signing for NexaFlow.
-
-    Requires the nacl (pynacl) library.  The previous fallback that used
-    HMAC-SHA512 was cryptographically broken (no real Ed25519 curve math)
-    and has been removed.  Install pynacl: ``pip install pynacl``.
-    """
+    """Ed25519 signing backend using the nacl (pynacl) library."""
 
     @staticmethod
     def generate_keypair() -> tuple[bytes, bytes]:
         """Generate an Ed25519 keypair. Returns (private_key, public_key)."""
-        try:
-            from nacl.signing import SigningKey as NaCLSigningKey
-            sk = NaCLSigningKey.generate()
-            return bytes(sk), bytes(sk.verify_key)
-        except ImportError:
-            raise ImportError(
-                "Ed25519 requires the 'pynacl' package. "
-                "Install it with: pip install pynacl"
-            )
+        from nacl.signing import SigningKey as NaCLSigningKey
+        sk = NaCLSigningKey.generate()
+        return bytes(sk), bytes(sk.verify_key)
 
     @staticmethod
     def sign(private_key: bytes, message: bytes) -> bytes:
         """Sign a message with Ed25519."""
-        try:
-            from nacl.signing import SigningKey as NaCLSigningKey
-            sk = NaCLSigningKey(private_key)
-            return bytes(sk.sign(message).signature)
-        except ImportError:
-            raise ImportError(
-                "Ed25519 requires the 'pynacl' package. "
-                "Install it with: pip install pynacl"
-            )
+        from nacl.signing import SigningKey as NaCLSigningKey
+        sk = NaCLSigningKey(private_key)
+        return bytes(sk.sign(message).signature)
 
     @staticmethod
     def verify(public_key: bytes, message: bytes, signature: bytes) -> bool:
@@ -267,11 +249,6 @@ class Ed25519Signer:
             vk = VerifyKey(public_key)
             vk.verify(message, signature)
             return True
-        except ImportError:
-            raise ImportError(
-                "Ed25519 requires the 'pynacl' package. "
-                "Install it with: pip install pynacl"
-            )
         except Exception:
             return False
 

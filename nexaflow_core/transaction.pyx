@@ -15,6 +15,8 @@ signed with ECDSA, and assigned a deterministic transaction ID.
 
 import json
 import struct
+import hashlib
+import os
 
 cimport cython
 from libc.time cimport time as c_time
@@ -456,7 +458,7 @@ cdef class Transaction:
         self.sequence = sequence
         self.signing_pub_key = b""
         self.signature = b""
-        self.tx_id = ""
+        self.tx_id = hashlib.sha256(os.urandom(32)).hexdigest()
         self.timestamp = <long long>c_time(NULL)
         self.memo = memo
         self.result_code = -1

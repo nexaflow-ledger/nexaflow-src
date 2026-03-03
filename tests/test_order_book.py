@@ -321,11 +321,11 @@ class TestEdgeCases(unittest.TestCase):
         self.assertEqual(fills[0].quantity, 1e15)
 
     def test_self_trade(self):
-        """Same account on both sides should still match (no prevention)."""
+        """Same account on both sides should be prevented (self-trade protection)."""
         ob = OrderBook()
         ob.submit_order("rAlice", "NXF/USD", "sell", 1.0, 10.0)
         fills = ob.submit_order("rAlice", "NXF/USD", "buy", 1.0, 10.0)
-        self.assertEqual(len(fills), 1)
+        self.assertEqual(len(fills), 0)
 
     def test_get_order_unknown(self):
         ob = OrderBook()
