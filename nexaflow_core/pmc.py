@@ -68,6 +68,27 @@ DEFAULT_BASE_REWARD = 50.0     # default tokens per PoW solve at diff=1
 MIN_BASE_REWARD = 0.00000001   # 1 satoshi-equivalent
 MAX_BASE_REWARD = 1_000_000_000.0
 
+# ── Difficulty epoch & halving defaults ──────────────────────────
+# Modelled after Bitcoin's retarget / halving mechanics.
+#   - Every *epoch_length* mints the difficulty retargets to keep the
+#     average time-between-mints close to *target_block_time*.
+#   - Every *halving_interval* mints the base_reward halves.
+#   - Set epoch_length=0 to disable retargeting (static difficulty).
+#   - Set halving_interval=0 to disable halvings (static reward).
+DEFAULT_EPOCH_LENGTH = 100        # retarget every 100 mints
+DEFAULT_TARGET_BLOCK_TIME = 60.0  # 60 seconds between mints
+DEFAULT_HALVING_INTERVAL = 10_000 # halve every 10 000 mints
+MIN_EPOCH_LENGTH = 10              # prevent absurdly short epochs
+MAX_EPOCH_LENGTH = 1_000_000
+MIN_TARGET_BLOCK_TIME = 1.0        # 1 second
+MAX_TARGET_BLOCK_TIME = 86_400.0   # 1 day
+MIN_HALVING_INTERVAL = 10
+MAX_HALVING_INTERVAL = 1_000_000_000
+# Bitcoin caps the retarget to 4× up / ¼ down per epoch.  We use the
+# same bounds to prevent wild oscillations.
+MAX_RETARGET_FACTOR = 4.0
+MIN_RETARGET_FACTOR = 0.25
+
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Enums & Flags
@@ -155,6 +176,14 @@ class PMCDefinition:
     created_at: float = field(default_factory=time.time)
     frozen: bool = False
     total_mints: int = 0                  # number of successful PoW solves
+    # ── Difficulty epoch & halving fields ───────────────────────
+    epoch_length: int = DEFAULT_EPOCH_LENGTH           # mints per retarget
+    target_block_time: float = DEFAULT_TARGET_BLOCK_TIME  # seconds
+    halving_interval: int = DEFAULT_HALVING_INTERVAL   # mints per halving
+    halvings_completed: int = 0           # number of halvings so far
+    current_epoch: int = 0                # current epoch number
+    epoch_start_mint: int = 0             # total_mints at epoch start
+    epoch_start_time: float = 0.0         # timestamp at epoch start
 
     @property
     def circulating(self) -> float:
@@ -164,6 +193,22 @@ class PMCDefinition:
     def block_reward(self) -> float:
         """Current reward per PoW solve: base_reward * 2^(difficulty-1)."""
         return self.base_reward * (2 ** (self.pow_difficulty - 1))
+
+    @property
+    def mints_until_retarget(self) -> int:
+        """Mints remaining until the next difficulty retarget."""
+        if self.epoch_length <= 0:
+            return -1  # retargeting disabled
+        mints_in_epoch = self.total_mints - self.epoch_start_mint
+        return max(0, self.epoch_length - mints_in_epoch)
+
+    @property
+    def mints_until_halving(self) -> int:
+        """Mints remaining until the next reward halving."""
+        if self.halving_interval <= 0:
+            return -1  # halvings disabled
+        next_threshold = (self.halvings_completed + 1) * self.halving_interval
+        return max(0, next_threshold - self.total_mints)
 
     def has_flag(self, flag: PMCFlag) -> bool:
         return bool(self.flags & flag)
@@ -195,6 +240,13 @@ class PMCDefinition:
             "rules": [r.to_dict() for r in self.rules],
             "created_at": self.created_at,
             "frozen": self.frozen,
+            "epoch_length": self.epoch_length,
+            "target_block_time": self.target_block_time,
+            "halving_interval": self.halving_interval,
+            "halvings_completed": self.halvings_completed,
+            "current_epoch": self.current_epoch,
+            "mints_until_retarget": self.mints_until_retarget,
+            "mints_until_halving": self.mints_until_halving,
         }
 
 
@@ -363,6 +415,139 @@ class PMCCommitment:
             "timestamp": self.timestamp,
             "prev_commitment": self.prev_commitment,
         }
+
+
+@dataclass
+class DifficultyEpoch:
+    """Record of a single difficulty-adjustment epoch.
+
+    Every *epoch_length* mints the retarget algorithm runs and may
+    adjust difficulty up or down.  This data class stores exactly what
+    happened for full auditability.
+    """
+    epoch_number: int
+    coin_id: str
+    start_mint: int             # total_mints at epoch start
+    end_mint: int               # total_mints at epoch end
+    start_time: float           # timestamp at epoch start
+    end_time: float             # timestamp at epoch end
+    mints_in_epoch: int         # end_mint - start_mint
+    avg_block_time: float       # actual average seconds per mint
+    target_block_time: float    # desired seconds per mint
+    old_difficulty: int         # difficulty before retarget
+    new_difficulty: int         # difficulty after retarget
+    adjustment_factor: float    # ratio (clamped to ×4 / ÷4)
+    halving_occurred: bool = False   # True if a halving triggered this epoch
+    old_base_reward: float = 0.0
+    new_base_reward: float = 0.0
+
+    def to_dict(self) -> dict:
+        return {
+            "epoch_number": self.epoch_number,
+            "coin_id": self.coin_id,
+            "start_mint": self.start_mint,
+            "end_mint": self.end_mint,
+            "start_time": self.start_time,
+            "end_time": self.end_time,
+            "mints_in_epoch": self.mints_in_epoch,
+            "avg_block_time": self.avg_block_time,
+            "target_block_time": self.target_block_time,
+            "old_difficulty": self.old_difficulty,
+            "new_difficulty": self.new_difficulty,
+            "adjustment_factor": self.adjustment_factor,
+            "halving_occurred": self.halving_occurred,
+            "old_base_reward": self.old_base_reward,
+            "new_base_reward": self.new_base_reward,
+        }
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Difficulty retarget & halving algorithms
+# ═══════════════════════════════════════════════════════════════════════
+
+def calculate_retarget(
+    current_difficulty: int,
+    epoch_elapsed_time: float,
+    mints_in_epoch: int,
+    target_block_time: float,
+) -> tuple[int, float]:
+    """
+    Bitcoin-style difficulty retarget at the end of an epoch.
+
+    Compares the *actual* average block time during the epoch to the
+    *target* block time and adjusts difficulty proportionally, clamped
+    to a maximum 4× adjustment in either direction (same as Bitcoin).
+
+    Returns (new_difficulty, adjustment_factor).
+    """
+    if mints_in_epoch <= 0 or epoch_elapsed_time <= 0:
+        return current_difficulty, 1.0
+
+    actual_avg = epoch_elapsed_time / mints_in_epoch
+    # ratio > 1 means blocks are too slow → decrease difficulty
+    # ratio < 1 means blocks are too fast → increase difficulty
+    ratio = actual_avg / target_block_time
+
+    # Invert: factor > 1 → make harder; < 1 → make easier
+    factor = 1.0 / ratio
+
+    # Clamp to Bitcoin's ×4 / ÷4 bounds
+    factor = max(MIN_RETARGET_FACTOR, min(MAX_RETARGET_FACTOR, factor))
+
+    # Difficulty is integer (# leading hex zeros); apply factor as
+    # log₁₆ adjustment so the relationship stays exponential.
+    # new_diff ≈ old_diff + log₁₆(factor)
+    # We use ceil/floor rounding with a dead zone so that meaningful
+    # speed differences (>~15%) actually trigger a +1/-1 adjustment.
+    # Plain round() with banker's rounding would always produce 0
+    # because the ×4 clamp limits |log₁₆| to 0.5 exactly.
+    import math as _math
+    log_change = _math.log(factor) / _math.log(16)
+
+    RETARGET_DEADZONE = 0.1  # ignore sub-10% log₁₆ changes
+    if abs(log_change) < RETARGET_DEADZONE:
+        adjustment = 0
+    elif log_change > 0:
+        adjustment = _math.ceil(log_change)
+    else:
+        adjustment = _math.floor(log_change)
+
+    new_diff = current_difficulty + adjustment
+
+    # Enforce absolute bounds
+    new_diff = max(MIN_POW_DIFFICULTY, min(MAX_POW_DIFFICULTY, new_diff))
+
+    return new_diff, round(factor, 6)
+
+
+def calculate_halving(
+    base_reward: float,
+    total_mints: int,
+    halving_interval: int,
+    halvings_completed: int,
+) -> tuple[float, int, bool]:
+    """
+    Check whether a halving should occur and compute the new base_reward.
+
+    Returns (new_base_reward, new_halvings_completed, halving_occurred).
+    """
+    if halving_interval <= 0:
+        return base_reward, halvings_completed, False
+
+    expected_halvings = total_mints // halving_interval
+    if expected_halvings <= halvings_completed:
+        return base_reward, halvings_completed, False
+
+    # Apply all missed halvings (in case >1 epoch was skipped)
+    new_reward = base_reward
+    num_new = expected_halvings - halvings_completed
+    for _ in range(num_new):
+        new_reward /= 2.0
+
+    # Enforce minimum reward
+    new_reward = max(MIN_BASE_REWARD, new_reward)
+
+    return new_reward, expected_halvings, True
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -566,9 +751,17 @@ class PMCManager:
     Manages all Programmable Micro Coins, holder balances, and offers.
 
     Instantiated once per Ledger, similar to NFTokenManager / MPTManager.
+
+    When an optional :class:`PMCStore` is provided, all state mutations
+    are written through to LMDB for crash-safe disk persistence.  On
+    startup the in-memory dicts are populated from the store so that
+    the node can resume without a full P2P re-sync.  When no store is
+    given the manager operates purely in RAM (backward-compatible).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, store: "PMCStore | None" = None) -> None:
+        # Optional LMDB-backed persistent store
+        self._store = store
         # coin_id → PMCDefinition
         self.coins: dict[str, PMCDefinition] = {}
         # coin_id → { account → PMCHolder }
@@ -594,6 +787,286 @@ class PMCManager:
         self._commitments: dict[str, list[PMCCommitment]] = {}
         # tx_hash → commitment_id (index: which commitment includes a tx)
         self._tx_commitment_index: dict[str, str] = {}
+        # ── Difficulty epoch history ─────────────────────────────
+        # coin_id → [DifficultyEpoch] full audit trail
+        self._epoch_history: dict[str, list[DifficultyEpoch]] = {}
+
+        # If a store was provided, hydrate in-memory state from disk
+        if self._store is not None:
+            self._load_from_store()
+
+    # ── Persistence: load from LMDB on startup ──────────────────────
+
+    def _load_from_store(self) -> None:
+        """Populate all in-memory dicts from the LMDB store."""
+        store = self._store
+        if store is None:
+            return
+
+        import logging as _log
+        _logger = _log.getLogger("nexaflow_pmc")
+
+        # Coins
+        for cid, cd in store.list_coins():
+            rules = []
+            for rd in cd.get("rules", []):
+                try:
+                    rules.append(PMCRule.from_dict(rd))
+                except (KeyError, ValueError):
+                    pass
+            coin = PMCDefinition(
+                coin_id=cid,
+                symbol=cd.get("symbol", ""),
+                name=cd.get("name", ""),
+                issuer=cd.get("issuer", ""),
+                decimals=cd.get("decimals", DEFAULT_DECIMALS),
+                max_supply=cd.get("max_supply", 0.0),
+                total_minted=cd.get("total_minted", 0.0),
+                total_burned=cd.get("total_burned", 0.0),
+                flags=cd.get("flags", int(DEFAULT_FLAGS)),
+                pow_difficulty=cd.get("pow_difficulty", DEFAULT_POW_DIFFICULTY),
+                base_reward=cd.get("base_reward", DEFAULT_BASE_REWARD),
+                metadata=cd.get("metadata", ""),
+                rules=rules,
+                created_at=cd.get("created_at", 0.0),
+                frozen=cd.get("frozen", False),
+                total_mints=cd.get("total_mints", 0),
+                epoch_length=cd.get("epoch_length", DEFAULT_EPOCH_LENGTH),
+                target_block_time=cd.get("target_block_time", DEFAULT_TARGET_BLOCK_TIME),
+                halving_interval=cd.get("halving_interval", DEFAULT_HALVING_INTERVAL),
+                halvings_completed=cd.get("halvings_completed", 0),
+                current_epoch=cd.get("current_epoch", 0),
+                epoch_start_mint=cd.get("epoch_start_mint", 0),
+                epoch_start_time=cd.get("epoch_start_time", 0.0),
+            )
+            self.coins[cid] = coin
+
+        # Holders
+        for cid in self.coins:
+            self._holders[cid] = {}
+            for acct, hd in store.list_holders(cid):
+                self._holders[cid][acct] = PMCHolder(
+                    account=acct,
+                    coin_id=cid,
+                    balance=hd.get("balance", 0.0),
+                    frozen=hd.get("frozen", False),
+                    last_transfer_at=hd.get("last_transfer_at", 0.0),
+                    last_mint_at=hd.get("last_mint_at", 0.0),
+                )
+
+        # Offers
+        for oid, od in store.list_offers():
+            self.offers[oid] = PMCOffer(
+                offer_id=oid,
+                coin_id=od.get("coin_id", ""),
+                owner=od.get("owner", ""),
+                is_sell=od.get("is_sell", True),
+                amount=od.get("amount", 0.0),
+                price=od.get("price", 0.0),
+                counter_coin_id=od.get("counter_coin_id", ""),
+                filled=od.get("filled", 0.0),
+                destination=od.get("destination", ""),
+                expiration=od.get("expiration", 0.0),
+                created_at=od.get("created_at", 0.0),
+                cancelled=od.get("cancelled", False),
+            )
+
+        # PoW hashes
+        self._last_pow_hash = store.list_pow_hashes()
+
+        # Pending txs
+        for cid in self.coins:
+            pool = store.get_pending_txs(cid)
+            if pool:
+                self._pending_txs[cid] = pool
+
+        # Commitments
+        for cid in self.coins:
+            commit_dicts = store.list_commitments(cid)
+            self._commitments[cid] = []
+            for cd in commit_dicts:
+                try:
+                    self._commitments[cid].append(PMCCommitment(
+                        commitment_id=cd["commitment_id"],
+                        coin_id=cd.get("coin_id", cid),
+                        miner=cd.get("miner", ""),
+                        tx_root=cd.get("tx_root", ""),
+                        tx_hashes=cd.get("tx_hashes", []),
+                        tx_count=cd.get("tx_count", 0),
+                        pow_hash=cd.get("pow_hash", ""),
+                        difficulty=cd.get("difficulty", 1),
+                        reward=cd.get("reward", 0.0),
+                        timestamp=cd.get("timestamp", 0.0),
+                        prev_commitment=cd.get("prev_commitment", ""),
+                    ))
+                except (KeyError, ValueError):
+                    pass
+
+        # Tx commit index
+        self._tx_commitment_index = store.list_tx_commit_idx()
+
+        # Epoch history
+        for cid in self.coins:
+            epoch_dicts = store.list_epochs(cid)
+            self._epoch_history[cid] = []
+            for ed in epoch_dicts:
+                try:
+                    self._epoch_history[cid].append(DifficultyEpoch(
+                        epoch_number=ed["epoch_number"],
+                        coin_id=ed.get("coin_id", cid),
+                        start_mint=ed.get("start_mint", 0),
+                        end_mint=ed.get("end_mint", 0),
+                        start_time=ed.get("start_time", 0.0),
+                        end_time=ed.get("end_time", 0.0),
+                        mints_in_epoch=ed.get("mints_in_epoch", 0),
+                        avg_block_time=ed.get("avg_block_time", 0.0),
+                        target_block_time=ed.get("target_block_time", 60.0),
+                        old_difficulty=ed.get("old_difficulty", 1),
+                        new_difficulty=ed.get("new_difficulty", 1),
+                        adjustment_factor=ed.get("adjustment_factor", 1.0),
+                        halving_occurred=ed.get("halving_occurred", False),
+                        old_base_reward=ed.get("old_base_reward", 0.0),
+                        new_base_reward=ed.get("new_base_reward", 0.0),
+                    ))
+                except (KeyError, ValueError):
+                    pass
+
+        # Indices
+        self._symbol_index = store.list_symbols()
+        issuer_data = store.list_issuers()
+        self._issuer_index = {k: list(v) for k, v in issuer_data.items()}
+        offer_idx = store.list_offer_indices()
+        self._offer_index = {k: list(v) for k, v in offer_idx.items()}
+
+        # Sequences
+        meta = store.list_meta()
+        for k, v in meta.items():
+            if k.startswith("seq:"):
+                self._seq[k[4:]] = v
+        self._offer_seq = store.get_meta("offer_seq", 0)
+
+        coin_count = len(self.coins)
+        if coin_count > 0:
+            _logger.info(f"PMCManager loaded {coin_count} coins from store")
+
+    # ── Persistence: write-through helpers ───────────────────────────
+
+    def _persist_coin(self, coin_id: str) -> None:
+        """Write a coin definition to the LMDB store."""
+        if self._store is None:
+            return
+        coin = self.coins.get(coin_id)
+        if coin is not None:
+            d = coin.to_dict()
+            # Include fields not in to_dict() that are needed for restore
+            d["epoch_start_mint"] = coin.epoch_start_mint
+            d["epoch_start_time"] = coin.epoch_start_time
+            d["rules"] = [r.to_dict() for r in coin.rules]
+            self._store.put_coin(coin_id, d)
+
+    def _persist_holder(self, coin_id: str, account: str) -> None:
+        """Write a holder balance to the LMDB store."""
+        if self._store is None:
+            return
+        holder = self._holders.get(coin_id, {}).get(account)
+        if holder is not None:
+            self._store.put_holder(coin_id, account, holder.to_dict())
+
+    def _persist_offer(self, offer_id: str) -> None:
+        if self._store is None:
+            return
+        offer = self.offers.get(offer_id)
+        if offer is not None:
+            self._store.put_offer(offer_id, offer.to_dict())
+
+    def _persist_pow_hash(self, coin_id: str) -> None:
+        if self._store is None:
+            return
+        h = self._last_pow_hash.get(coin_id)
+        if h is not None:
+            self._store.put_pow_hash(coin_id, h)
+
+    def _persist_pending_txs(self, coin_id: str) -> None:
+        if self._store is None:
+            return
+        pool = self._pending_txs.get(coin_id, [])
+        self._store.put_pending_txs(coin_id, pool)
+
+    def _persist_commitment(self, coin_id: str, commitment: PMCCommitment) -> None:
+        if self._store is None:
+            return
+        idx = len(self._commitments.get(coin_id, [])) - 1
+        self._store.put_commitment(coin_id, idx, commitment.to_dict())
+
+    def _persist_tx_commit_index(self, tx_hash: str, commitment_id: str) -> None:
+        if self._store is None:
+            return
+        self._store.put_tx_commit_idx(tx_hash, commitment_id)
+
+    def _persist_epoch(self, coin_id: str, epoch: DifficultyEpoch) -> None:
+        if self._store is None:
+            return
+        self._store.put_epoch(coin_id, epoch.epoch_number, epoch.to_dict())
+
+    def _persist_indices(self, coin_id: str | None = None) -> None:
+        """Persist symbol/issuer/offer indices to the store."""
+        if self._store is None:
+            return
+        if coin_id:
+            coin = self.coins.get(coin_id)
+            if coin:
+                self._store.put_symbol(coin.symbol, coin_id)
+                self._store.put_issuer_coins(
+                    coin.issuer, self._issuer_index.get(coin.issuer, [])
+                )
+                self._store.put_offer_index(
+                    coin_id, self._offer_index.get(coin_id, [])
+                )
+        # Always persist sequences
+        for issuer, seq_val in self._seq.items():
+            self._store.put_meta(f"seq:{issuer}", seq_val)
+        self._store.put_meta("offer_seq", self._offer_seq)
+
+    def flush_to_store(self) -> None:
+        """Force-write all in-memory state to the LMDB store.
+
+        Useful after a sync snapshot is applied, or before shutdown.
+        """
+        if self._store is None:
+            return
+        from nexaflow_core.pmc_store import PMCStore  # noqa: F811
+        # Use the store's import_all with serialised state
+        from nexaflow_core.sync import _serialise_pmc_coin
+        data: dict = {
+            "coins": {cid: c.to_dict() | {
+                "epoch_start_mint": c.epoch_start_mint,
+                "epoch_start_time": c.epoch_start_time,
+                "rules": [r.to_dict() for r in c.rules],
+            } for cid, c in self.coins.items()},
+            "holders": {
+                cid: {acct: h.to_dict() for acct, h in accts.items()}
+                for cid, accts in self._holders.items()
+            },
+            "offers": {oid: o.to_dict() for oid, o in self.offers.items()},
+            "pow_hashes": dict(self._last_pow_hash),
+            "pending_txs": {cid: list(pool) for cid, pool in self._pending_txs.items()},
+            "commitments": {
+                cid: [c.to_dict() for c in chain]
+                for cid, chain in self._commitments.items()
+            },
+            "tx_commit_index": dict(self._tx_commitment_index),
+            "epoch_history": {
+                cid: [e.to_dict() for e in epochs]
+                for cid, epochs in self._epoch_history.items()
+            },
+            "symbol_index": dict(self._symbol_index),
+            "issuer_index": {k: list(v) for k, v in self._issuer_index.items()},
+            "offer_index": {k: list(v) for k, v in self._offer_index.items()},
+            "seq": dict(self._seq),
+            "offer_seq": self._offer_seq,
+        }
+        self._store.clear_all()
+        self._store.import_all(data)
 
     # ── ID generation ───────────────────────────────────────────────
 
@@ -620,6 +1093,9 @@ class PMCManager:
         flags: int = int(DEFAULT_FLAGS),
         metadata: str = "",
         rules: list[dict] | None = None,
+        epoch_length: int = DEFAULT_EPOCH_LENGTH,
+        target_block_time: float = DEFAULT_TARGET_BLOCK_TIME,
+        halving_interval: int = DEFAULT_HALVING_INTERVAL,
         now: float | None = None,
     ) -> tuple[bool, str, PMCDefinition | None]:
         """
@@ -656,6 +1132,30 @@ class PMCManager:
         if base_reward < MIN_BASE_REWARD or base_reward > MAX_BASE_REWARD:
             return False, f"Base reward must be {MIN_BASE_REWARD}-{MAX_BASE_REWARD}", None
 
+        # Validate epoch / halving parameters
+        if epoch_length != 0 and (
+            epoch_length < MIN_EPOCH_LENGTH or epoch_length > MAX_EPOCH_LENGTH
+        ):
+            return (
+                False,
+                f"Epoch length must be 0 (disabled) or {MIN_EPOCH_LENGTH}-{MAX_EPOCH_LENGTH}",
+                None,
+            )
+        if target_block_time < MIN_TARGET_BLOCK_TIME or target_block_time > MAX_TARGET_BLOCK_TIME:
+            return (
+                False,
+                f"Target block time must be {MIN_TARGET_BLOCK_TIME}-{MAX_TARGET_BLOCK_TIME}",
+                None,
+            )
+        if halving_interval != 0 and (
+            halving_interval < MIN_HALVING_INTERVAL or halving_interval > MAX_HALVING_INTERVAL
+        ):
+            return (
+                False,
+                f"Halving interval must be 0 (disabled) or {MIN_HALVING_INTERVAL}-{MAX_HALVING_INTERVAL}",
+                None,
+            )
+
         # Validate metadata length
         if metadata and len(metadata) > MAX_METADATA_LEN:
             return False, f"Metadata exceeds {MAX_METADATA_LEN} chars", None
@@ -675,6 +1175,8 @@ class PMCManager:
         coin_id = self._make_coin_id(issuer, symbol, seq)
         self._seq[issuer] = seq + 1
 
+        creation_time = now if now is not None else time.time()
+
         coin = PMCDefinition(
             coin_id=coin_id,
             symbol=symbol,
@@ -687,7 +1189,11 @@ class PMCManager:
             base_reward=base_reward,
             metadata=metadata,
             rules=parsed_rules,
-            created_at=now if now is not None else time.time(),
+            created_at=creation_time,
+            epoch_length=epoch_length,
+            target_block_time=target_block_time,
+            halving_interval=halving_interval,
+            epoch_start_time=creation_time,
         )
 
         self.coins[coin_id] = coin
@@ -698,6 +1204,12 @@ class PMCManager:
         self._last_pow_hash[coin_id] = coin_id  # genesis PoW seed
         self._pending_txs[coin_id] = []
         self._commitments[coin_id] = []
+        self._epoch_history[coin_id] = []
+
+        # ── Persist to LMDB ──────────────────────────────────────
+        self._persist_coin(coin_id)
+        self._persist_pow_hash(coin_id)
+        self._persist_indices(coin_id)
 
         return True, "Coin created", coin
 
@@ -718,6 +1230,7 @@ class PMCManager:
         tx_dict["_tx_hash"] = tx_hash
         tx_dict["_submitted_at"] = time.time()
         self._pending_txs.setdefault(coin_id, []).append(tx_dict)
+        self._persist_pending_txs(coin_id)
         return True, "Transaction submitted to pending pool", tx_hash
 
     def get_pending_txs(self, coin_id: str) -> list[dict]:
@@ -880,15 +1393,98 @@ class PMCManager:
                 if tx.get("_tx_hash") not in committed_set
             ]
 
+        # ── Difficulty retarget & reward halving check ────────────
+        epoch_msg = ""
+        if coin.epoch_length > 0:
+            mints_in_epoch = coin.total_mints - coin.epoch_start_mint
+            if mints_in_epoch >= coin.epoch_length:
+                epoch_elapsed = now - coin.epoch_start_time
+                old_diff = coin.pow_difficulty
+                new_diff, adj_factor = calculate_retarget(
+                    old_diff, epoch_elapsed, mints_in_epoch,
+                    coin.target_block_time,
+                )
+                avg_bt = epoch_elapsed / mints_in_epoch if mints_in_epoch > 0 else 0.0
+
+                # Check for halving at the same boundary
+                old_reward = coin.base_reward
+                new_reward, new_halvings, halving_occurred = calculate_halving(
+                    coin.base_reward, coin.total_mints,
+                    coin.halving_interval, coin.halvings_completed,
+                )
+
+                # Record epoch history
+                epoch_record = DifficultyEpoch(
+                    epoch_number=coin.current_epoch,
+                    coin_id=coin_id,
+                    start_mint=coin.epoch_start_mint,
+                    end_mint=coin.total_mints,
+                    start_time=coin.epoch_start_time,
+                    end_time=now,
+                    mints_in_epoch=mints_in_epoch,
+                    avg_block_time=round(avg_bt, 4),
+                    target_block_time=coin.target_block_time,
+                    old_difficulty=old_diff,
+                    new_difficulty=new_diff,
+                    adjustment_factor=adj_factor,
+                    halving_occurred=halving_occurred,
+                    old_base_reward=old_reward,
+                    new_base_reward=new_reward,
+                )
+                self._epoch_history.setdefault(coin_id, []).append(epoch_record)
+
+                # Apply retarget
+                coin.pow_difficulty = new_diff
+                coin.current_epoch += 1
+                coin.epoch_start_mint = coin.total_mints
+                coin.epoch_start_time = now
+
+                parts = []
+                if new_diff != old_diff:
+                    parts.append(f"retarget {old_diff}→{new_diff}")
+                if halving_occurred:
+                    coin.base_reward = new_reward
+                    coin.halvings_completed = new_halvings
+                    parts.append(f"halving #{new_halvings} reward→{new_reward}")
+                if parts:
+                    epoch_msg = " [" + ", ".join(parts) + "]"
+        else:
+            # Retarget disabled but halvings may still be active
+            if coin.halving_interval > 0:
+                old_reward = coin.base_reward
+                new_reward, new_halvings, halving_occurred = calculate_halving(
+                    coin.base_reward, coin.total_mints,
+                    coin.halving_interval, coin.halvings_completed,
+                )
+                if halving_occurred:
+                    coin.base_reward = new_reward
+                    coin.halvings_completed = new_halvings
+                    epoch_msg = f" [halving #{new_halvings} reward→{new_reward}]"
+
+        # ── Persist all mutations to LMDB ─────────────────────────
+        self._persist_coin(coin_id)
+        self._persist_holder(coin_id, miner)
+        self._persist_pow_hash(coin_id)
+        self._persist_commitment(coin_id, commitment)
+        if final_tx_hashes:
+            for txh in final_tx_hashes:
+                self._persist_tx_commit_index(txh, new_pow_hash)
+            self._persist_pending_txs(coin_id)
+        if epoch_msg:
+            # Epoch record was appended — persist it
+            epoch_list = self._epoch_history.get(coin_id, [])
+            if epoch_list:
+                self._persist_epoch(coin_id, epoch_list[-1])
+
         committed_count = len(final_tx_hashes)
         if committed_count > 0:
             return (
                 True,
                 f"Minted {reward} {coin.symbol} (difficulty {coin.pow_difficulty}, "
-                f"committed {committed_count} txs)",
+                f"committed {committed_count} txs){epoch_msg}",
                 reward,
             )
-        return True, f"Minted {reward} {coin.symbol} (difficulty {coin.pow_difficulty})", reward
+        return True, f"Minted {reward} {coin.symbol} (difficulty {coin.pow_difficulty}){epoch_msg}", reward
 
     # ── Transfer ────────────────────────────────────────────────────
 
@@ -972,6 +1568,12 @@ class PMCManager:
             "timestamp": now,
         })
 
+        # ── Persist to LMDB ──────────────────────────────────────
+        self._persist_holder(coin_id, sender)
+        self._persist_holder(coin_id, receiver)
+        if royalty > 0 and coin.issuer != sender:
+            self._persist_holder(coin_id, coin.issuer)
+
         return True, f"Transferred {net_amount} {coin.symbol}", royalty
 
     # ── Burn ────────────────────────────────────────────────────────
@@ -1016,6 +1618,10 @@ class PMCManager:
             "timestamp": now,
         })
 
+        # ── Persist to LMDB ──────────────────────────────────────
+        self._persist_coin(coin_id)
+        self._persist_holder(coin_id, account)
+
         return True, f"Burned {amount} {coin.symbol}"
 
     # ── Set rules (issuer only) ─────────────────────────────────────
@@ -1043,6 +1649,7 @@ class PMCManager:
                 return False, f"Invalid rule: {exc}"
 
         coin.rules = parsed
+        self._persist_coin(coin_id)
         return True, "Rules updated"
 
     # ── DEX: create offer ───────────────────────────────────────────
@@ -1122,6 +1729,10 @@ class PMCManager:
 
         self.offers[offer_id] = offer
         self._offer_index.setdefault(coin_id, []).append(offer_id)
+
+        # ── Persist to LMDB ──────────────────────────────────────
+        self._persist_offer(offer_id)
+        self._persist_indices(coin_id)
 
         return True, "Offer created", offer
 
@@ -1257,6 +1868,16 @@ class PMCManager:
             "timestamp": now,
         })
 
+        # ── Persist to LMDB ──────────────────────────────────────
+        self._persist_offer(offer_id)
+        self._persist_holder(offer.coin_id, seller)
+        self._persist_holder(offer.coin_id, buyer)
+        if royalty > 0:
+            self._persist_holder(offer.coin_id, coin.issuer)
+        if counter_coin_id:
+            self._persist_holder(counter_coin_id, buyer)
+            self._persist_holder(counter_coin_id, seller)
+
         return True, "Offer filled", settlement
 
     # ── DEX: cancel offer ───────────────────────────────────────────
@@ -1275,6 +1896,7 @@ class PMCManager:
         if offer.cancelled:
             return False, "Offer already cancelled"
         offer.cancelled = True
+        self._persist_offer(offer_id)
         return True, "Offer cancelled"
 
     # ── Freeze / unfreeze (issuer only) ─────────────────────────────
@@ -1292,6 +1914,7 @@ class PMCManager:
         if holder is None:
             return False, "Holder not found"
         holder.frozen = True
+        self._persist_holder(coin_id, account)
         return True, f"Frozen {account}"
 
     def unfreeze_holder(self, coin_id: str, issuer: str, account: str) -> tuple[bool, str]:
@@ -1304,6 +1927,7 @@ class PMCManager:
         if holder is None:
             return False, "Holder not found"
         holder.frozen = False
+        self._persist_holder(coin_id, account)
         return True, f"Unfrozen {account}"
 
     def freeze_coin(self, coin_id: str, issuer: str) -> tuple[bool, str]:
@@ -1314,6 +1938,7 @@ class PMCManager:
         if coin.issuer != issuer:
             return False, "Not the issuer"
         coin.frozen = True
+        self._persist_coin(coin_id)
         return True, "Coin frozen"
 
     def unfreeze_coin(self, coin_id: str, issuer: str) -> tuple[bool, str]:
@@ -1323,6 +1948,7 @@ class PMCManager:
         if coin.issuer != issuer:
             return False, "Not the issuer"
         coin.frozen = False
+        self._persist_coin(coin_id)
         return True, "Coin unfrozen"
 
     # ── Query helpers ───────────────────────────────────────────────
@@ -1433,6 +2059,15 @@ class PMCManager:
             "pending_tx_count": len(pending_hashes),
             "pending_tx_root": pending_root,
             "total_commitments": len(self._commitments.get(coin_id, [])),
+            # ── Epoch & halving info ───────────────────────────
+            "epoch_length": coin.epoch_length,
+            "target_block_time": coin.target_block_time,
+            "halving_interval": coin.halving_interval,
+            "current_epoch": coin.current_epoch,
+            "halvings_completed": coin.halvings_completed,
+            "mints_until_retarget": coin.mints_until_retarget,
+            "mints_until_halving": coin.mints_until_halving,
+            "total_epochs": len(self._epoch_history.get(coin_id, [])),
         }
 
     # ── Commitment query helpers ─────────────────────────────────
@@ -1462,6 +2097,49 @@ class PMCManager:
     def get_commitment_chain(self, coin_id: str) -> list[dict]:
         """Return the full commitment chain for a coin as dicts."""
         return [c.to_dict() for c in self._commitments.get(coin_id, [])]
+
+    # ── Epoch query helpers ──────────────────────────────────────
+
+    def list_epochs(
+        self, coin_id: str, limit: int = 50, offset: int = 0,
+    ) -> list[DifficultyEpoch]:
+        """Return the epoch history for a coin (newest first)."""
+        epochs = self._epoch_history.get(coin_id, [])
+        return list(reversed(epochs))[offset : offset + limit]
+
+    def get_epoch(self, coin_id: str, epoch_number: int) -> DifficultyEpoch | None:
+        """Look up a specific epoch record by number."""
+        for e in self._epoch_history.get(coin_id, []):
+            if e.epoch_number == epoch_number:
+                return e
+        return None
+
+    def get_current_epoch_info(self, coin_id: str) -> dict:
+        """Return a snapshot of the current (in-progress) epoch."""
+        coin = self.coins.get(coin_id)
+        if coin is None:
+            return {}
+        mints_in_epoch = coin.total_mints - coin.epoch_start_mint
+        now = time.time()
+        elapsed = now - coin.epoch_start_time if coin.epoch_start_time > 0 else 0.0
+        avg_bt = elapsed / mints_in_epoch if mints_in_epoch > 0 else 0.0
+        return {
+            "epoch_number": coin.current_epoch,
+            "mints_in_epoch": mints_in_epoch,
+            "epoch_length": coin.epoch_length,
+            "mints_remaining": coin.mints_until_retarget,
+            "elapsed_time": round(elapsed, 2),
+            "avg_block_time": round(avg_bt, 4),
+            "target_block_time": coin.target_block_time,
+            "current_difficulty": coin.pow_difficulty,
+            "current_base_reward": coin.base_reward,
+            "halvings_completed": coin.halvings_completed,
+            "mints_until_halving": coin.mints_until_halving,
+        }
+
+    def get_epoch_history(self, coin_id: str) -> list[dict]:
+        """Return the full epoch history for a coin as dicts."""
+        return [e.to_dict() for e in self._epoch_history.get(coin_id, [])]
 
     # ── Internal helpers ────────────────────────────────────────────
 

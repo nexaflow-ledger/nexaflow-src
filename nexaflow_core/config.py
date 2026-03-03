@@ -141,6 +141,12 @@ class PMCConfig:
     target_mint_interval: float = 60.0
     max_coins_per_issuer: int = 100
     max_supply_cap: float = 1_000_000_000_000_000.0
+    # LMDB-backed persistent storage for PMC state.  When enabled,
+    # all PMC data (coins, balances, offers, PoW chains, epochs) is
+    # written through to disk for crash-safe recovery.
+    store_enabled: bool = True
+    store_path: str = "data/pmc.lmdb"
+    store_map_size_mb: int = 1024  # 1 GiB virtual address space
 
 
 @dataclass

@@ -147,6 +147,122 @@ def _serialise_confidential_output(out: Any) -> dict:
     }
 
 
+# ─── PMC serialisation helpers ───────────────────────────────────────────
+
+
+def _serialise_pmc_coin(coin: Any) -> dict:
+    """Serialise a PMCDefinition to a JSON-safe dict."""
+    return coin.to_dict()
+
+
+def _serialise_pmc_holder(holder: Any) -> dict:
+    """Serialise a PMCHolder to a JSON-safe dict."""
+    return holder.to_dict()
+
+
+def _serialise_pmc_offer(offer: Any) -> dict:
+    """Serialise a PMCOffer to a JSON-safe dict."""
+    return offer.to_dict()
+
+
+def _serialise_pmc_commitment(commitment: Any) -> dict:
+    """Serialise a PMCCommitment to a JSON-safe dict."""
+    return commitment.to_dict()
+
+
+def _serialise_pmc_epoch(epoch: Any) -> dict:
+    """Serialise a DifficultyEpoch to a JSON-safe dict."""
+    return epoch.to_dict()
+
+
+def _serialise_pmc_state(ledger: Any) -> dict:
+    """
+    Serialise the entire PMC sub-system state from a ledger's PMCManager.
+
+    When the PMCManager has an LMDB-backed store, we can export directly
+    from disk — avoiding full in-memory traversal for large datasets.
+
+    Captures:
+      - Coin definitions (including epoch/halving fields)
+      - Holder balances per coin
+      - Active and historical DEX offers
+      - PoW chain hashes (last hash per coin)
+      - Transaction commitment pool and history
+      - Difficulty epoch history
+      - Internal indices (symbol → coin_id, issuer → [coin_id])
+    """
+    mgr = getattr(ledger, "pmc_manager", None)
+    if mgr is None:
+        return {}
+
+    # Fast path: if the manager has a persistent store, export from it
+    store = getattr(mgr, "_store", None)
+    if store is not None and hasattr(store, "export_all"):
+        return store.export_all()
+
+    # Coin definitions
+    coins = {}
+    for cid, coin in mgr.coins.items():
+        coins[cid] = _serialise_pmc_coin(coin)
+
+    # Holders: coin_id → { account → holder_dict }
+    holders: dict[str, dict[str, dict]] = {}
+    for cid, acct_map in mgr._holders.items():
+        holders[cid] = {
+            acct: _serialise_pmc_holder(h)
+            for acct, h in acct_map.items()
+        }
+
+    # Offers
+    offers = {
+        oid: _serialise_pmc_offer(o) for oid, o in mgr.offers.items()
+    }
+
+    # PoW chain hashes
+    pow_hashes = dict(mgr._last_pow_hash)
+
+    # Pending tx pools
+    pending_txs: dict[str, list[dict]] = {}
+    for cid, pool in mgr._pending_txs.items():
+        pending_txs[cid] = list(pool)
+
+    # Commitment history
+    commitments: dict[str, list[dict]] = {}
+    for cid, chain in mgr._commitments.items():
+        commitments[cid] = [_serialise_pmc_commitment(c) for c in chain]
+
+    # Tx → commitment index
+    tx_commit_index = dict(mgr._tx_commitment_index)
+
+    # Epoch history
+    epoch_history: dict[str, list[dict]] = {}
+    for cid, epochs in mgr._epoch_history.items():
+        epoch_history[cid] = [_serialise_pmc_epoch(e) for e in epochs]
+
+    # Indices & sequences
+    symbol_index = dict(mgr._symbol_index)
+    issuer_index = {k: list(v) for k, v in mgr._issuer_index.items()}
+    offer_index = {k: list(v) for k, v in mgr._offer_index.items()}
+    seq = dict(mgr._seq)
+    offer_seq = mgr._offer_seq
+
+    return {
+        "coins": coins,
+        "holders": holders,
+        "offers": offers,
+        "pow_hashes": pow_hashes,
+        "pending_txs": pending_txs,
+        "commitments": commitments,
+        "tx_commit_index": tx_commit_index,
+        "epoch_history": epoch_history,
+        "symbol_index": symbol_index,
+        "issuer_index": issuer_index,
+        "offer_index": offer_index,
+        "seq": seq,
+        "offer_seq": offer_seq,
+    }
+
+
 # ─── Snapshot builder (used by the *serving* side) ───────────────────────
 
 
@@ -185,6 +301,7 @@ def build_full_snapshot(ledger: Any) -> dict:
         "confidential_outputs": confidential,
         "applied_tx_ids": list(ledger.applied_tx_ids),
         "spent_key_images": [ki.hex() for ki in ledger.spent_key_images],
+        "pmc_state": _serialise_pmc_state(ledger),
     }
 
 
@@ -236,6 +353,7 @@ def build_delta_snapshot(ledger: Any, since_seq: int) -> dict:
         "confidential_outputs": confidential,
         "applied_tx_ids": list(ledger.applied_tx_ids),
         "spent_key_images": [ki.hex() for ki in ledger.spent_key_images],
+        "pmc_state": _serialise_pmc_state(ledger),
     }
 
 
@@ -410,12 +528,224 @@ def apply_snapshot(ledger: Any, snapshot: dict) -> bool:
         with contextlib.suppress(ValueError):
             ledger.spent_key_images.add(bytes.fromhex(ki_hex))
 
+    # ── PMC state ────────────────────────────────────────────────────
+    pmc_data = snapshot.get("pmc_state")
+    if pmc_data:
+        _apply_pmc_state(ledger, pmc_data)
+
     logger.info(
         f"Snapshot applied: seq {ledger.current_sequence}, "
         f"{len(snapshot.get('accounts', {}))} accounts, "
         f"{len(received_headers)} new headers"
     )
     return True
+
+
+# ─── PMC state applier ──────────────────────────────────────────────────
+
+
+def _apply_pmc_state(ledger: Any, pmc_data: dict) -> None:
+    """
+    Reconstruct the PMCManager state from a serialised snapshot.
+
+    This replaces the entire PMC sub-system state on the receiving node
+    so that coins, balances, offers, PoW chains, commitment histories,
+    and difficulty epoch records are faithfully replicated.
+    """
+    from nexaflow_core.pmc import (
+        DifficultyEpoch,
+        PMCCommitment,
+        PMCDefinition,
+        PMCHolder,
+        PMCOffer,
+        PMCRule,
+    )
+
+    mgr = getattr(ledger, "pmc_manager", None)
+    if mgr is None:
+        return
+
+    # ── Coin definitions ─────────────────────────────────────────
+    for cid, cd in pmc_data.get("coins", {}).items():
+        if cid in mgr.coins:
+            # Update existing coin with latest state
+            coin = mgr.coins[cid]
+            coin.total_minted = cd.get("total_minted", coin.total_minted)
+            coin.total_burned = cd.get("total_burned", coin.total_burned)
+            coin.total_mints = cd.get("total_mints", coin.total_mints)
+            coin.pow_difficulty = cd.get("pow_difficulty", coin.pow_difficulty)
+            coin.base_reward = cd.get("base_reward", coin.base_reward)
+            coin.frozen = cd.get("frozen", coin.frozen)
+            coin.epoch_length = cd.get("epoch_length", coin.epoch_length)
+            coin.target_block_time = cd.get("target_block_time", coin.target_block_time)
+            coin.halving_interval = cd.get("halving_interval", coin.halving_interval)
+            coin.halvings_completed = cd.get("halvings_completed", coin.halvings_completed)
+            coin.current_epoch = cd.get("current_epoch", coin.current_epoch)
+            coin.epoch_start_mint = cd.get("epoch_start_mint", coin.epoch_start_mint)
+            coin.epoch_start_time = cd.get("epoch_start_time", coin.epoch_start_time)
+        else:
+            # Reconstruct coin from scratch
+            rules = []
+            for rd in cd.get("rules", []):
+                try:
+                    rules.append(PMCRule.from_dict(rd))
+                except (KeyError, ValueError):
+                    pass
+            coin = PMCDefinition(
+                coin_id=cid,
+                symbol=cd.get("symbol", ""),
+                name=cd.get("name", ""),
+                issuer=cd.get("issuer", ""),
+                decimals=cd.get("decimals", 8),
+                max_supply=cd.get("max_supply", 0.0),
+                total_minted=cd.get("total_minted", 0.0),
+                total_burned=cd.get("total_burned", 0.0),
+                flags=cd.get("flags", 0),
+                pow_difficulty=cd.get("pow_difficulty", 4),
+                base_reward=cd.get("base_reward", 50.0),
+                metadata=cd.get("metadata", ""),
+                rules=rules,
+                created_at=cd.get("created_at", 0.0),
+                frozen=cd.get("frozen", False),
+                total_mints=cd.get("total_mints", 0),
+                epoch_length=cd.get("epoch_length", 100),
+                target_block_time=cd.get("target_block_time", 60.0),
+                halving_interval=cd.get("halving_interval", 10_000),
+                halvings_completed=cd.get("halvings_completed", 0),
+                current_epoch=cd.get("current_epoch", 0),
+                epoch_start_mint=cd.get("epoch_start_mint", 0),
+                epoch_start_time=cd.get("epoch_start_time", 0.0),
+            )
+            mgr.coins[cid] = coin
+
+    # ── Holder balances ──────────────────────────────────────────
+    for cid, acct_map in pmc_data.get("holders", {}).items():
+        holders = mgr._holders.setdefault(cid, {})
+        for acct, hd in acct_map.items():
+            if acct in holders:
+                h = holders[acct]
+                h.balance = hd.get("balance", h.balance)
+                h.frozen = hd.get("frozen", h.frozen)
+                h.last_transfer_at = hd.get("last_transfer_at", h.last_transfer_at)
+                h.last_mint_at = hd.get("last_mint_at", h.last_mint_at)
+            else:
+                h = PMCHolder(
+                    account=acct,
+                    coin_id=cid,
+                    balance=hd.get("balance", 0.0),
+                    frozen=hd.get("frozen", False),
+                    last_transfer_at=hd.get("last_transfer_at", 0.0),
+                    last_mint_at=hd.get("last_mint_at", 0.0),
+                )
+                holders[acct] = h
+
+    # ── DEX offers ───────────────────────────────────────────────
+    for oid, od in pmc_data.get("offers", {}).items():
+        if oid not in mgr.offers:
+            offer = PMCOffer(
+                offer_id=oid,
+                coin_id=od.get("coin_id", ""),
+                owner=od.get("owner", ""),
+                is_sell=od.get("is_sell", True),
+                amount=od.get("amount", 0.0),
+                price=od.get("price", 0.0),
+                counter_coin_id=od.get("counter_coin_id", ""),
+                filled=od.get("filled", 0.0),
+                destination=od.get("destination", ""),
+                expiration=od.get("expiration", 0.0),
+                created_at=od.get("created_at", 0.0),
+                cancelled=od.get("cancelled", False),
+            )
+            mgr.offers[oid] = offer
+
+    # ── PoW chain hashes ─────────────────────────────────────────
+    for cid, h in pmc_data.get("pow_hashes", {}).items():
+        mgr._last_pow_hash[cid] = h
+
+    # ── Pending tx pools ─────────────────────────────────────────
+    for cid, pool in pmc_data.get("pending_txs", {}).items():
+        mgr._pending_txs[cid] = list(pool)
+
+    # ── Commitment history ───────────────────────────────────────
+    for cid, chain in pmc_data.get("commitments", {}).items():
+        existing_ids = {
+            c.commitment_id for c in mgr._commitments.get(cid, [])
+        }
+        for cd_dict in chain:
+            if cd_dict.get("commitment_id", "") in existing_ids:
+                continue
+            try:
+                comm = PMCCommitment(
+                    commitment_id=cd_dict["commitment_id"],
+                    coin_id=cd_dict.get("coin_id", cid),
+                    miner=cd_dict.get("miner", ""),
+                    tx_root=cd_dict.get("tx_root", ""),
+                    tx_hashes=cd_dict.get("tx_hashes", []),
+                    tx_count=cd_dict.get("tx_count", 0),
+                    pow_hash=cd_dict.get("pow_hash", ""),
+                    difficulty=cd_dict.get("difficulty", 1),
+                    reward=cd_dict.get("reward", 0.0),
+                    timestamp=cd_dict.get("timestamp", 0.0),
+                    prev_commitment=cd_dict.get("prev_commitment", ""),
+                )
+                mgr._commitments.setdefault(cid, []).append(comm)
+            except (KeyError, ValueError) as exc:
+                logger.warning(f"Skipping invalid PMC commitment: {exc}")
+
+    # ── Tx → commitment index ────────────────────────────────────
+    for txh, cid in pmc_data.get("tx_commit_index", {}).items():
+        mgr._tx_commitment_index[txh] = cid
+
+    # ── Epoch history ────────────────────────────────────────────
+    for cid, epochs in pmc_data.get("epoch_history", {}).items():
+        existing_nums = {
+            e.epoch_number for e in mgr._epoch_history.get(cid, [])
+        }
+        for ed in epochs:
+            if ed.get("epoch_number", -1) in existing_nums:
+                continue
+            try:
+                epoch = DifficultyEpoch(
+                    epoch_number=ed["epoch_number"],
+                    coin_id=ed.get("coin_id", cid),
+                    start_mint=ed.get("start_mint", 0),
+                    end_mint=ed.get("end_mint", 0),
+                    start_time=ed.get("start_time", 0.0),
+                    end_time=ed.get("end_time", 0.0),
+                    mints_in_epoch=ed.get("mints_in_epoch", 0),
+                    avg_block_time=ed.get("avg_block_time", 0.0),
+                    target_block_time=ed.get("target_block_time", 60.0),
+                    old_difficulty=ed.get("old_difficulty", 1),
+                    new_difficulty=ed.get("new_difficulty", 1),
+                    adjustment_factor=ed.get("adjustment_factor", 1.0),
+                    halving_occurred=ed.get("halving_occurred", False),
+                    old_base_reward=ed.get("old_base_reward", 0.0),
+                    new_base_reward=ed.get("new_base_reward", 0.0),
+                )
+                mgr._epoch_history.setdefault(cid, []).append(epoch)
+                existing_nums.add(epoch.epoch_number)
+            except (KeyError, ValueError) as exc:
+                logger.warning(f"Skipping invalid PMC epoch: {exc}")
+
+    # ── Indices & sequences ──────────────────────────────────────
+    for sym, cid in pmc_data.get("symbol_index", {}).items():
+        mgr._symbol_index[sym] = cid
+    for issuer, cids in pmc_data.get("issuer_index", {}).items():
+        mgr._issuer_index[issuer] = list(cids)
+    for cid, oids in pmc_data.get("offer_index", {}).items():
+        mgr._offer_index[cid] = list(oids)
+    for issuer, seq in pmc_data.get("seq", {}).items():
+        mgr._seq[issuer] = seq
+    if "offer_seq" in pmc_data:
+        mgr._offer_seq = pmc_data["offer_seq"]
+
+    pmc_coin_count = len(pmc_data.get("coins", {}))
+    if pmc_coin_count > 0:
+        logger.info(f"PMC state synced: {pmc_coin_count} coins")
+
+    # ── Flush to LMDB store if available ─────────────────────────
+    if hasattr(mgr, "flush_to_store"):
+        mgr.flush_to_store()
 
 
 # ═════════════════════════════════════════════════════════════════════════

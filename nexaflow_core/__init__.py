@@ -37,6 +37,7 @@ __all__ = [
     "payment_channel",
     "payment_path",
     "pmc",
+    "pmc_store",
     "precision",
     "privacy",
     "reporting",

@@ -2906,6 +2906,9 @@ cdef class Ledger:
             flags=int(flags_d.get("pmc_flags", 0x004F)),
             metadata=flags_d.get("metadata", ""),
             rules=rules_raw,
+            epoch_length=int(flags_d.get("epoch_length", 100)),
+            target_block_time=float(flags_d.get("target_block_time", 60.0)),
+            halving_interval=int(flags_d.get("halving_interval", 10000)),
         )
         if not ok:
             tx.result_code = 144  # tecPMC_SYMBOL_EXISTS / general creation error
