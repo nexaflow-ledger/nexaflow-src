@@ -2915,7 +2915,7 @@ cdef class Ledger:
         return 0
 
     cpdef int apply_pmc_mint(self, object tx):
-        """Mint new PMC supply via Proof-of-Work."""
+        """Mint new PMC supply via Proof-of-Work with transaction commitment."""
         cdef str src = tx.account
         acc = <AccountEntry>self.accounts.get(src)
         if acc is None:
@@ -2930,13 +2930,21 @@ cdef class Ledger:
         flags_d = tx.flags or {}
         coin_id = flags_d.get("coin_id", "")
         nonce = int(flags_d.get("nonce", 0))
+        # Transaction commitment fields (optional — backwards compatible)
+        tx_root = flags_d.get("tx_root", "")
+        committed_tx_hashes = flags_d.get("committed_tx_hashes", None)
         ok, msg, minted = self.pmc_manager.mint(
             coin_id=coin_id, miner=src, nonce=nonce,
+            tx_root=tx_root if tx_root else "",
+            committed_tx_hashes=committed_tx_hashes,
         )
         if not ok:
             if "Proof-of-Work" in msg:
                 tx.result_code = 139
                 return 139  # tecPMC_INVALID_POW
+            if "tx_root" in msg.lower() or "committed tx" in msg.lower():
+                tx.result_code = 144
+                return 144  # tecPMC_BAD_COMMITMENT
             if "supply" in msg.lower():
                 tx.result_code = 141
                 return 141  # tecPMC_SUPPLY_CAP

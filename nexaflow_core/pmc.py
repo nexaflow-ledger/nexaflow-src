@@ -275,31 +275,138 @@ class PMCOffer:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  Transaction commitment — Merkle tree helpers
+# ═══════════════════════════════════════════════════════════════════════
+
+EMPTY_TX_ROOT = "0" * 64  # sentinel when no transactions are committed
+
+
+def _sha256(data: bytes) -> bytes:
+    return hashlib.sha256(data).digest()
+
+
+def compute_merkle_root(tx_hashes: list[str]) -> str:
+    """
+    Compute the Merkle root of a list of transaction hashes (hex strings).
+
+    Uses the same double-SHA256 algorithm as Bitcoin's Merkle tree so that
+    the commitment structure is familiar to existing tooling.  If the list
+    has an odd number of entries the last hash is duplicated (Bitcoin rule).
+
+    Returns EMPTY_TX_ROOT when *tx_hashes* is empty.
+    """
+    if not tx_hashes:
+        return EMPTY_TX_ROOT
+
+    # Leaf layer: double-SHA256 of each tx hash
+    layer: list[bytes] = [
+        _sha256(_sha256(h.encode("utf-8"))) for h in tx_hashes
+    ]
+
+    while len(layer) > 1:
+        if len(layer) % 2 == 1:
+            layer.append(layer[-1])          # duplicate last (Bitcoin rule)
+        next_layer: list[bytes] = []
+        for i in range(0, len(layer), 2):
+            combined = layer[i] + layer[i + 1]
+            next_layer.append(_sha256(_sha256(combined)))
+        layer = next_layer
+
+    return layer[0].hex()
+
+
+def hash_pending_tx(tx_dict: dict) -> str:
+    """Compute a deterministic double-SHA256 hash of a pending tx dict.
+
+    Fields are sorted alphabetically so that any miner independently
+    building the same tx set arrives at the same Merkle root.
+    """
+    import json
+    canonical = json.dumps(tx_dict, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(
+        hashlib.sha256(canonical.encode("utf-8")).digest()
+    ).hexdigest()
+
+
+@dataclass
+class PMCCommitment:
+    """A PoW-validated transaction commitment.
+
+    Each successful mint anchors a batch of PMC transactions into the
+    coin's PoW chain.  The *tx_root* Merkle root cryptographically binds
+    the mined hash to real transaction data — the miner simultaneously
+    earns a reward *and* validates the included transactions.
+    """
+    commitment_id: str          # = the PoW hash that sealed this commitment
+    coin_id: str
+    miner: str
+    tx_root: str                # Merkle root of committed transactions
+    tx_hashes: list[str]        # individual tx hashes included
+    tx_count: int               # len(tx_hashes)
+    pow_hash: str               # the winning PoW hash (== commitment_id)
+    difficulty: int
+    reward: float
+    timestamp: float
+    prev_commitment: str = ""   # chain to previous commitment
+
+    def to_dict(self) -> dict:
+        return {
+            "commitment_id": self.commitment_id,
+            "coin_id": self.coin_id,
+            "miner": self.miner,
+            "tx_root": self.tx_root,
+            "tx_hashes": self.tx_hashes,
+            "tx_count": self.tx_count,
+            "pow_hash": self.pow_hash,
+            "difficulty": self.difficulty,
+            "reward": self.reward,
+            "timestamp": self.timestamp,
+            "prev_commitment": self.prev_commitment,
+        }
+
+
+# ═══════════════════════════════════════════════════════════════════════
 #  Proof-of-Work helpers
 # ═══════════════════════════════════════════════════════════════════════
 
-def compute_pow_hash(coin_id: str, miner: str, nonce: int, prev_hash: str = "") -> str:
+def compute_pow_hash(
+    coin_id: str,
+    miner: str,
+    nonce: int,
+    prev_hash: str = "",
+    tx_root: str = EMPTY_TX_ROOT,
+) -> str:
     """
     Compute the PoW hash for a mint attempt using **Bitcoin-style
     double-SHA256** so that existing Bitcoin ASIC / GPU mining
     hardware can be used directly.
 
-    hash = SHA256( SHA256( coin_id || miner || nonce || prev_hash ) )
+    hash = SHA256( SHA256( coin_id || miner || nonce || prev_hash || tx_root ) )
+
+    The *tx_root* is the Merkle root of the transactions the miner is
+    committing to validate.  This binds the PoW to real data — the same
+    hash cannot be reused with a different transaction set.
 
     Returns the hex digest (64 hex chars, 256-bit).
     """
-    blob = f"{coin_id}:{miner}:{nonce}:{prev_hash}".encode("utf-8")
+    blob = f"{coin_id}:{miner}:{nonce}:{prev_hash}:{tx_root}".encode("utf-8")
     first = hashlib.sha256(blob).digest()
     return hashlib.sha256(first).hexdigest()
 
 
-def verify_pow(coin_id: str, miner: str, nonce: int,
-               difficulty: int, prev_hash: str = "") -> bool:
+def verify_pow(
+    coin_id: str,
+    miner: str,
+    nonce: int,
+    difficulty: int,
+    prev_hash: str = "",
+    tx_root: str = EMPTY_TX_ROOT,
+) -> bool:
     """
     Verify that the nonce produces a double-SHA256 hash with at least
     ``difficulty`` leading hex zeros.
     """
-    h = compute_pow_hash(coin_id, miner, nonce, prev_hash)
+    h = compute_pow_hash(coin_id, miner, nonce, prev_hash, tx_root)
     return h[:difficulty] == "0" * difficulty
 
 
@@ -480,6 +587,13 @@ class PMCManager:
         self._offer_seq: int = 0
         # last PoW hash per coin (chain the PoW)
         self._last_pow_hash: dict[str, str] = {}
+        # ── Transaction commitment pool ─────────────────────────────
+        # coin_id → [pending tx dicts] awaiting PoW commitment
+        self._pending_txs: dict[str, list[dict]] = {}
+        # coin_id → [PMCCommitment] history of PoW-validated commits
+        self._commitments: dict[str, list[PMCCommitment]] = {}
+        # tx_hash → commitment_id (index: which commitment includes a tx)
+        self._tx_commitment_index: dict[str, str] = {}
 
     # ── ID generation ───────────────────────────────────────────────
 
@@ -582,16 +696,55 @@ class PMCManager:
         self._holders[coin_id] = {}
         self._offer_index[coin_id] = []
         self._last_pow_hash[coin_id] = coin_id  # genesis PoW seed
+        self._pending_txs[coin_id] = []
+        self._commitments[coin_id] = []
 
         return True, "Coin created", coin
 
     # ── PoW minting ─────────────────────────────────────────────────
+
+    # ── Pending transaction pool ──────────────────────────────────
+
+    def submit_pending_tx(self, coin_id: str, tx_dict: dict) -> tuple[bool, str, str]:
+        """
+        Submit a PMC transaction (transfer, burn, DEX settlement, etc.)
+        to the pending pool for a coin, awaiting PoW commitment.
+
+        Returns (success, message, tx_hash).
+        """
+        if coin_id not in self.coins:
+            return False, "Coin not found", ""
+        tx_hash = hash_pending_tx(tx_dict)
+        tx_dict["_tx_hash"] = tx_hash
+        tx_dict["_submitted_at"] = time.time()
+        self._pending_txs.setdefault(coin_id, []).append(tx_dict)
+        return True, "Transaction submitted to pending pool", tx_hash
+
+    def get_pending_txs(self, coin_id: str) -> list[dict]:
+        """Return the current pending transaction pool for a coin."""
+        return list(self._pending_txs.get(coin_id, []))
+
+    def get_pending_tx_root(self, coin_id: str) -> tuple[str, list[str]]:
+        """
+        Compute the Merkle root of pending transactions for a coin.
+
+        Miners call this to get the *tx_root* they must include in their
+        PoW hash.  Returns (merkle_root, [tx_hashes]).
+        """
+        pending = self._pending_txs.get(coin_id, [])
+        tx_hashes = [tx["_tx_hash"] for tx in pending if "_tx_hash" in tx]
+        root = compute_merkle_root(tx_hashes)
+        return root, tx_hashes
+
+    # ── PoW minting (with transaction commitment) ───────────────────
 
     def mint(
         self,
         coin_id: str,
         miner: str,
         nonce: int,
+        tx_root: str = EMPTY_TX_ROOT,
+        committed_tx_hashes: list[str] | None = None,
         now: float | None = None,
     ) -> tuple[bool, str, float]:
         """
@@ -604,6 +757,17 @@ class PMCManager:
 
         This means harder PoW puzzles pay exponentially more, making
         difficulty the economic backbone of each micro coin.
+
+        **Transaction commitment** (new):
+        Miners may include a *tx_root* — the Merkle root of pending PMC
+        transactions they are committing to validate.  When present the
+        PoW simultaneously mints new supply **and** anchors a batch of
+        transactions into the coin's PoW chain, giving them
+        cryptographic finality.  The PoW hash itself is bound to the
+        tx_root so it cannot be re-used for a different transaction set.
+
+        If *tx_root* is EMPTY_TX_ROOT (default) the mint proceeds as a
+        "coinbase-only" block — backward-compatible with existing miners.
 
         Returns (success, message, minted_amount).
         """
@@ -642,9 +806,30 @@ class PMCManager:
         except RuleViolation as exc:
             return False, str(exc), 0.0
 
+        # ── Validate transaction commitment ───────────────────────
+        # If miner supplied committed_tx_hashes, verify that the
+        # tx_root they mined against actually matches.  This prevents
+        # a miner from claiming they validated transactions they did
+        # not actually include in their PoW hash.
+        if committed_tx_hashes:
+            expected_root = compute_merkle_root(committed_tx_hashes)
+            if tx_root != expected_root:
+                return False, "tx_root does not match committed transactions", 0.0
+            # Verify each claimed tx exists in the pending pool
+            pending_hashes = {
+                tx["_tx_hash"] for tx in self._pending_txs.get(coin_id, [])
+                if "_tx_hash" in tx
+            }
+            for txh in committed_tx_hashes:
+                if txh not in pending_hashes:
+                    return False, f"Committed tx {txh[:16]}… not in pending pool", 0.0
+
         # Verify Proof-of-Work (Bitcoin-style double-SHA256)
+        # The tx_root is now part of the hash input — PoW is bound to
+        # the exact set of transactions the miner is validating.
         prev_hash = self._last_pow_hash.get(coin_id, coin_id)
-        if not verify_pow(coin_id, miner, nonce, coin.pow_difficulty, prev_hash):
+        if not verify_pow(coin_id, miner, nonce, coin.pow_difficulty,
+                          prev_hash, tx_root):
             return False, "Invalid Proof-of-Work", 0.0
 
         # Round to coin decimals
@@ -658,10 +843,51 @@ class PMCManager:
         coin.total_mints += 1
 
         # Update PoW chain hash
-        self._last_pow_hash[coin_id] = compute_pow_hash(
-            coin_id, miner, nonce, prev_hash
+        new_pow_hash = compute_pow_hash(
+            coin_id, miner, nonce, prev_hash, tx_root
         )
+        self._last_pow_hash[coin_id] = new_pow_hash
 
+        # ── Record commitment & drain committed txs from pool ─────
+        final_tx_hashes = committed_tx_hashes or []
+        prev_commitment_id = (
+            self._commitments[coin_id][-1].commitment_id
+            if self._commitments.get(coin_id)
+            else ""
+        )
+        commitment = PMCCommitment(
+            commitment_id=new_pow_hash,
+            coin_id=coin_id,
+            miner=miner,
+            tx_root=tx_root,
+            tx_hashes=final_tx_hashes,
+            tx_count=len(final_tx_hashes),
+            pow_hash=new_pow_hash,
+            difficulty=coin.pow_difficulty,
+            reward=reward,
+            timestamp=now,
+            prev_commitment=prev_commitment_id,
+        )
+        self._commitments.setdefault(coin_id, []).append(commitment)
+
+        # Index each committed tx and remove from pending pool
+        if final_tx_hashes:
+            committed_set = set(final_tx_hashes)
+            for txh in final_tx_hashes:
+                self._tx_commitment_index[txh] = new_pow_hash
+            self._pending_txs[coin_id] = [
+                tx for tx in self._pending_txs.get(coin_id, [])
+                if tx.get("_tx_hash") not in committed_set
+            ]
+
+        committed_count = len(final_tx_hashes)
+        if committed_count > 0:
+            return (
+                True,
+                f"Minted {reward} {coin.symbol} (difficulty {coin.pow_difficulty}, "
+                f"committed {committed_count} txs)",
+                reward,
+            )
         return True, f"Minted {reward} {coin.symbol} (difficulty {coin.pow_difficulty})", reward
 
     # ── Transfer ────────────────────────────────────────────────────
@@ -735,6 +961,17 @@ class PMCManager:
             issuer_holder = self._get_or_create_holder(coin_id, coin.issuer, now)
             issuer_holder.balance += royalty
 
+        # Submit to pending pool for PoW commitment
+        self.submit_pending_tx(coin_id, {
+            "type": "transfer",
+            "coin_id": coin_id,
+            "sender": sender,
+            "receiver": receiver,
+            "amount": net_amount,
+            "royalty": royalty,
+            "timestamp": now,
+        })
+
         return True, f"Transferred {net_amount} {coin.symbol}", royalty
 
     # ── Burn ────────────────────────────────────────────────────────
@@ -769,6 +1006,15 @@ class PMCManager:
 
         holder.balance -= amount
         coin.total_burned += amount
+
+        # Submit to pending pool for PoW commitment
+        self.submit_pending_tx(coin_id, {
+            "type": "burn",
+            "coin_id": coin_id,
+            "account": account,
+            "amount": amount,
+            "timestamp": now,
+        })
 
         return True, f"Burned {amount} {coin.symbol}"
 
@@ -997,6 +1243,20 @@ class PMCManager:
             "royalty": royalty,
         }
 
+        # Submit DEX settlement to pending pool for PoW commitment
+        self.submit_pending_tx(offer.coin_id, {
+            "type": "dex_settlement",
+            "offer_id": offer_id,
+            "coin_id": offer.coin_id,
+            "seller": seller,
+            "buyer": buyer,
+            "coin_amount": net_qty,
+            "price": offer.price,
+            "total_cost": total_cost,
+            "counter_coin_id": counter_coin_id or "NXF",
+            "timestamp": now,
+        })
+
         return True, "Offer filled", settlement
 
     # ── DEX: cancel offer ───────────────────────────────────────────
@@ -1154,6 +1414,8 @@ class PMCManager:
         reward = compute_block_reward(coin.base_reward, coin.pow_difficulty)
         if coin.max_supply > 0:
             reward = min(reward, max(0.0, coin.max_supply - coin.total_minted))
+        # Compute current pending tx root for miners
+        pending_root, pending_hashes = self.get_pending_tx_root(coin_id)
         return {
             "coin_id": coin_id,
             "symbol": coin.symbol,
@@ -1168,7 +1430,38 @@ class PMCManager:
             "prev_hash": self._last_pow_hash.get(coin_id, ""),
             "mintable": coin.has_flag(PMCFlag.MINTABLE) and not coin.frozen,
             "algorithm": "double-SHA256",
+            "pending_tx_count": len(pending_hashes),
+            "pending_tx_root": pending_root,
+            "total_commitments": len(self._commitments.get(coin_id, [])),
         }
+
+    # ── Commitment query helpers ─────────────────────────────────
+
+    def get_commitment(self, commitment_id: str, coin_id: str) -> PMCCommitment | None:
+        """Look up a specific commitment by its ID."""
+        for c in self._commitments.get(coin_id, []):
+            if c.commitment_id == commitment_id:
+                return c
+        return None
+
+    def list_commitments(
+        self, coin_id: str, limit: int = 50, offset: int = 0,
+    ) -> list[PMCCommitment]:
+        """Return the commitment history for a coin (newest first)."""
+        chain = self._commitments.get(coin_id, [])
+        return list(reversed(chain))[offset : offset + limit]
+
+    def get_tx_commitment(self, tx_hash: str) -> str:
+        """Return the commitment_id that includes a given tx hash, or ''."""
+        return self._tx_commitment_index.get(tx_hash, "")
+
+    def is_tx_committed(self, tx_hash: str) -> bool:
+        """Check whether a transaction has been PoW-committed."""
+        return tx_hash in self._tx_commitment_index
+
+    def get_commitment_chain(self, coin_id: str) -> list[dict]:
+        """Return the full commitment chain for a coin as dicts."""
+        return [c.to_dict() for c in self._commitments.get(coin_id, [])]
 
     # ── Internal helpers ────────────────────────────────────────────
 
