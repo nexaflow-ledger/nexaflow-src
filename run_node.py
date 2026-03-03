@@ -267,7 +267,18 @@ class NexaFlowNode:
             data = wallet.export_encrypted(passphrase)
             data["_encrypted"] = True
         else:
-            data = wallet.to_dict()
+            # Unencrypted save — include private keys for reload.
+            # to_dict() intentionally excludes secrets, so build manually.
+            data = {
+                "address": wallet.address,
+                "public_key": wallet.public_key.hex(),
+                "private_key": wallet.private_key.hex(),
+                "view_public_key": wallet.view_public_key.hex() if wallet.view_public_key else None,
+                "view_private_key": wallet.view_private_key.hex() if wallet.view_private_key else None,
+                "spend_public_key": wallet.spend_public_key.hex() if wallet.spend_public_key else None,
+                "spend_private_key": wallet.spend_private_key.hex() if wallet.spend_private_key else None,
+                "key_type": wallet.key_type,
+            }
             logger.warning(
                 "Wallet saved UNENCRYPTED. Set NEXAFLOW_WALLET_PASSPHRASE "
                 "env var to encrypt private keys at rest."
