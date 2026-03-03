@@ -351,10 +351,16 @@ class AMMManager:
         return True, "Withdrawn (single, asset2)", 0.0, amount
 
     def swap(self, pool_id: str, account: str,
-             sell_asset1: bool, sell_amount: float) -> tuple[bool, str, float]:
+             sell_asset1: bool, sell_amount: float,
+             min_amount_out: float = 0.0) -> tuple[bool, str, float]:
         """
         Execute a swap through the AMM.
         Returns (success, message, amount_received).
+
+        Parameters
+        ----------
+        min_amount_out  Slippage protection: the swap fails if the
+                        received amount would be less than this value.
         """
         pool = self.pools.get(pool_id)
         if pool is None:
@@ -370,7 +376,8 @@ class AMMManager:
             if time.time() < pool.auction_slot.expiration:
                 discount = pool.auction_slot.discount_pct / 100.0
         effective_fee = fee_fraction * (1 - discount)
-        amount_after_fee = sell_amount * (1 - effective_fee)
+        fee_amount = sell_amount * effective_fee
+        amount_after_fee = sell_amount - fee_amount
 
         if sell_asset1:
             # Sell asset1 for asset2
@@ -378,15 +385,23 @@ class AMMManager:
             out = pool.balance2 - (pool.invariant / new_bal1)
             if out <= 0 or out > pool.balance2:
                 return False, "Insufficient liquidity", 0.0
-            pool.balance1 += sell_amount  # full amount goes to pool
+            if out < min_amount_out:
+                return False, f"Slippage: output {out:.8f} < minimum {min_amount_out:.8f}", 0.0
+            # Pool receives amount_after_fee (fee is collected separately)
+            pool.balance1 += amount_after_fee
             pool.balance2 -= out
+            # Collected fee stays in pool (distributed to LPs via k increase)
+            pool.balance1 += fee_amount
         else:
             new_bal2 = pool.balance2 + amount_after_fee
             out = pool.balance1 - (pool.invariant / new_bal2)
             if out <= 0 or out > pool.balance1:
                 return False, "Insufficient liquidity", 0.0
-            pool.balance2 += sell_amount
+            if out < min_amount_out:
+                return False, f"Slippage: output {out:.8f} < minimum {min_amount_out:.8f}", 0.0
+            pool.balance2 += amount_after_fee
             pool.balance1 -= out
+            pool.balance2 += fee_amount
 
         return True, "Swap executed", out
 

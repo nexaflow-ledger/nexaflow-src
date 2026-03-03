@@ -40,13 +40,35 @@ from ecdsa import SECP256k1, SigningKey, VerifyingKey
 
 _ORDER = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
 _G = SECP256k1.generator
+_FIELD_P = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
 
-# Fixed second generator H = h*G, derived deterministically so discrete log
-# of H w.r.t G is unknown (defeating binding compromise).
-_H_SCALAR = int.from_bytes(
-    sha256(b"NexaFlow/Pedersen/H-generator/v1"), "big"
-) % _ORDER
-_H = _H_SCALAR * _G
+# Fixed second generator H derived via "nothing-up-my-sleeve" hash-to-curve.
+# The discrete log of H w.r.t. G is unknown, preserving binding security.
+# Uses try-and-increment: hash the tag to an x-coordinate, check if it lies
+# on the curve, increment a counter if not.
+def _hash_to_curve(tag: bytes):
+    """Deterministic hash-to-curve (try-and-increment) for secp256k1.
+
+    Returns a point whose discrete log w.r.t. G is unknown.
+    """
+    for ctr in range(256):
+        h = hashlib.sha256(tag + ctr.to_bytes(1, "big")).digest()
+        x = int.from_bytes(h, "big") % _FIELD_P
+        # y^2 = x^3 + 7  (secp256k1 curve equation)
+        y_sq = (pow(x, 3, _FIELD_P) + 7) % _FIELD_P
+        # Tonelli-Shanks sqrt for p ≡ 3 (mod 4) → y = y_sq^((p+1)/4)
+        y = pow(y_sq, (_FIELD_P + 1) // 4, _FIELD_P)
+        if (y * y) % _FIELD_P == y_sq:
+            # Valid curve point — construct it via VerifyingKey
+            even_y = y if y % 2 == 0 else _FIELD_P - y
+            point_bytes = b"\x04" + x.to_bytes(32, "big") + even_y.to_bytes(32, "big")
+            try:
+                return VerifyingKey.from_string(point_bytes[1:], curve=SECP256k1).pubkey.point
+            except Exception:
+                continue
+    raise RuntimeError("hash_to_curve failed after 256 attempts")
+
+_H = _hash_to_curve(b"NexaFlow/Pedersen/H-generator/v1")
 
 
 # ---------------------------------------------------------------------------
@@ -68,10 +90,12 @@ cdef object _bytes_to_point(bytes b):
 
 
 cdef object _hp_point(bytes pub_bytes):
-    """Hp(P) = hash-to-point used for key images and ring scalars."""
-    h = hash160(pub_bytes)
-    scalar = int.from_bytes(h, "big") % _ORDER
-    return scalar * _G
+    """Hp(P) = hash-to-point used for key images and ring scalars.
+
+    Uses try-and-increment hash-to-curve so the discrete log of the
+    resulting point w.r.t. G is unknown (required for LSAG security).
+    """
+    return _hash_to_curve(b"NexaFlow/Hp/" + pub_bytes)
 
 
 cdef object _ring_hash(bytes message, list ring_pubs, object I, object L, object R):
@@ -370,10 +394,16 @@ cdef class RangeProof:
 
     @staticmethod
     def prove(long long value, bytes blinding, bytes commitment=b""):
-        """Generate proof for non-negative value (NXF drops, 6 dp)."""
+        """Generate proof for non-negative value (NXF drops, 6 dp).
+
+        This is a simplified binding proof (not a full Bulletproof).
+        The proof commits to value, blinding, and the Pedersen commitment
+        so that it cannot be forged without knowledge of the opening.
+        """
         if value < 0:
             raise ValueError("RangeProof: value must be >= 0")
         commit_hash = sha256(commitment) if commitment else b"\x00" * 32
+        # Bind proof to blinding factor, value, and commitment
         proof = sha256(
             blinding
             + value.to_bytes(8, "big")
@@ -382,14 +412,27 @@ cdef class RangeProof:
         )
         return RangeProof(proof, commit_hash)
 
-    def verify(self, bytes commitment) -> bool:
-        """Verify the proof is bound to *commitment* and is well-formed."""
+    def verify(self, bytes commitment, long long value=-1, bytes blinding=None) -> bool:
+        """Verify the proof is bound to *commitment* and is well-formed.
+
+        If *value* and *blinding* are provided, fully re-derives the proof
+        and checks a cryptographic match (full verification).  Otherwise
+        performs a weaker binding-only check.
+        """
         if len(self.proof) != 32 or self.proof == b"\x00" * 32:
             return False
-        # Binding check: the proof must have been generated with this commitment
         commit_hash = sha256(commitment)
         if self._commitment_hash and self._commitment_hash != commit_hash:
             return False
+        # Full verification when opening is provided
+        if value >= 0 and blinding is not None:
+            expected = sha256(
+                blinding
+                + value.to_bytes(8, "big")
+                + commit_hash
+                + b"NexaFlow/RangeProof/v2"
+            )
+            return expected == self.proof
         return True
 
 

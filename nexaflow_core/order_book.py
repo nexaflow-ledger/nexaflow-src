@@ -218,18 +218,25 @@ class OrderBook:
         if nxf_received <= 0:
             return all_fills
 
-        # Leg 2: buy dst_currency with NXF
-        pair2 = f"{dst_currency}/NXF"
+        # Leg 2: sell NXF for dst_currency
+        pair2 = f"NXF/{dst_currency}"
         id2 = f"{order_id or 'AB'}-leg2"
-        fills2 = self.submit_order(account, pair2, "buy", 0.0, nxf_received, id2)
+        fills2 = self.submit_order(account, pair2, "sell", 0.0, nxf_received, id2)
         all_fills.extend(fills2)
 
         return all_fills
 
-    def cancel_order(self, order_id: str) -> bool:
-        """Cancel a resting order.  Returns True if found and cancelled."""
+    def cancel_order(self, order_id: str, account: str = "") -> bool:
+        """Cancel a resting order.  Returns True if found and cancelled.
+
+        If *account* is provided, only the order owner may cancel.
+        """
         order = self._orders.get(order_id)
         if order is None or order.status in ("filled", "cancelled"):
+            return False
+
+        # Ownership check
+        if account and order.account != account:
             return False
 
         order.status = "cancelled"
@@ -278,6 +285,12 @@ class OrderBook:
 
             # Skip expired orders
             if best.is_expired:
+                best.status = "cancelled"
+                book.pop(0)
+                continue
+
+            # Self-trade prevention: cancel the resting order
+            if best.account and best.account == taker.account:
                 best.status = "cancelled"
                 book.pop(0)
                 continue

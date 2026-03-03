@@ -224,8 +224,10 @@ class PaymentChannelManager:
         ch = self.channels.get(channel_id)
         if ch is None:
             raise KeyError(f"Channel {channel_id} not found")
-        # Verify claim signature if channel has a public key
-        if ch.public_key and signature:
+        # Verify claim signature — MANDATORY when channel has a public key
+        if ch.public_key:
+            if not signature:
+                return ch, 0.0, "Claim signature required"
             if not verify_claim_signature(
                 channel_id, new_balance, signature, public_key or ch.public_key
             ):

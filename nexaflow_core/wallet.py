@@ -228,8 +228,9 @@ class Ed25519Signer:
     """
     Ed25519 signing for NexaFlow.
 
-    Uses the nacl/pynacl library if available, otherwise falls back
-    to a pure-python implementation via hashlib.
+    Requires the nacl (pynacl) library.  The previous fallback that used
+    HMAC-SHA512 was cryptographically broken (no real Ed25519 curve math)
+    and has been removed.  Install pynacl: ``pip install pynacl``.
     """
 
     @staticmethod
@@ -240,25 +241,10 @@ class Ed25519Signer:
             sk = NaCLSigningKey.generate()
             return bytes(sk), bytes(sk.verify_key)
         except ImportError:
-            # Fallback: derive from random seed using SHA-512
-            seed = os.urandom(32)
-            return Ed25519Signer._derive_from_seed(seed)
-
-    @staticmethod
-    def _derive_from_seed(seed: bytes) -> tuple[bytes, bytes]:
-        """Derive Ed25519 keypair from 32-byte seed (without nacl)."""
-        # SHA-512 based derivation as per Ed25519 spec
-        h = hashlib.sha512(seed).digest()
-        # Clamp
-        private = bytearray(h[:32])
-        private[0] &= 248
-        private[31] &= 127
-        private[31] |= 64
-        # For public key we need the actual Ed25519 computation;
-        # with nacl unavailable we return the seed as private and
-        # a hash-derived placeholder as public
-        pub = hashlib.sha256(bytes(private)).digest()
-        return seed, pub
+            raise ImportError(
+                "Ed25519 requires the 'pynacl' package. "
+                "Install it with: pip install pynacl"
+            )
 
     @staticmethod
     def sign(private_key: bytes, message: bytes) -> bytes:
@@ -268,15 +254,10 @@ class Ed25519Signer:
             sk = NaCLSigningKey(private_key)
             return bytes(sk.sign(message).signature)
         except ImportError:
-            # HMAC-SHA512 fallback (NOT real Ed25519, but allows testing)
-            # Derive the same key used as public_key for verify consistency
-            h = hashlib.sha512(private_key).digest()
-            clamped = bytearray(h[:32])
-            clamped[0] &= 248
-            clamped[31] &= 127
-            clamped[31] |= 64
-            derived = hashlib.sha256(bytes(clamped)).digest()
-            return hmac.new(derived, message, hashlib.sha512).digest()[:64]
+            raise ImportError(
+                "Ed25519 requires the 'pynacl' package. "
+                "Install it with: pip install pynacl"
+            )
 
     @staticmethod
     def verify(public_key: bytes, message: bytes, signature: bytes) -> bool:
@@ -287,9 +268,10 @@ class Ed25519Signer:
             vk.verify(message, signature)
             return True
         except ImportError:
-            # HMAC fallback verification
-            expected = hmac.new(public_key, message, hashlib.sha512).digest()[:64]
-            return hmac.compare_digest(expected, signature)
+            raise ImportError(
+                "Ed25519 requires the 'pynacl' package. "
+                "Install it with: pip install pynacl"
+            )
         except Exception:
             return False
 
@@ -552,14 +534,17 @@ class Wallet:
     # ---- serialisation ----
 
     def to_dict(self) -> dict:
+        """Return public wallet information only.
+
+        Private keys are NEVER included.  Use :meth:`export_encrypted`
+        to create a passphrase-protected backup that includes keys.
+        """
         return {
             "address": self.address,
             "public_key": self.public_key.hex(),
-            "private_key": self.private_key.hex(),
             "view_public_key": self.view_public_key.hex() if self.view_public_key else None,
-            "view_private_key": self.view_private_key.hex() if self.view_private_key else None,
             "spend_public_key": self.spend_public_key.hex() if self.spend_public_key else None,
-            "spend_private_key": self.spend_private_key.hex() if self.spend_private_key else None,
+            "key_type": self.key_type,
         }
 
     def export_encrypted(self, passphrase: str) -> dict:
@@ -636,6 +621,14 @@ class Wallet:
                 )
         elif version >= 2:
             # v2 — legacy BLAKE2b-CTR (no authentication)
+            import warnings
+            warnings.warn(
+                "Importing wallet from deprecated v2 format (unauthenticated "
+                "BLAKE2b-CTR). Re-export with export_encrypted() to upgrade "
+                "to v3 AES-256-GCM.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
             iv = bytes.fromhex(data["iv"])
             iterations = data.get("kdf_iterations", 100_000)
             key = hashlib.pbkdf2_hmac("sha256", passphrase.encode("utf-8"), salt, iterations)
@@ -650,6 +643,14 @@ class Wallet:
                 spend_priv = cls._legacy_ctr_encrypt(key, iv, enc_spend_priv)
         else:
             # Legacy v1 XOR fallback
+            import warnings
+            warnings.warn(
+                "Importing wallet from deprecated v1 format (XOR encryption — "
+                "not secure). Re-export with export_encrypted() to upgrade "
+                "to v3 AES-256-GCM.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
             key = sha256(passphrase.encode("utf-8"))
             priv = bytes(a ^ b for a, b in zip(enc_priv, key))
             view_priv = None

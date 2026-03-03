@@ -366,6 +366,8 @@ def _verify_header_chain(headers: list[dict], local_last_hash: str) -> bool:
 
     Each header's parent_hash must equal the previous header's hash.
     The first received header's parent_hash must match our local tip.
+    For new nodes (empty local_last_hash) the first header must have
+    sequence 1 and parent_hash of all zeros (genesis anchor).
     Returns True if the chain is valid (or empty).
     """
     if not headers:
@@ -373,8 +375,23 @@ def _verify_header_chain(headers: list[dict], local_last_hash: str) -> bool:
     # Sort by sequence just in case
     headers_sorted = sorted(headers, key=lambda h: h["sequence"])
     prev_hash = local_last_hash
-    for hdr in headers_sorted:
-        if prev_hash and hdr["parent_hash"] != prev_hash:
+    for i, hdr in enumerate(headers_sorted):
+        if i == 0 and not prev_hash:
+            # New node: first header must be genesis (sequence 1)
+            if hdr["sequence"] != 1:
+                logger.warning(
+                    f"New node expected genesis (seq 1), got seq {hdr['sequence']}"
+                )
+                return False
+            # Genesis parent hash must be all zeros
+            expected_genesis_parent = "0" * 64
+            if hdr.get("parent_hash", "") != expected_genesis_parent:
+                logger.warning(
+                    f"Genesis header has non-zero parent_hash: "
+                    f"{hdr.get('parent_hash', '')[:16]}..."
+                )
+                return False
+        elif prev_hash and hdr["parent_hash"] != prev_hash:
             logger.warning(
                 f"Header chain break at seq {hdr['sequence']}: "
                 f"expected parent {prev_hash[:16]}... "
@@ -918,8 +935,24 @@ class LedgerSyncManager:
                 logger.warning(f"Sync data timeout from {best.peer_id}")
                 return
 
-            # Phase 4: Apply the received snapshot
+            # Phase 4: Apply the received snapshot with multi-peer
+            # verification for full snapshots (gap > DELTA_THRESHOLD).
             if self._received_snapshot:
+                # For full snapshots, verify state hash against at least
+                # one additional peer before committing.
+                if gap > DELTA_THRESHOLD and len(self._peer_statuses) >= 2:
+                    snap_hash = self._received_snapshot.get("state_hash", "")
+                    if snap_hash:
+                        corroborating = sum(
+                            1 for pid, ps in self._peer_statuses.items()
+                            if pid != best.peer_id and ps.last_hash == snap_hash
+                        )
+                        if corroborating == 0:
+                            logger.warning(
+                                f"No peers corroborate snapshot state hash "
+                                f"{snap_hash[:16]}... — rejecting"
+                            )
+                            return
                 ok = apply_snapshot(self.ledger, self._received_snapshot)
                 if ok:
                     self._last_sync_time = time.time()
@@ -1023,7 +1056,16 @@ class LedgerSyncManager:
     def handle_ledger_response(self, payload: dict, from_peer: str) -> None:
         """
         Backward-compatible handler for LEDGER_RES — apply as snapshot.
+
+        Only processes the response when a sync cycle is in progress
+        to prevent unsolicited full-state replacements.
         """
+        if not self._sync_in_progress:
+            logger.warning(
+                f"Ignoring unsolicited LEDGER_RES from {from_peer} "
+                "(no sync in progress)"
+            )
+            return
         apply_snapshot(self.ledger, payload)
 
     # ── Status ───────────────────────────────────────────────────────

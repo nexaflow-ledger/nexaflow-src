@@ -97,7 +97,24 @@ class ManifestCache:
         """
         Apply a manifest.  Returns (accepted, reason).
         Rejects if sequence is lower than the current manifest.
+        Verifies master and ephemeral signatures before accepting.
         """
+        # Verify master signature is present and valid
+        if not manifest.master_signature:
+            return False, "Missing master signature"
+        blob = manifest.signing_blob()
+        if not self._verify_manifest_signature(
+            blob, manifest.master_signature, manifest.master_public_key
+        ):
+            return False, "Invalid master signature"
+
+        # Verify ephemeral signature if present
+        if manifest.ephemeral_signature:
+            if not self._verify_manifest_signature(
+                blob, manifest.ephemeral_signature, manifest.ephemeral_public_key
+            ):
+                return False, "Invalid ephemeral signature"
+
         key = manifest.master_public_key
         existing = self._manifests.get(key)
         if existing is not None:
@@ -108,6 +125,38 @@ class ManifestCache:
         self._manifests[key] = manifest
         self._history.setdefault(key, []).append(manifest)
         return True, "OK"
+
+    @staticmethod
+    def _verify_manifest_signature(blob: bytes, sig_hex: str, pubkey_hex: str) -> bool:
+        """Verify a hex-encoded signature against a hex-encoded public key."""
+        try:
+            sig_bytes = bytes.fromhex(sig_hex)
+            pub_bytes = bytes.fromhex(pubkey_hex)
+        except (ValueError, TypeError):
+            return False
+        # Ed25519 (32-byte pubkey, 64-byte sig)
+        if len(pub_bytes) == 32 and len(sig_bytes) == 64:
+            try:
+                from nacl.signing import VerifyKey
+                vk = VerifyKey(pub_bytes)
+                vk.verify(blob, sig_bytes)
+                return True
+            except Exception:
+                return False
+        # secp256k1 / ECDSA (33 or 65-byte pubkey)
+        if len(pub_bytes) in (33, 65):
+            try:
+                from ecdsa import VerifyingKey, SECP256k1
+                msg_hash = hashlib.sha256(blob).digest()
+                vk = VerifyingKey.from_string(
+                    pub_bytes if len(pub_bytes) == 64 else pub_bytes[1:] if len(pub_bytes) == 65 else pub_bytes,
+                    curve=SECP256k1,
+                )
+                vk.verify_digest(sig_bytes, msg_hash)
+                return True
+            except Exception:
+                return False
+        return False
 
     def get(self, master_key: str) -> ValidatorManifest | None:
         return self._manifests.get(master_key)
@@ -250,9 +299,23 @@ class UNLSubscriber:
         self._recompute_trusted()
 
     def apply_list(self, vl: ValidatorList) -> tuple[bool, str]:
-        """Apply a validator list from a trusted publisher."""
+        """Apply a validator list from a trusted publisher.
+
+        Verifies the publisher's signature before accepting the list.
+        """
         if vl.publisher_key not in self._publisher_keys:
             return False, "Unknown publisher"
+        # Verify publisher signature
+        if not vl.signature:
+            return False, "Missing publisher signature"
+        blob = vl.signing_blob()
+        expected_hash = hashlib.sha256(blob).hexdigest()
+        if vl.blob_hash and vl.blob_hash != expected_hash:
+            return False, "Blob hash mismatch"
+        if not ManifestCache._verify_manifest_signature(
+            blob, vl.signature, vl.publisher_key
+        ):
+            return False, "Invalid publisher signature"
         existing = self._lists.get(vl.publisher_key)
         if existing is not None and vl.sequence <= existing.sequence:
             return False, "Sequence too low"

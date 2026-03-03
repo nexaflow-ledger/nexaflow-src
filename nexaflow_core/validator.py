@@ -115,8 +115,10 @@ class TransactionValidator:
         Full validation pipeline.
         Returns (is_valid, result_code, human_message).
         """
-        # 1. Signature
-        if tx.signature and tx.signing_pub_key and not tx.verify_signature():
+        # 1. Signature — MANDATORY for all transactions
+        if not tx.signature or not tx.signing_pub_key:
+            return False, TEC_BAD_SIG, "Transaction must be signed (missing signature or public key)"
+        if not tx.verify_signature():
             return False, TEC_BAD_SIG, "Invalid signature"
 
         # 1.5. Privacy checks for confidential transactions

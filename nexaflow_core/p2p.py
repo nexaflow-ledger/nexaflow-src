@@ -46,6 +46,8 @@ logger = logging.getLogger("nexaflow_p2p")
 MAX_PEERS = 128          # maximum simultaneous peer connections
 MAX_MSG_BYTES = 65_536   # 64 KiB per message line
 MSG_PER_PEER_PER_SEC = 50  # per-peer relay rate limit
+MAX_KNOWN_ADDRS = 10_000   # cap on gossip address storage
+MAX_SNAPSHOT_BYTES = 100 * 1024 * 1024  # 100 MiB snapshot size limit
 
 
 # =====================================================================
@@ -306,6 +308,11 @@ class P2PNode:
         addr = self._server.sockets[0].getsockname()
         tls_tag = " [TLS]" if self._ssl_context else ""
         logger.info(f"[{self.node_id}] Listening on {addr[0]}:{addr[1]}{tls_tag}")
+        if not self._ssl_context:
+            logger.warning(
+                f"[{self.node_id}] TLS is NOT enabled — all P2P traffic is "
+                "unencrypted. Set ssl_context for production deployments."
+            )
         # Start keepalive loop
         self._tasks.append(asyncio.create_task(self._keepalive_loop()))
 
@@ -485,6 +492,10 @@ class P2PNode:
         elif msg_type == "TX":
             tx_id = payload.get("tx_id", "")
             if tx_id and tx_id not in self._seen_set:
+                # Basic structural validation before relaying
+                if not self._validate_tx_payload(payload):
+                    logger.debug(f"[{self.node_id}] Dropping invalid TX from {peer.peer_id}")
+                    return
                 self._mark_seen(tx_id)
                 if self.on_transaction:
                     self.on_transaction(payload, peer.peer_id)
@@ -494,12 +505,24 @@ class P2PNode:
         elif msg_type == "PROPOSAL":
             prop_id = payload.get("validator_id", "") + str(payload.get("ledger_seq", ""))
             if prop_id not in self._seen_set:
+                # Validate proposal has required fields
+                if not payload.get("validator_id") or not payload.get("signature"):
+                    logger.debug(f"[{self.node_id}] Dropping unsigned PROPOSAL from {peer.peer_id}")
+                    return
                 self._mark_seen(prop_id)
                 if self.on_proposal:
                     self.on_proposal(payload, peer.peer_id)
                 await self._relay(peer.peer_id, "PROPOSAL", payload)
 
         elif msg_type == "CONSENSUS_OK":
+            # Validate consensus result has required fields and comes from
+            # a peer whose public key we know (prevents forgery)
+            if not payload.get("tx_set") and not payload.get("ledger_seq"):
+                logger.warning(f"[{self.node_id}] Dropping malformed CONSENSUS_OK from {peer.peer_id}")
+                return
+            if peer.peer_id not in self.peer_pubkeys:
+                logger.warning(f"[{self.node_id}] Dropping CONSENSUS_OK from unauthenticated peer {peer.peer_id}")
+                return
             if self.on_consensus_result:
                 self.on_consensus_result(payload, peer.peer_id)
 
@@ -511,6 +534,11 @@ class P2PNode:
                     continue
                 if not _is_valid_peer_addr(addr):
                     continue
+                # Enforce bounded gossip storage
+                if len(self._known_addrs) >= MAX_KNOWN_ADDRS:
+                    # Evict oldest entry
+                    oldest = min(self._known_addrs, key=self._known_addrs.get)
+                    del self._known_addrs[oldest]
                 self._known_addrs[addr] = time.time()
 
         elif msg_type == "LEDGER_REQ":
@@ -595,6 +623,9 @@ class P2PNode:
 
     def register_address(self, addr: str) -> None:
         """Register a known peer address for gossip discovery."""
+        if len(self._known_addrs) >= MAX_KNOWN_ADDRS and addr not in self._known_addrs:
+            oldest = min(self._known_addrs, key=self._known_addrs.get)
+            del self._known_addrs[oldest]
         self._known_addrs[addr] = time.time()
 
     async def _relay(self, origin_peer: str, msg_type: str, payload: dict):
@@ -639,6 +670,22 @@ class P2PNode:
                             pass
 
     # ---- helpers ----
+
+    @staticmethod
+    def _validate_tx_payload(payload: dict) -> bool:
+        """Basic structural validation of a TX payload before relay.
+
+        Ensures the transaction has the minimum required fields
+        (tx_id, signature, signing_pub_key) so that obviously invalid
+        or unsigned transactions are not propagated across the network.
+        """
+        if not payload.get("tx_id"):
+            return False
+        if not payload.get("signature"):
+            return False
+        if not payload.get("signing_pub_key"):
+            return False
+        return True
 
     def _mark_seen(self, msg_id: str):
         if msg_id in self._seen_set:

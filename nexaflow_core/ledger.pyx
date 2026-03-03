@@ -443,8 +443,11 @@ cdef class Ledger:
             self.create_account(dst)
         cdef AccountEntry dst_acc = self.accounts[dst]
 
-        # Check sequence
-        if tx.sequence != 0 and tx.sequence != src_acc.sequence:
+        # Check sequence (sequence=0 only allowed with a ticket)
+        if tx.sequence == 0:
+            if not getattr(tx, 'ticket_sequence', 0):
+                return 105  # tecBAD_SEQ
+        elif tx.sequence != src_acc.sequence:
             return 105  # tecBAD_SEQ
 
         # ── RequireDest enforcement (Tier 1) ──
@@ -784,7 +787,9 @@ cdef class Ledger:
         from nexaflow_core.privacy import RangeProof, verify_ring_signature
 
         # ── 1. Double-spend check (per tx_id) ────────────────────────────────
-        if tx.tx_id and tx.tx_id in self.applied_tx_ids:
+        if not tx.tx_id:
+            return 107  # reject empty tx_id — prevents replay
+        if tx.tx_id in self.applied_tx_ids:
             return 107  # tecKEY_IMAGE_SPENT — duplicate transaction
 
         # ── 2. Range proof: value committed is non-negative ───────────────
@@ -833,8 +838,7 @@ cdef class Ledger:
 
         # ── 6. Mark key image as spent and record applied tx_id ─────────────
         self.spent_key_images.add(tx.key_image)
-        if tx.tx_id:
-            self.applied_tx_ids.add(tx.tx_id)
+        self.applied_tx_ids.add(tx.tx_id)
         return 0  # tesSUCCESS
 
     cpdef int apply_trust_set(self, object tx):
@@ -846,13 +850,16 @@ cdef class Ledger:
         cdef double fee_val = tx.fee.value
         if src_acc.balance < fee_val:
             return 104
+
+        # Check sequence BEFORE deducting fee to avoid burning fees on
+        # invalid-sequence transactions.
+        if tx.sequence != 0 and tx.sequence != src_acc.sequence:
+            return 105
+
         src_acc.balance -= fee_val
         # Burn the fee — permanently remove from circulation
         self.total_supply -= fee_val
         self.total_burned += fee_val
-
-        if tx.sequence != 0 and tx.sequence != src_acc.sequence:
-            return 105
 
         cdef object la = tx.limit_amount
         self.set_trust_line(src, la.currency, la.issuer, la.value)
@@ -892,7 +899,10 @@ cdef class Ledger:
         cdef int tt = tx.tx_type
         cdef int result
         # Duplicate-TX detection (all types)
-        if tx.tx_id and tx.tx_id in self.applied_tx_ids:
+        if not tx.tx_id:
+            tx.result_code = 109  # reject empty tx_id — prevents replay
+            return 109
+        if tx.tx_id in self.applied_tx_ids:
             tx.result_code = 109  # tecSTAKE_DUPLICATE (reuse for general dup)
             return 109
 
@@ -942,6 +952,14 @@ cdef class Ledger:
         _snapshot_supply = self.total_supply
         _snapshot_burned = self.total_burned
         _snapshot_minted = self.total_minted
+        # Snapshot trust lines for complete rollback
+        _snapshot_trust_lines = {}
+        for _tl_key, _tl in self.trust_lines.items():
+            _snapshot_trust_lines[_tl_key] = (
+                _tl.balance, _tl.limit, _tl.frozen, _tl.authorized,
+            )
+        # Snapshot open offers count per account
+        _snapshot_offers = dict(self.open_offers) if hasattr(self, 'open_offers') else {}
 
         # ── MetadataBuilder ──
         meta = MetadataBuilder(tx_hash=tx.tx_id or "", tx_index=len(self.pending_txns))
@@ -1089,6 +1107,17 @@ cdef class Ledger:
                         _racc.balance = _bal
                         _racc.sequence = _seq
                         _racc.owner_count = _oc
+                # Restore trust lines
+                for _tl_key, (_tl_bal, _tl_lim, _tl_frz, _tl_auth) in _snapshot_trust_lines.items():
+                    _rtl = self.trust_lines.get(_tl_key)
+                    if _rtl is not None:
+                        _rtl.balance = _tl_bal
+                        _rtl.limit = _tl_lim
+                        _rtl.frozen = _tl_frz
+                        _rtl.authorized = _tl_auth
+                # Restore open offers
+                if hasattr(self, 'open_offers') and _snapshot_offers is not None:
+                    self.open_offers = _snapshot_offers
                 result = 128  # tecINVARIANT_FAILED
 
         # ── Build and store metadata ──
@@ -1110,8 +1139,7 @@ cdef class Ledger:
         tx.result_code = result
         if result == 0:
             self.pending_txns.append(tx)
-            if tx.tx_id:
-                self.applied_tx_ids.add(tx.tx_id)
+            self.applied_tx_ids.add(tx.tx_id)
         return result
 
     # ---- ledger closing ----
@@ -1226,13 +1254,15 @@ cdef class Ledger:
         cdef double fee_val = tx.fee.value
         if src_acc.balance < fee_val:
             return 104  # tecINSUF_FEE
+
+        # Check sequence BEFORE deducting fee
+        if tx.sequence != 0 and tx.sequence != src_acc.sequence:
+            return 105  # tecBAD_SEQ
+
         src_acc.balance -= fee_val
         # Burn the fee
         self.total_supply -= fee_val
         self.total_burned += fee_val
-
-        if tx.sequence != 0 and tx.sequence != src_acc.sequence:
-            return 105  # tecBAD_SEQ
 
         # ── Offer execution flags (Tier 1) ──────────────────────────────
         cdef str time_in_force = "GTC"  # default: Good-Til-Cancelled
@@ -1532,7 +1562,11 @@ cdef class Ledger:
     # ---- fee helper (reused by all handlers) ----
 
     cdef int _debit_fee(self, object acc, double fee_val):
-        """Debit fee from account, burn it. Returns 0 on success, 104 on fail."""
+        """Debit fee from account, burn it. Returns 0 on success, 104 on fail.
+
+        NOTE: Callers should call :meth:`_check_seq` BEFORE this method
+        so that invalid-sequence transactions do not lose their fee.
+        """
         if acc.balance < fee_val:
             return 104  # tecINSUF_FEE
         acc.balance -= fee_val
@@ -1541,10 +1575,28 @@ cdef class Ledger:
         return 0
 
     cdef int _check_seq(self, object tx, object acc):
-        """Verify sequence number. Returns 0 on match, 105 on mismatch."""
-        if tx.sequence != 0 and tx.sequence != acc.sequence:
+        """Verify sequence number. Returns 0 on match, 105 on mismatch.
+
+        sequence=0 is only accepted when a ticket_sequence is set on the tx.
+        """
+        if tx.sequence == 0:
+            # Only allow sequence=0 if a ticket was used (already validated)
+            if not getattr(tx, 'ticket_sequence', 0):
+                return 105  # tecBAD_SEQ — sequence=0 without ticket
+            return 0
+        if tx.sequence != acc.sequence:
             return 105  # tecBAD_SEQ
         return 0
+
+    cdef int _check_seq_and_debit_fee(self, object tx, object acc, double fee_val):
+        """Combined: check sequence first, then debit fee.
+
+        Avoids burning fees on invalid-sequence transactions.
+        """
+        cdef int rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        return self._debit_fee(acc, fee_val)
 
     # ── Owner reserve enforcement (Tier 3) ──────────────────────────
 
@@ -2309,11 +2361,18 @@ cdef class Ledger:
         amt1 = tx.flags.get("amount1", 0.0)
         amt2 = tx.flags.get("amount2", 0.0)
         tfee = tx.flags.get("trading_fee", 0)
-        # Debit amounts from account (for native NXF side)
+        # Debit amounts from account (for native NXF sides)
         if a1c == "NXF" and acc.balance < amt1:
             return 101
         if a1c == "NXF":
             acc.balance -= amt1
+        if a2c == "NXF":
+            if acc.balance < amt2:
+                # Restore amt1 if already deducted
+                if a1c == "NXF":
+                    acc.balance += amt1
+                return 101
+            acc.balance -= amt2
         ok, msg, pool = self.amm_manager.create_pool(
             src, a1c, a1i, a2c, a2i, amt1, amt2, tfee,
         )
@@ -2791,6 +2850,17 @@ cdef class Ledger:
         bridge_id = tx.flags.get("bridge_id", "")
         claim_id = tx.flags.get("claim_id", 0)
         dest = tx.destination
+
+        # Verify attestation quorum before allowing mint
+        bridge = self.xchain_manager.bridges.get(bridge_id)
+        if not bridge:
+            return 123
+        attestations = bridge.get("attestations", {}).get(claim_id, [])
+        min_quorum = bridge.get("min_attestations", 1)
+        valid_attestations = [a for a in attestations if a.get("signature")]
+        if len(valid_attestations) < min_quorum:
+            return 123  # insufficient attestation quorum
+
         ok, msg, amount = self.xchain_manager.claim(bridge_id, claim_id, dest)
         if not ok:
             return 123

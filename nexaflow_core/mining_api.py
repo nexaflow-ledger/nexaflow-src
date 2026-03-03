@@ -89,6 +89,7 @@ SHARE_TARGET_MULTIPLIER = 1    # share diff relative to network diff
 JOB_REFRESH_INTERVAL = 30.0    # seconds between new job notifications
 MAX_WORKERS_PER_IP = 256       # anti-DoS: max concurrent connections per IP
 MAX_MESSAGE_SIZE = 8192        # bytes
+MAX_JOBS = 10_000              # cap on retained jobs to prevent memory leak
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -213,6 +214,7 @@ class MiningCoordinator:
         self.sessions: dict[str, MinerSession] = {}   # session_id → session
         self.jobs: dict[str, MiningJob] = {}           # job_id → job
         self.active_coins: set[str] = set()            # coins accepting miners
+        self.authorized_wallets: set[str] | None = None  # None = open, set = allowlist
         self.stats = PoolStats()
         self._extranonce_counter = 0
         self._job_counter = 0
@@ -283,6 +285,13 @@ class MiningCoordinator:
             tx_root=info.get("pending_tx_root", "0" * 64),
         )
         self.jobs[job_id] = job
+        # Evict oldest jobs when cache exceeds MAX_JOBS
+        if len(self.jobs) > MAX_JOBS:
+            oldest_keys = sorted(self.jobs, key=lambda k: self.jobs[k].created_at)[
+                : len(self.jobs) - MAX_JOBS
+            ]
+            for k in oldest_keys:
+                del self.jobs[k]
         return job
 
     # ── Share validation ──
@@ -623,6 +632,14 @@ class StratumServer:
         # Basic validation: NexaFlow addresses start with 'r'
         if not wallet_addr.startswith("r") or len(wallet_addr) < 10:
             await self._send_error(writer, msg_id, -1, "Invalid wallet address")
+            return
+
+        # Allowlist check: if coordinator has an allowlist, enforce it
+        if (
+            self.coordinator.authorized_wallets is not None
+            and wallet_addr not in self.coordinator.authorized_wallets
+        ):
+            await self._send_error(writer, msg_id, -1, "Wallet not authorized")
             return
 
         session.authorized = True

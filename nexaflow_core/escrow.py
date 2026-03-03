@@ -55,6 +55,9 @@ class EscrowEntry:
             return False, "Escrow already resolved"
         if now is None:
             now = time.time()
+        # Only the creator can cancel
+        if account != self.account:
+            return False, "Only the escrow creator can cancel"
         # Only the creator can cancel, and only after cancel_after
         if self.cancel_after <= 0:
             return False, "Escrow has no cancel_after — cannot be cancelled"

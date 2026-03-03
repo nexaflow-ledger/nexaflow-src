@@ -185,13 +185,32 @@ class XChainManager:
 
     def add_attestation(self, bridge_id: str, claim_id: int,
                         witness: str, signature: str = "") -> tuple[bool, str]:
-        """Add a witness attestation for a commit."""
+        """Add a witness attestation for a commit.
+
+        Requires a non-empty signature for cryptographic proof.
+        """
         claims = self._claim_ids.get(bridge_id, {})
         cid = claims.get(claim_id)
         if cid is None:
             return False, "Claim ID not found"
         if not cid.committed:
             return False, "Not yet committed"
+
+        # Require a valid signature
+        if not signature:
+            return False, "Attestation signature required"
+
+        # Verify the witness signature over the claim data
+        import struct
+        claim_blob = (
+            bridge_id.encode("utf-8")
+            + struct.pack(">i", claim_id)
+            + struct.pack(">d", cid.amount)
+            + witness.encode("utf-8")
+        )
+        claim_hash = hashlib.sha256(claim_blob).digest()
+        if not self._verify_attestation_sig(claim_hash, signature, witness):
+            return False, "Invalid attestation signature"
 
         # Check duplicate
         for att in cid.attestations:
@@ -272,3 +291,39 @@ class XChainManager:
 
     def get_all_bridges(self) -> list[dict]:
         return [b.to_dict() for b in self.bridges.values()]
+
+    @staticmethod
+    def _verify_attestation_sig(msg_hash: bytes, sig_hex: str, witness: str) -> bool:
+        """Verify attestation signature (Ed25519 or secp256k1).
+
+        The *witness* field is the hex-encoded public key of the attesting
+        witness node.  The signature is verified against msg_hash.
+        """
+        try:
+            sig_bytes = bytes.fromhex(sig_hex)
+            pub_bytes = bytes.fromhex(witness)
+        except (ValueError, TypeError):
+            return False
+
+        # Ed25519 (32-byte pubkey, 64-byte sig)
+        if len(pub_bytes) == 32 and len(sig_bytes) == 64:
+            try:
+                from nacl.signing import VerifyKey
+                vk = VerifyKey(pub_bytes)
+                vk.verify(msg_hash, sig_bytes)
+                return True
+            except Exception:
+                return False
+
+        # secp256k1 / ECDSA (33 or 65-byte pubkey)
+        if len(pub_bytes) in (33, 65):
+            try:
+                from ecdsa import VerifyingKey, SECP256k1
+                key_bytes = pub_bytes[1:] if len(pub_bytes) == 65 else pub_bytes
+                vk = VerifyingKey.from_string(key_bytes, curve=SECP256k1)
+                vk.verify_digest(sig_bytes, msg_hash)
+                return True
+            except Exception:
+                return False
+
+        return False

@@ -27,6 +27,7 @@ class LedgerSnapshot:
     account_balances: dict[str, float] = field(default_factory=dict)
     account_sequences: dict[str, int] = field(default_factory=dict)
     account_owner_counts: dict[str, int] = field(default_factory=dict)
+    trust_line_balances: dict[tuple, float] = field(default_factory=dict)
     escrow_total: float = 0.0
     channel_total: float = 0.0
     staked_total: float = 0.0
@@ -52,6 +53,10 @@ class InvariantChecker:
             snap.account_balances[addr] = acc.balance
             snap.account_sequences[addr] = acc.sequence
             snap.account_owner_counts[addr] = acc.owner_count
+            # Snapshot trust line balances for limit checks
+            if hasattr(acc, 'trust_lines'):
+                for tl_key, tl in acc.trust_lines.items():
+                    snap.trust_line_balances[(addr, tl_key)] = tl.balance
         # Track locked fund totals for no-creation check
         if hasattr(ledger, 'escrow_manager'):
             if hasattr(ledger.escrow_manager, 'total_locked'):
@@ -220,11 +225,16 @@ class InvariantChecker:
             for key, tl in acc.trust_lines.items():
                 if tl.balance > tl.limit + 1e-8:
                     # Check if balance was already above limit before this tx
-                    # (e.g. limit was reduced after tokens were received)
-                    old_bal = self._snapshot.account_balances.get(addr)
-                    if old_bal is not None:
-                        # Allow pre-existing over-limit balances
+                    old_tl_balances = self._snapshot.trust_line_balances
+                    tl_snap_key = (addr, key)
+                    old_tl_bal = old_tl_balances.get(tl_snap_key) if old_tl_balances else None
+                    if old_tl_bal is not None and old_tl_bal > tl.limit + 1e-8:
+                        # Pre-existing over-limit — allow (limit was reduced)
                         continue
+                    return False, (
+                        f"Trust-line limit violated: {addr} {key} "
+                        f"balance {tl.balance:.8f} > limit {tl.limit:.8f}"
+                    )
         return True, ""
 
     def _check_no_creation(self, ledger) -> tuple[bool, str]:

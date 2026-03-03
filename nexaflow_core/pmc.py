@@ -972,6 +972,21 @@ class PMCManager:
         if holder is not None:
             self._store.put_holder(coin_id, account, holder.to_dict())
 
+    def _persist_holders_atomic(self, coin_id: str, *accounts: str | None) -> None:
+        """Atomically persist multiple holder balances in a single LMDB txn."""
+        if self._store is None:
+            return
+        ops: list[tuple[bytes, str | bytes, dict | None]] = []
+        for account in accounts:
+            if account is None:
+                continue
+            holder = self._holders.get(coin_id, {}).get(account)
+            if holder is not None:
+                key = f"{coin_id}:{account}"
+                ops.append((b"holders", key, holder.to_dict()))
+        if ops:
+            self._store.batch_write(ops)
+
     def _persist_offer(self, offer_id: str) -> None:
         if self._store is None:
             return
@@ -1568,11 +1583,9 @@ class PMCManager:
             "timestamp": now,
         })
 
-        # ── Persist to LMDB ──────────────────────────────────────
-        self._persist_holder(coin_id, sender)
-        self._persist_holder(coin_id, receiver)
-        if royalty > 0 and coin.issuer != sender:
-            self._persist_holder(coin_id, coin.issuer)
+        # ── Persist to LMDB (atomic batch write) ─────────────────
+        self._persist_holders_atomic(coin_id, sender, receiver,
+                                      coin.issuer if (royalty > 0 and coin.issuer != sender) else None)
 
         return True, f"Transferred {net_amount} {coin.symbol}", royalty
 
@@ -1596,9 +1609,15 @@ class PMCManager:
         if not coin.has_flag(PMCFlag.BURNABLE):
             return False, "Burning disabled for this coin"
 
+        if coin.frozen:
+            return False, "Coin is frozen"
+
         holder = self._holders.get(coin_id, {}).get(account)
         if holder is None or holder.balance < amount:
             return False, "Insufficient balance"
+
+        if holder.frozen:
+            return False, "Account is frozen"
 
         if amount <= 0:
             return False, "Amount must be positive"
@@ -1700,18 +1719,23 @@ class PMCManager:
             if not counter.has_flag(PMCFlag.CROSS_TRADEABLE):
                 return False, "Counter coin is not cross-tradeable", None
 
-        # Sell: check seller has enough
+        # Sell: check seller has enough and escrow (lock) tokens
         if is_sell:
             holder = self._holders.get(coin_id, {}).get(owner)
             if holder is None or holder.balance < amount:
                 return False, "Insufficient balance to sell", None
+            # Escrow: deduct from spendable balance so tokens can't be
+            # double-sold or transferred while the offer is live.
+            holder.balance -= amount
 
-        # Buy with another PMC: check buyer has enough counter-coin
+        # Buy with another PMC: check buyer has enough counter-coin and escrow
         if not is_sell and counter_coin_id:
             total_cost = amount * price
             c_holder = self._holders.get(counter_coin_id, {}).get(owner)
             if c_holder is None or c_holder.balance < total_cost:
                 return False, "Insufficient counter-coin balance", None
+            # Escrow counter-coin balance
+            c_holder.balance -= total_cost
 
         offer_id = self._make_offer_id(owner)
         offer = PMCOffer(
@@ -1774,6 +1798,10 @@ class PMCManager:
         if coin is None:
             return False, "Coin not found", {}
 
+        # ── Frozen checks (must block DEX settlement on frozen coins) ──
+        if coin.frozen:
+            return False, "Coin is frozen", {}
+
         # Determine fill quantity
         qty = offer.remaining
         if fill_amount is not None:
@@ -1795,6 +1823,8 @@ class PMCManager:
         s_holder = self._holders.get(offer.coin_id, {}).get(seller)
         if s_holder is None or s_holder.balance < qty:
             return False, "Seller has insufficient coin balance", {}
+        if s_holder.frozen:
+            return False, "Seller account is frozen", {}
 
         # For PMC-to-PMC cross-trade
         counter_coin_id = offer.counter_coin_id
@@ -1868,15 +1898,27 @@ class PMCManager:
             "timestamp": now,
         })
 
-        # ── Persist to LMDB ──────────────────────────────────────
-        self._persist_offer(offer_id)
-        self._persist_holder(offer.coin_id, seller)
-        self._persist_holder(offer.coin_id, buyer)
-        if royalty > 0:
-            self._persist_holder(offer.coin_id, coin.issuer)
-        if counter_coin_id:
-            self._persist_holder(counter_coin_id, buyer)
-            self._persist_holder(counter_coin_id, seller)
+        # ── Persist to LMDB (atomic batch) ──────────────────────
+        if self._store is not None:
+            ops: list[tuple[bytes, str | bytes, dict | None]] = []
+            # Offer state
+            if offer is not None:
+                ops.append((b"offers", offer_id, offer.to_dict()))
+            # Coin holders
+            for acct in (seller, buyer):
+                h = self._holders.get(offer.coin_id, {}).get(acct)
+                if h is not None:
+                    ops.append((b"holders", f"{offer.coin_id}:{acct}", h.to_dict()))
+            if royalty > 0:
+                ih = self._holders.get(offer.coin_id, {}).get(coin.issuer)
+                if ih is not None:
+                    ops.append((b"holders", f"{offer.coin_id}:{coin.issuer}", ih.to_dict()))
+            if counter_coin_id:
+                for acct in (buyer, seller):
+                    ch = self._holders.get(counter_coin_id, {}).get(acct)
+                    if ch is not None:
+                        ops.append((b"holders", f"{counter_coin_id}:{acct}", ch.to_dict()))
+            self._store.batch_write(ops)
 
         return True, "Offer filled", settlement
 
@@ -1887,7 +1929,10 @@ class PMCManager:
         offer_id: str,
         account: str,
     ) -> tuple[bool, str]:
-        """Cancel an open offer (owner only)."""
+        """Cancel an open offer (owner only).
+
+        Returns escrowed tokens to the offer creator's balance.
+        """
         offer = self.offers.get(offer_id)
         if offer is None:
             return False, "Offer not found"
@@ -1896,6 +1941,23 @@ class PMCManager:
         if offer.cancelled:
             return False, "Offer already cancelled"
         offer.cancelled = True
+
+        # Return escrowed tokens to the owner
+        remaining = offer.amount - getattr(offer, 'filled', 0.0)
+        if remaining > 0:
+            if offer.is_sell:
+                holder = self._holders.get(offer.coin_id, {}).get(offer.owner)
+                if holder is not None:
+                    holder.balance += remaining
+                    self._persist_holder(offer.coin_id, offer.owner)
+            elif offer.counter_coin_id:
+                # Buy offer: return escrowed counter-coin
+                remaining_cost = remaining * offer.price
+                c_holder = self._holders.get(offer.counter_coin_id, {}).get(offer.owner)
+                if c_holder is not None:
+                    c_holder.balance += remaining_cost
+                    self._persist_holder(offer.counter_coin_id, offer.owner)
+
         self._persist_offer(offer_id)
         return True, "Offer cancelled"
 
