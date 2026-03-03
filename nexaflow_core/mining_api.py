@@ -104,6 +104,7 @@ class MiningJob:
     miner_address: str
     difficulty: int
     target: str                 # hex target string
+    tx_root: str = "0" * 64     # Merkle root of committed txs (EMPTY_TX_ROOT)
     created_at: float = field(default_factory=time.time)
     clean_jobs: bool = True     # True → miners must drop old work
 
@@ -279,6 +280,7 @@ class MiningCoordinator:
             miner_address=miner_address,
             difficulty=diff,
             target=target,
+            tx_root=info.get("pending_tx_root", "0" * 64),
         )
         self.jobs[job_id] = job
         return job
@@ -322,10 +324,11 @@ class MiningCoordinator:
         coin_id = job.coin_id
         miner = session.wallet_address
         prev_hash = job.prev_hash
+        tx_root = job.tx_root
         diff = job.difficulty
         target = "0" * diff
 
-        blob = f"{coin_id}:{miner}:{pmc_nonce}:{prev_hash}".encode()
+        blob = f"{coin_id}:{miner}:{pmc_nonce}:{prev_hash}:{tx_root}".encode()
         h = hashlib.sha256(hashlib.sha256(blob).digest()).hexdigest()
 
         if h[:diff] != target:
@@ -339,7 +342,7 @@ class MiningCoordinator:
         self.stats.total_shares_accepted += 1
 
         # Perform the actual mint
-        minted = self._do_mint(coin_id, miner, pmc_nonce)
+        minted = self._do_mint(coin_id, miner, pmc_nonce, tx_root)
         if minted > 0:
             self.stats.total_blocks_found += 1
             self.stats.total_coins_mined += minted
@@ -352,7 +355,8 @@ class MiningCoordinator:
         # Share was valid PoW but mint failed (supply exhausted, etc.)
         return True, "Valid share (mint pending)", 0.0
 
-    def _do_mint(self, coin_id: str, miner: str, nonce: int) -> float:
+    def _do_mint(self, coin_id: str, miner: str, nonce: int,
+                  tx_root: str = "") -> float:
         """Perform the mint via callback or direct PMCManager call."""
         if self.mint_callback is not None:
             # Callback assumed to be async; handle both sync and async.
@@ -361,7 +365,9 @@ class MiningCoordinator:
                 return result
             return 0.0
 
-        ok, msg, amount = self.pmc.mint(coin_id, miner, nonce)
+        ok, msg, amount = self.pmc.mint(
+            coin_id, miner, nonce, tx_root=tx_root if tx_root else "",
+        )
         if ok:
             return amount
         logger.warning("Mint failed for coin=%s miner=%s: %s", coin_id[:12], miner[:12], msg)

@@ -238,7 +238,8 @@ class TestMiningCoordinator(unittest.TestCase):
             combined = session.extranonce1 + en2 + nonce_hex
             pmc_nonce = int(combined, 16) % (2 ** 63)
 
-            blob = f"{self.coin_id}:rTestMiner:{pmc_nonce}:{prev_hash}".encode()
+            tx_root = job.tx_root
+            blob = f"{self.coin_id}:rTestMiner:{pmc_nonce}:{prev_hash}:{tx_root}".encode()
             h = hashlib.sha256(hashlib.sha256(blob).digest()).hexdigest()
             if h[0] == "0":  # difficulty=1 means first hex char is 0
                 accepted, message, minted = self.coord.validate_share(
