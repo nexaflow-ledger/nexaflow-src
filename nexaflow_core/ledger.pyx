@@ -40,6 +40,7 @@ from nexaflow_core.mpt import MPTManager
 from nexaflow_core.credentials import CredentialManager
 from nexaflow_core.xchain import XChainManager
 from nexaflow_core.hooks import HooksManager, HookOn
+from nexaflow_core.pmc import PMCManager, RuleViolation
 from nexaflow_core.invariants import InvariantChecker
 from nexaflow_core.tx_metadata import MetadataBuilder
 from nexaflow_core.order_book import OrderBook
@@ -325,6 +326,7 @@ cdef class Ledger:
     cdef public object order_book          # OrderBook instance
     cdef public object directory_manager   # DirectoryManager instance
     cdef public object fee_escalation      # FeeEscalation instance
+    cdef public object pmc_manager          # PMCManager instance
 
     def __init__(self, double total_supply=100_000_000_000.0,
                  str genesis_account="nGenesisNXF"):
@@ -360,6 +362,7 @@ cdef class Ledger:
         self.order_book = OrderBook()
         self.directory_manager = DirectoryManager()
         self.fee_escalation = FeeEscalation()
+        self.pmc_manager = PMCManager()
 
         # Create genesis account with full supply
         cdef AccountEntry genesis = AccountEntry(genesis_account, total_supply)
@@ -919,6 +922,8 @@ cdef class Ledger:
             51: "XChainBridge", 52: "XChainBridge", 53: "XChainBridge",
             54: "XChainBridge", 55: "XChainBridge", 56: "XChainBridge",
             57: "Hooks",
+            60: "PMC", 61: "PMC", 62: "PMC", 63: "PMC",
+            64: "PMC", 65: "PMC", 66: "PMC", 67: "PMC",
         }
         _amendment_name = _AMENDMENT_GATED_TYPES.get(tt, "")
         if _amendment_name and self.amendment_manager.amendments:
@@ -1051,6 +1056,22 @@ cdef class Ledger:
             result = self.apply_xchain_account_create(tx)
         elif tt == 57:   # SetHook
             result = self.apply_set_hook(tx)
+        elif tt == 60:   # PMCCreate
+            result = self.apply_pmc_create(tx)
+        elif tt == 61:   # PMCMint
+            result = self.apply_pmc_mint(tx)
+        elif tt == 62:   # PMCTransfer
+            result = self.apply_pmc_transfer(tx)
+        elif tt == 63:   # PMCBurn
+            result = self.apply_pmc_burn(tx)
+        elif tt == 64:   # PMCSetRules
+            result = self.apply_pmc_set_rules(tx)
+        elif tt == 65:   # PMCOfferCreate
+            result = self.apply_pmc_offer_create(tx)
+        elif tt == 66:   # PMCOfferAccept
+            result = self.apply_pmc_offer_accept(tx)
+        elif tt == 67:   # PMCOfferCancel
+            result = self.apply_pmc_offer_cancel(tx)
         else:
             result = 0   # for simplicity, other types succeed
 
@@ -2854,6 +2875,287 @@ cdef class Ledger:
         ok, msg = self.hooks_manager.set_hook(src, position, hook_hash, parameters, hook_on)
         if not ok:
             return 122  # tecHOOKS_REJECTED
+        acc.sequence += 1
+        return 0
+
+    # ── PMC apply methods ──────────────────────────────────────────────────
+
+    cpdef int apply_pmc_create(self, object tx):
+        """Create a new Programmable Micro Coin definition."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        flags_d = tx.flags or {}
+        rules_raw = flags_d.get("rules", [])
+        ok, msg, coin = self.pmc_manager.create_coin(
+            issuer=src,
+            symbol=flags_d.get("symbol", ""),
+            name=flags_d.get("name", ""),
+            max_supply=float(flags_d.get("max_supply", 0)),
+            decimals=int(flags_d.get("decimals", 8)),
+            pow_difficulty=int(flags_d.get("pow_difficulty", 4)),
+            flags=int(flags_d.get("pmc_flags", 0x004F)),
+            metadata=flags_d.get("metadata", ""),
+            rules=rules_raw,
+        )
+        if not ok:
+            tx.result_code = 144  # tecPMC_SYMBOL_EXISTS / general creation error
+            return 144
+        acc.owner_count += 1
+        acc.sequence += 1
+        return 0
+
+    cpdef int apply_pmc_mint(self, object tx):
+        """Mint new PMC supply via Proof-of-Work."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        flags_d = tx.flags or {}
+        coin_id = flags_d.get("coin_id", "")
+        nonce = int(flags_d.get("nonce", 0))
+        amount = float(flags_d.get("amount", 0))
+        ok, msg, minted = self.pmc_manager.mint(
+            coin_id=coin_id, miner=src, nonce=nonce, amount=amount,
+        )
+        if not ok:
+            if "Proof-of-Work" in msg:
+                tx.result_code = 139
+                return 139  # tecPMC_INVALID_POW
+            if "supply" in msg.lower():
+                tx.result_code = 141
+                return 141  # tecPMC_SUPPLY_CAP
+            if "frozen" in msg.lower():
+                tx.result_code = 143
+                return 143  # tecPMC_FROZEN
+            tx.result_code = 138
+            return 138  # tecPMC_NOT_FOUND
+        acc.sequence += 1
+        return 0
+
+    cpdef int apply_pmc_transfer(self, object tx):
+        """Transfer PMC tokens between accounts."""
+        cdef str src = tx.account
+        cdef str dst = tx.destination
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        flags_d = tx.flags or {}
+        coin_id = flags_d.get("coin_id", "")
+        amount = float(flags_d.get("amount", 0))
+        memo = tx.memo or ""
+        ok, msg, royalty = self.pmc_manager.transfer(
+            coin_id=coin_id, sender=src, receiver=dst,
+            amount=amount, memo=memo,
+        )
+        if not ok:
+            if "rule" in msg.lower() or "Rule" in msg:
+                tx.result_code = 140
+                return 140  # tecPMC_RULE_VIOLATION
+            if "frozen" in msg.lower():
+                tx.result_code = 143
+                return 143  # tecPMC_FROZEN
+            tx.result_code = 138
+            return 138  # tecPMC_NOT_FOUND (generic)
+        acc.sequence += 1
+        return 0
+
+    cpdef int apply_pmc_burn(self, object tx):
+        """Burn (destroy) PMC tokens."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        flags_d = tx.flags or {}
+        coin_id = flags_d.get("coin_id", "")
+        amount = float(flags_d.get("amount", 0))
+        ok, msg = self.pmc_manager.burn(coin_id=coin_id, account=src, amount=amount)
+        if not ok:
+            tx.result_code = 138
+            return 138
+        acc.sequence += 1
+        return 0
+
+    cpdef int apply_pmc_set_rules(self, object tx):
+        """Update programmable rules on a coin (issuer only)."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        flags_d = tx.flags or {}
+        coin_id = flags_d.get("coin_id", "")
+        rules = flags_d.get("rules", [])
+        ok, msg = self.pmc_manager.set_rules(coin_id=coin_id, issuer=src, rules=rules)
+        if not ok:
+            tx.result_code = 110  # tecNO_PERMISSION
+            return 110
+        acc.sequence += 1
+        return 0
+
+    cpdef int apply_pmc_offer_create(self, object tx):
+        """Post a buy/sell offer on the PMC DEX."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        flags_d = tx.flags or {}
+        coin_id = flags_d.get("coin_id", "")
+        is_sell = bool(flags_d.get("is_sell", False))
+        amount = float(flags_d.get("amount", 0))
+        price = float(flags_d.get("price", 0))
+        counter_coin_id = flags_d.get("counter_coin_id", "")
+        destination = flags_d.get("destination", "")
+        expiration = float(flags_d.get("expiration", 0))
+        # For buy offers against NXF, reserve the NXF cost from buyer balance
+        if not is_sell and not counter_coin_id:
+            total_cost = amount * price
+            if acc.balance < total_cost:
+                tx.result_code = 101  # tecUNFUNDED
+                return 101
+        ok, msg, offer = self.pmc_manager.create_offer(
+            coin_id=coin_id, owner=src, is_sell=is_sell,
+            amount=amount, price=price,
+            counter_coin_id=counter_coin_id,
+            destination=destination, expiration=expiration,
+        )
+        if not ok:
+            tx.result_code = 142  # tecPMC_OFFER_INVALID
+            return 142
+        acc.owner_count += 1
+        acc.sequence += 1
+        return 0
+
+    cpdef int apply_pmc_offer_accept(self, object tx):
+        """Accept (fill) an existing PMC DEX offer — cross-trade settlement."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        flags_d = tx.flags or {}
+        offer_id = flags_d.get("offer_id", "")
+        fill_amount = flags_d.get("fill_amount", None)
+        if fill_amount is not None:
+            fill_amount = float(fill_amount)
+        # Look up the offer to determine NXF settlement needs
+        offer = self.pmc_manager.offers.get(offer_id)
+        if offer is None:
+            tx.result_code = 142
+            return 142
+        # NXF settlement: if buying coin (offer is_sell), taker pays NXF
+        if offer.is_sell and not offer.counter_coin_id:
+            qty = offer.remaining
+            if fill_amount is not None:
+                qty = min(qty, fill_amount)
+            total_nxf = qty * offer.price
+            if acc.balance < total_nxf:
+                tx.result_code = 101
+                return 101
+        # NXF settlement: if selling coin (offer is buy), taker receives NXF
+        if not offer.is_sell and not offer.counter_coin_id:
+            seller_nxf = offer.owner
+            seller_acc = self.accounts.get(seller_nxf)
+            if seller_acc is None:
+                tx.result_code = 101
+                return 101
+            qty = offer.remaining
+            if fill_amount is not None:
+                qty = min(qty, fill_amount)
+            total_nxf = qty * offer.price
+            if (<AccountEntry>seller_acc).balance < total_nxf:
+                tx.result_code = 101
+                return 101
+        ok, msg, settlement = self.pmc_manager.accept_offer(
+            offer_id=offer_id, taker=src, fill_amount=fill_amount,
+        )
+        if not ok:
+            tx.result_code = 142
+            return 142
+        # NXF settlement (non-PMC counter): move NXF between buyer/seller
+        if settlement.get("counter_coin_id") == "NXF":
+            buyer = settlement["buyer"]
+            seller = settlement["seller"]
+            total_cost = settlement["total_cost"]
+            buyer_acc = <AccountEntry>self.accounts.get(buyer)
+            seller_acc_entry = self.accounts.get(seller)
+            if seller_acc_entry is None:
+                seller_acc_entry = self.create_account(seller, 0.0)
+            if buyer_acc is not None and seller_acc_entry is not None:
+                buyer_acc.balance -= total_cost
+                (<AccountEntry>seller_acc_entry).balance += total_cost
+        acc.sequence += 1
+        return 0
+
+    cpdef int apply_pmc_offer_cancel(self, object tx):
+        """Cancel an open PMC DEX offer."""
+        cdef str src = tx.account
+        acc = <AccountEntry>self.accounts.get(src)
+        if acc is None:
+            return 101
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
+        flags_d = tx.flags or {}
+        offer_id = flags_d.get("offer_id", "")
+        ok, msg = self.pmc_manager.cancel_offer(offer_id=offer_id, account=src)
+        if not ok:
+            tx.result_code = 142
+            return 142
+        if acc.owner_count > 0:
+            acc.owner_count -= 1
         acc.sequence += 1
         return 0
 

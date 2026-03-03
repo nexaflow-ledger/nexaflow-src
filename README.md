@@ -22,6 +22,7 @@
 | **REST API** | `aiohttp`-based HTTP API for wallets, transactions & node status |
 | **Order book / DEX** | In-memory limit-order matching engine for cross-currency trades |
 | **Staking with interest** | Tiered lock-up staking (Flexible–365 days) with dynamic APY and early-cancel penalties |
+| **Programmable Micro Coins** | User-created PoW-minted tokens with programmable rules, cross-trading DEX, and 8-decimal precision |
 | **Wallet encryption** | PBKDF2-HMAC-SHA256 + BLAKE2b-CTR encrypted wallet export |
 | **SQLite persistence** | Optional durable storage for ledger state |
 | **TOML configuration** | Flexible file-based node configuration |
@@ -160,6 +161,105 @@ curl -X POST http://localhost:8080/tx/unstake \
 
 ---
 
+## Programmable Micro Coins (PMC)
+
+NexaFlow supports **Programmable Micro Coins** — lightweight, user-created tokens that live on the NexaFlow ledger. Each micro coin has its own Proof-of-Work mining, programmable transfer rules, and built-in cross-trading.
+
+### Core Concepts
+
+| Concept | Description |
+|---------|-------------|
+| **PoW Minting** | New supply is mined by solving a BLAKE2b-256 partial pre-image puzzle. Difficulty auto-adjusts based on recent mint rate |
+| **Programmable Rules** | Issuers attach rules that govern transfers, burns, and minting (max balance, cooldowns, royalties, whitelists, timelocks, etc.) |
+| **Cross-Trade DEX** | Holders post buy/sell offers against NXF or other PMC coins. Offers settle atomically on-ledger |
+| **Micro-Transaction Optimised** | 8-decimal precision for sub-cent denominations |
+
+### Transaction Types
+
+| Code | Type | Description |
+|------|------|-------------|
+| 60 | `PMCCreate` | Define a new micro coin with symbol, supply cap, PoW difficulty, flags, and rules |
+| 61 | `PMCMint` | Submit a PoW nonce to mine new supply |
+| 62 | `PMCTransfer` | Send coins between accounts (subject to programmable rules) |
+| 63 | `PMCBurn` | Permanently destroy supply |
+| 64 | `PMCSetRules` | Update programmable rules (issuer only) |
+| 65 | `PMCOfferCreate` | Post a buy or sell offer on the DEX |
+| 66 | `PMCOfferAccept` | Accept (fill) an existing offer |
+| 67 | `PMCOfferCancel` | Cancel an open offer |
+
+### Flags
+
+| Flag | Description |
+|------|-------------|
+| `TRANSFERABLE` | Coin can be sent between accounts |
+| `BURNABLE` | Holders can destroy their balance |
+| `MINTABLE` | PoW minting is enabled |
+| `FREEZABLE` | Issuer can freeze individual holders or the entire coin |
+| `ROYALTY_ON_XFER` | A percentage of each transfer goes to the issuer |
+| `WHITELIST_ONLY` | Only whitelisted accounts may hold the coin |
+| `CROSS_TRADEABLE` | Coin may be listed on the PMC DEX |
+| `EXPIRABLE` | Balances expire after a configurable TTL |
+
+### Programmable Rules
+
+| Rule | Description |
+|------|-------------|
+| `MAX_BALANCE` | Cap per-account holdings |
+| `MIN_TRANSFER` / `MAX_TRANSFER` | Enforce transfer size bounds |
+| `COOLDOWN` | Minimum seconds between transfers per account |
+| `ROYALTY_PCT` | Percentage of each transfer paid to the issuer |
+| `WHITELIST` / `BLACKLIST` | Address-level access control |
+| `EXPIRY_TTL` | Balances expire N seconds after acquisition |
+| `MAX_PER_MINT` | Cap tokens minted per PoW solution |
+| `MINT_COOLDOWN` | Minimum seconds between mints per miner |
+| `REQUIRE_MEMO` | Transfers must include a memo |
+| `TIME_LOCK` | Balance locked until a Unix timestamp |
+
+### Proof-of-Work
+
+Minting uses BLAKE2b-256 with a chained hash:
+
+$$\text{hash} = \text{BLAKE2b-256}(\texttt{coin\_id} \| \texttt{miner} \| \texttt{nonce} \| \texttt{prev\_hash})$$
+
+The hash must have at least $d$ leading hex zeros, where $d$ is the current difficulty. Difficulty auto-adjusts every 10 mints: faster than the 60-second target increases difficulty, slower decreases it.
+
+### Python API
+
+```python
+from nexaflow_core.pmc import PMCManager, PMCFlag, DEFAULT_FLAGS
+
+mgr = PMCManager()
+
+# Create a coin
+ok, msg, coin = mgr.create_coin(
+    issuer="rAlice",
+    symbol="ZETA",
+    name="Zeta Coin",
+    max_supply=1_000_000.0,
+    pow_difficulty=4,
+)
+
+# Mine new supply (find a valid nonce first)
+from nexaflow_core.pmc import compute_pow_hash, verify_pow
+prev_hash = mgr.get_pow_info(coin.coin_id)["prev_hash"]
+for nonce in range(10_000_000):
+    if verify_pow(coin.coin_id, "rMiner", nonce, coin.pow_difficulty, prev_hash):
+        ok, msg, minted = mgr.mint(coin.coin_id, "rMiner", nonce, amount=100.0)
+        break
+
+# Transfer
+mgr.transfer(coin.coin_id, "rMiner", "rBob", 50.0)
+
+# Post a sell offer on the DEX
+mgr.create_offer(coin.coin_id, "rBob", is_sell=True, amount=25.0, price=0.01)
+
+# Check portfolio
+mgr.get_portfolio("rBob")
+# [{'coin_id': '...', 'symbol': 'ZETA', 'balance': 25.0, ...}]
+```
+
+---
+
 ## Quick Start
 
 ### Prerequisites
@@ -280,6 +380,7 @@ See [`nexaflow.example.toml`](nexaflow.example.toml) for all available options.
 | `[storage]` | `enabled`, `backend` (sqlite), `path` |
 | `[genesis.accounts]` | Deterministic genesis account balances |
 | `[logging]` | `level`, `format` (human / json), optional `file` |
+| `[pmc]` | `enabled`, `default_pow_difficulty`, `target_mint_interval`, `max_coins_per_issuer` |
 
 ---
 
@@ -304,9 +405,10 @@ nexaflow-src/
 │   ├── storage.py          # SQLite persistence
 │   ├── order_book.py       # DEX limit-order engine
 │   ├── staking.py          # Tiered staking pool with dynamic APY
+│   ├── pmc.py              # Programmable Micro Coins: PoW, rules, DEX
 │   ├── config.py           # TOML configuration loader
 │   └── logging_config.py   # Structured logging
-├── nexaflow_gui/           # PyQt6 desktop GUI (7 tabs)
+├── nexaflow_gui/           # PyQt6 desktop GUI (8 tabs)
 ├── tests/                  # Test suite (940+ tests, 31 modules)
 ├── scripts/                # Node launch helpers
 ├── run_node.py             # CLI node runner
@@ -378,7 +480,7 @@ pip install -e ".[gui]"    # install the GUI extra
 python -m nexaflow_gui     # launch
 ```
 
-The GUI provides seven tabs:
+The GUI provides eight tabs:
 
 | Tab | Description |
 |-----|-------------|
@@ -388,6 +490,7 @@ The GUI provides seven tabs:
 | Staking | Stake management & pool stats |
 | Transactions | Send, inspect & track transactions |
 | Trust / DEX | Trust lines & order-book trading |
+| Micro Coins | Create, mine, trade & manage Programmable Micro Coins |
 | Wallets | Create, import & manage wallets |
 
 Window defaults to 1440 × 900 (min 1200 × 780) with a custom dark theme.

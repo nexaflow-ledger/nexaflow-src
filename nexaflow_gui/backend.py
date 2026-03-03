@@ -24,6 +24,14 @@ from nexaflow_core.transaction import (
     create_stake,
     create_trust_set,
     create_unstake,
+    create_pmc_create,
+    create_pmc_mint,
+    create_pmc_transfer,
+    create_pmc_burn,
+    create_pmc_set_rules,
+    create_pmc_offer_create,
+    create_pmc_offer_accept,
+    create_pmc_offer_cancel,
 )
 from nexaflow_core.wallet import Wallet
 
@@ -54,6 +62,7 @@ class NodeBackend(QObject):
     order_book_changed = pyqtSignal()              # DEX state changed
     wallet_created = pyqtSignal(dict)              # wallet info
     staking_changed = pyqtSignal()                 # any staking state change
+    pmc_changed = pyqtSignal()                       # PMC state change
     p2p_status_updated = pyqtSignal(dict)            # real-time P2P snapshot
     ledger_reset = pyqtSignal()                      # ledger data wiped
 
@@ -684,6 +693,273 @@ class NodeBackend(QObject):
         return self._primary_node.ledger.staking_pool.get_tier_info(
             self._primary_node.ledger.total_supply
         )
+
+    # ── PMC operations ──────────────────────────────────────────────────
+
+    def pmc_create_coin(
+        self,
+        address: str,
+        symbol: str,
+        name: str,
+        max_supply: float = 0.0,
+        decimals: int = 8,
+        pow_difficulty: int = 4,
+        pmc_flags: int = 0x004F,
+        metadata: str = "",
+        rules: list | None = None,
+    ) -> dict | None:
+        """Create a new Programmable Micro Coin."""
+        wallet = self.wallets.get(address)
+        if not wallet:
+            self.error_occurred.emit(f"No wallet found for {address}")
+            return None
+        try:
+            seq = self._account_seq(address)
+            tx = create_pmc_create(
+                account=address, symbol=symbol, name=name,
+                max_supply=max_supply, decimals=decimals,
+                pow_difficulty=pow_difficulty, pmc_flags=pmc_flags,
+                metadata=metadata, rules=rules or [],
+                sequence=seq,
+            )
+            wallet.sign_transaction(tx)
+            results = self.network.broadcast_transaction(tx)
+            accepted = any(ok for ok, _c, _m in results.values())
+            if accepted:
+                self._apply_immediately()
+                self.pmc_changed.emit()
+                self.accounts_changed.emit()
+                self._log(f"PMC Created: {symbol} | issuer={address[:16]}…")
+            else:
+                msgs = [m for _, _, m in results.values()]
+                self.error_occurred.emit(f"PMCCreate rejected: {msgs[0]}")
+                return None
+            return tx.to_dict()
+        except Exception as exc:
+            self.error_occurred.emit(f"PMCCreate failed: {exc}")
+            return None
+
+    def pmc_mint(
+        self, address: str, coin_id: str, nonce: int, amount: float
+    ) -> dict | None:
+        """Mint new PMC supply via Proof-of-Work."""
+        wallet = self.wallets.get(address)
+        if not wallet:
+            self.error_occurred.emit(f"No wallet found for {address}")
+            return None
+        try:
+            seq = self._account_seq(address)
+            tx = create_pmc_mint(
+                account=address, coin_id=coin_id,
+                nonce=nonce, amount=amount, sequence=seq,
+            )
+            wallet.sign_transaction(tx)
+            results = self.network.broadcast_transaction(tx)
+            accepted = any(ok for ok, _c, _m in results.values())
+            if accepted:
+                self._apply_immediately()
+                self.pmc_changed.emit()
+                self._log(f"PMC Minted: {amount} | coin={coin_id[:12]}… | miner={address[:12]}…")
+            else:
+                msgs = [m for _, _, m in results.values()]
+                self.error_occurred.emit(f"PMCMint rejected: {msgs[0]}")
+                return None
+            return tx.to_dict()
+        except Exception as exc:
+            self.error_occurred.emit(f"PMCMint failed: {exc}")
+            return None
+
+    def pmc_transfer(
+        self, address: str, destination: str, coin_id: str,
+        amount: float, memo: str = ""
+    ) -> dict | None:
+        """Transfer PMC tokens."""
+        wallet = self.wallets.get(address)
+        if not wallet:
+            self.error_occurred.emit(f"No wallet found for {address}")
+            return None
+        try:
+            seq = self._account_seq(address)
+            tx = create_pmc_transfer(
+                account=address, destination=destination,
+                coin_id=coin_id, amount=amount, memo=memo,
+                sequence=seq,
+            )
+            wallet.sign_transaction(tx)
+            results = self.network.broadcast_transaction(tx)
+            accepted = any(ok for ok, _c, _m in results.values())
+            if accepted:
+                self._apply_immediately()
+                self.pmc_changed.emit()
+                self.accounts_changed.emit()
+                self._log(f"PMC Transfer: {amount} | {address[:12]}… → {destination[:12]}…")
+            else:
+                msgs = [m for _, _, m in results.values()]
+                self.error_occurred.emit(f"PMCTransfer rejected: {msgs[0]}")
+                return None
+            return tx.to_dict()
+        except Exception as exc:
+            self.error_occurred.emit(f"PMCTransfer failed: {exc}")
+            return None
+
+    def pmc_burn(
+        self, address: str, coin_id: str, amount: float
+    ) -> dict | None:
+        """Burn PMC tokens."""
+        wallet = self.wallets.get(address)
+        if not wallet:
+            self.error_occurred.emit(f"No wallet found for {address}")
+            return None
+        try:
+            seq = self._account_seq(address)
+            tx = create_pmc_burn(
+                account=address, coin_id=coin_id, amount=amount,
+                sequence=seq,
+            )
+            wallet.sign_transaction(tx)
+            results = self.network.broadcast_transaction(tx)
+            accepted = any(ok for ok, _c, _m in results.values())
+            if accepted:
+                self._apply_immediately()
+                self.pmc_changed.emit()
+                self._log(f"PMC Burned: {amount} | coin={coin_id[:12]}…")
+            else:
+                msgs = [m for _, _, m in results.values()]
+                self.error_occurred.emit(f"PMCBurn rejected: {msgs[0]}")
+                return None
+            return tx.to_dict()
+        except Exception as exc:
+            self.error_occurred.emit(f"PMCBurn failed: {exc}")
+            return None
+
+    def pmc_offer_create(
+        self, address: str, coin_id: str, is_sell: bool,
+        amount: float, price: float, counter_coin_id: str = "",
+        destination: str = "", expiration: float = 0.0,
+    ) -> dict | None:
+        """Post a PMC DEX offer."""
+        wallet = self.wallets.get(address)
+        if not wallet:
+            self.error_occurred.emit(f"No wallet found for {address}")
+            return None
+        try:
+            seq = self._account_seq(address)
+            tx = create_pmc_offer_create(
+                account=address, coin_id=coin_id, is_sell=is_sell,
+                amount=amount, price=price,
+                counter_coin_id=counter_coin_id,
+                destination=destination, expiration=expiration,
+                sequence=seq,
+            )
+            wallet.sign_transaction(tx)
+            results = self.network.broadcast_transaction(tx)
+            accepted = any(ok for ok, _c, _m in results.values())
+            if accepted:
+                self._apply_immediately()
+                self.pmc_changed.emit()
+                side = "SELL" if is_sell else "BUY"
+                self._log(f"PMC Offer: {side} {amount} @ {price} NXF")
+            else:
+                msgs = [m for _, _, m in results.values()]
+                self.error_occurred.emit(f"PMCOffer rejected: {msgs[0]}")
+                return None
+            return tx.to_dict()
+        except Exception as exc:
+            self.error_occurred.emit(f"PMCOffer failed: {exc}")
+            return None
+
+    def pmc_offer_accept(
+        self, address: str, offer_id: str, fill_amount: float = 0.0,
+    ) -> dict | None:
+        """Accept (fill) a PMC DEX offer."""
+        wallet = self.wallets.get(address)
+        if not wallet:
+            self.error_occurred.emit(f"No wallet found for {address}")
+            return None
+        try:
+            seq = self._account_seq(address)
+            tx = create_pmc_offer_accept(
+                account=address, offer_id=offer_id,
+                fill_amount=fill_amount, sequence=seq,
+            )
+            wallet.sign_transaction(tx)
+            results = self.network.broadcast_transaction(tx)
+            accepted = any(ok for ok, _c, _m in results.values())
+            if accepted:
+                self._apply_immediately()
+                self.pmc_changed.emit()
+                self.accounts_changed.emit()
+                self._log(f"PMC Offer accepted: {offer_id[:12]}…")
+            else:
+                msgs = [m for _, _, m in results.values()]
+                self.error_occurred.emit(f"PMCOfferAccept rejected: {msgs[0]}")
+                return None
+            return tx.to_dict()
+        except Exception as exc:
+            self.error_occurred.emit(f"PMCOfferAccept failed: {exc}")
+            return None
+
+    def pmc_offer_cancel(
+        self, address: str, offer_id: str,
+    ) -> dict | None:
+        """Cancel an open PMC DEX offer."""
+        wallet = self.wallets.get(address)
+        if not wallet:
+            self.error_occurred.emit(f"No wallet found for {address}")
+            return None
+        try:
+            seq = self._account_seq(address)
+            tx = create_pmc_offer_cancel(
+                account=address, offer_id=offer_id, sequence=seq,
+            )
+            wallet.sign_transaction(tx)
+            results = self.network.broadcast_transaction(tx)
+            accepted = any(ok for ok, _c, _m in results.values())
+            if accepted:
+                self._apply_immediately()
+                self.pmc_changed.emit()
+                self._log(f"PMC Offer cancelled: {offer_id[:12]}…")
+            else:
+                msgs = [m for _, _, m in results.values()]
+                self.error_occurred.emit(f"PMCOfferCancel rejected: {msgs[0]}")
+                return None
+            return tx.to_dict()
+        except Exception as exc:
+            self.error_occurred.emit(f"PMCOfferCancel failed: {exc}")
+            return None
+
+    def pmc_list_coins(self) -> list[dict]:
+        """Return all registered PMC coins."""
+        mgr = self._primary_node.ledger.pmc_manager
+        return [c.to_dict() for c in mgr.list_coins()]
+
+    def pmc_get_coin(self, coin_id: str) -> dict | None:
+        """Return details for a single coin."""
+        mgr = self._primary_node.ledger.pmc_manager
+        c = mgr.get_coin(coin_id)
+        return c.to_dict() if c else None
+
+    def pmc_get_portfolio(self, address: str) -> list[dict]:
+        """Return all PMC holdings for an address."""
+        mgr = self._primary_node.ledger.pmc_manager
+        return mgr.get_portfolio(address)
+
+    def pmc_get_order_book(self, coin_id: str, counter: str = "") -> dict:
+        """Return the PMC order book for a trading pair."""
+        mgr = self._primary_node.ledger.pmc_manager
+        return mgr.get_order_book(coin_id, counter)
+
+    def pmc_list_active_offers(self, coin_id: str = "") -> list[dict]:
+        """Return active PMC offers (optionally filtered by coin)."""
+        mgr = self._primary_node.ledger.pmc_manager
+        if coin_id:
+            return [o.to_dict() for o in mgr.list_active_offers(coin_id)]
+        return [o.to_dict() for o in mgr.list_all_active_offers()]
+
+    def pmc_get_pow_info(self, coin_id: str) -> dict:
+        """Return PoW mining info for a coin."""
+        mgr = self._primary_node.ledger.pmc_manager
+        return mgr.get_pow_info(coin_id)
 
     def get_demand_multiplier(self) -> float:
         """Return the current demand multiplier for dynamic APY."""

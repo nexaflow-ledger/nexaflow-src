@@ -134,6 +134,16 @@ class LoggingConfig:
 
 
 @dataclass
+class PMCConfig:
+    """Programmable Micro Coin settings."""
+    enabled: bool = True
+    default_pow_difficulty: int = 4
+    target_mint_interval: float = 60.0
+    max_coins_per_issuer: int = 100
+    max_supply_cap: float = 1_000_000_000_000_000.0
+
+
+@dataclass
 class NexaFlowConfig:
     """Top-level configuration container."""
     node: NodeConfig = field(default_factory=NodeConfig)
@@ -145,6 +155,7 @@ class NexaFlowConfig:
     storage: StorageConfig = field(default_factory=StorageConfig)
     genesis: GenesisConfig = field(default_factory=GenesisConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    pmc: PMCConfig = field(default_factory=PMCConfig)
 
 
 def _merge(dc: Any, raw: dict[str, Any]) -> None:
@@ -187,6 +198,7 @@ def load_config(path: str | None = None) -> NexaFlowConfig:
                 ("storage", cfg.storage),
                 ("genesis", cfg.genesis),
                 ("logging", cfg.logging),
+                ("pmc", cfg.pmc),
             ]:
                 if section_name in data:
                     _merge(section_dc, data[section_name])

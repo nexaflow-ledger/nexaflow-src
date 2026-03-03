@@ -71,6 +71,14 @@ cdef int _TT_XCHAIN_ADD_ATTESTATION     = 55
 cdef int _TT_XCHAIN_ACCOUNT_CREATE      = 56
 cdef int _TT_NFTOKEN_OFFER_CANCEL  = 29
 cdef int _TT_SET_HOOK           = 57
+cdef int _TT_PMC_CREATE         = 60
+cdef int _TT_PMC_MINT           = 61
+cdef int _TT_PMC_TRANSFER       = 62
+cdef int _TT_PMC_BURN           = 63
+cdef int _TT_PMC_SET_RULES      = 64
+cdef int _TT_PMC_OFFER_CREATE   = 65
+cdef int _TT_PMC_OFFER_ACCEPT   = 66
+cdef int _TT_PMC_OFFER_CANCEL   = 67
 cdef int _TT_AMENDMENT         = 100
 
 # Python-visible aliases
@@ -125,6 +133,14 @@ TT_XCHAIN_ADD_ATTESTATION     = _TT_XCHAIN_ADD_ATTESTATION
 TT_XCHAIN_ACCOUNT_CREATE      = _TT_XCHAIN_ACCOUNT_CREATE
 TT_NFTOKEN_OFFER_CANCEL = _TT_NFTOKEN_OFFER_CANCEL
 TT_SET_HOOK           = _TT_SET_HOOK
+TT_PMC_CREATE         = _TT_PMC_CREATE
+TT_PMC_MINT           = _TT_PMC_MINT
+TT_PMC_TRANSFER       = _TT_PMC_TRANSFER
+TT_PMC_BURN           = _TT_PMC_BURN
+TT_PMC_SET_RULES      = _TT_PMC_SET_RULES
+TT_PMC_OFFER_CREATE   = _TT_PMC_OFFER_CREATE
+TT_PMC_OFFER_ACCEPT   = _TT_PMC_OFFER_ACCEPT
+TT_PMC_OFFER_CANCEL   = _TT_PMC_OFFER_CANCEL
 TT_AMENDMENT         = _TT_AMENDMENT
 
 # Transaction result codes (cdef + Python-visible)
@@ -166,6 +182,13 @@ cdef int _TEC_SEQ_TOO_LOW = 134
 cdef int _TEC_DEPOSIT_AUTH = 135
 cdef int _TEC_EXPIRED = 136
 cdef int _TEC_NO_TICKET = 137
+cdef int _TEC_PMC_NOT_FOUND = 138
+cdef int _TEC_PMC_INVALID_POW = 139
+cdef int _TEC_PMC_RULE_VIOLATION = 140
+cdef int _TEC_PMC_SUPPLY_CAP = 141
+cdef int _TEC_PMC_OFFER_INVALID = 142
+cdef int _TEC_PMC_FROZEN = 143
+cdef int _TEC_PMC_SYMBOL_EXISTS = 144
 
 TES_SUCCESS      = _TES_SUCCESS
 TEC_UNFUNDED     = _TEC_UNFUNDED
@@ -205,6 +228,13 @@ TEC_SEQ_TOO_LOW = _TEC_SEQ_TOO_LOW
 TEC_DEPOSIT_AUTH = _TEC_DEPOSIT_AUTH
 TEC_EXPIRED = _TEC_EXPIRED
 TEC_NO_TICKET = _TEC_NO_TICKET
+TEC_PMC_NOT_FOUND = _TEC_PMC_NOT_FOUND
+TEC_PMC_INVALID_POW = _TEC_PMC_INVALID_POW
+TEC_PMC_RULE_VIOLATION = _TEC_PMC_RULE_VIOLATION
+TEC_PMC_SUPPLY_CAP = _TEC_PMC_SUPPLY_CAP
+TEC_PMC_OFFER_INVALID = _TEC_PMC_OFFER_INVALID
+TEC_PMC_FROZEN = _TEC_PMC_FROZEN
+TEC_PMC_SYMBOL_EXISTS = _TEC_PMC_SYMBOL_EXISTS
 
 # Map names to codes for external use
 TX_TYPE_NAMES = {
@@ -259,6 +289,14 @@ TX_TYPE_NAMES = {
     "XChainAddAttestation": TT_XCHAIN_ADD_ATTESTATION,
     "XChainAccountCreate": TT_XCHAIN_ACCOUNT_CREATE,
     "SetHook": TT_SET_HOOK,
+    "PMCCreate": TT_PMC_CREATE,
+    "PMCMint": TT_PMC_MINT,
+    "PMCTransfer": TT_PMC_TRANSFER,
+    "PMCBurn": TT_PMC_BURN,
+    "PMCSetRules": TT_PMC_SET_RULES,
+    "PMCOfferCreate": TT_PMC_OFFER_CREATE,
+    "PMCOfferAccept": TT_PMC_OFFER_ACCEPT,
+    "PMCOfferCancel": TT_PMC_OFFER_CANCEL,
     "Amendment": TT_AMENDMENT,
 }
 
@@ -301,6 +339,13 @@ RESULT_NAMES = {
     TEC_DEPOSIT_AUTH:    "tecDEPOSIT_AUTH",
     TEC_EXPIRED:         "tecEXPIRED",
     TEC_NO_TICKET:       "tecNO_TICKET",
+    TEC_PMC_NOT_FOUND:   "tecPMC_NOT_FOUND",
+    TEC_PMC_INVALID_POW: "tecPMC_INVALID_POW",
+    TEC_PMC_RULE_VIOLATION: "tecPMC_RULE_VIOLATION",
+    TEC_PMC_SUPPLY_CAP:  "tecPMC_SUPPLY_CAP",
+    TEC_PMC_OFFER_INVALID: "tecPMC_OFFER_INVALID",
+    TEC_PMC_FROZEN:      "tecPMC_FROZEN",
+    TEC_PMC_SYMBOL_EXISTS: "tecPMC_SYMBOL_EXISTS",
 }
 
 
@@ -1170,6 +1215,112 @@ cpdef object create_set_hook(str account, str hook_hash, int position=0,
     )
     tx.flags = {"hook_hash": hook_hash, "position": position,
                 "parameters": parameters or {}, "hook_on": hook_on}
+    return tx
+
+
+# --------------- Programmable Micro Coin (PMC) ---------------
+
+cpdef object create_pmc_create(str account, str symbol, str name,
+                               double max_supply=0.0, int decimals=8,
+                               int pow_difficulty=4, int pmc_flags=0x004F,
+                               str metadata="", list rules=None,
+                               double fee=0.00001, long long sequence=0):
+    """Create a new Programmable Micro Coin definition."""
+    cdef Transaction tx = Transaction(
+        TT_PMC_CREATE, account, "", Amount(0.0), Amount(fee), sequence,
+    )
+    tx.flags = {
+        "symbol": symbol,
+        "name": name,
+        "max_supply": max_supply,
+        "decimals": decimals,
+        "pow_difficulty": pow_difficulty,
+        "pmc_flags": pmc_flags,
+        "metadata": metadata,
+        "rules": rules or [],
+    }
+    return tx
+
+cpdef object create_pmc_mint(str account, str coin_id, int nonce,
+                             double amount, double fee=0.00001,
+                             long long sequence=0):
+    """Mint new PMC supply via Proof-of-Work."""
+    cdef Transaction tx = Transaction(
+        TT_PMC_MINT, account, "", Amount(amount), Amount(fee), sequence,
+    )
+    tx.flags = {"coin_id": coin_id, "nonce": nonce, "amount": amount}
+    return tx
+
+cpdef object create_pmc_transfer(str account, str destination, str coin_id,
+                                 double amount, str memo="",
+                                 double fee=0.00001, long long sequence=0):
+    """Transfer PMC tokens between accounts."""
+    cdef Transaction tx = Transaction(
+        TT_PMC_TRANSFER, account, destination,
+        Amount(amount), Amount(fee), sequence, memo,
+    )
+    tx.flags = {"coin_id": coin_id, "amount": amount}
+    return tx
+
+cpdef object create_pmc_burn(str account, str coin_id, double amount,
+                             double fee=0.00001, long long sequence=0):
+    """Burn PMC tokens."""
+    cdef Transaction tx = Transaction(
+        TT_PMC_BURN, account, "", Amount(amount), Amount(fee), sequence,
+    )
+    tx.flags = {"coin_id": coin_id, "amount": amount}
+    return tx
+
+cpdef object create_pmc_set_rules(str account, str coin_id, list rules,
+                                  double fee=0.00001, long long sequence=0):
+    """Update programmable rules on a coin (issuer only)."""
+    cdef Transaction tx = Transaction(
+        TT_PMC_SET_RULES, account, "", Amount(0.0), Amount(fee), sequence,
+    )
+    tx.flags = {"coin_id": coin_id, "rules": rules}
+    return tx
+
+cpdef object create_pmc_offer_create(str account, str coin_id,
+                                     bint is_sell, double amount, double price,
+                                     str counter_coin_id="",
+                                     str destination="",
+                                     double expiration=0.0,
+                                     double fee=0.00001, long long sequence=0):
+    """Post a buy/sell offer on the PMC DEX."""
+    cdef Transaction tx = Transaction(
+        TT_PMC_OFFER_CREATE, account, "", Amount(amount), Amount(fee), sequence,
+    )
+    tx.flags = {
+        "coin_id": coin_id,
+        "is_sell": is_sell,
+        "amount": amount,
+        "price": price,
+        "counter_coin_id": counter_coin_id,
+        "destination": destination,
+        "expiration": expiration,
+    }
+    return tx
+
+cpdef object create_pmc_offer_accept(str account, str offer_id,
+                                     double fill_amount=0.0,
+                                     double fee=0.00001, long long sequence=0):
+    """Accept (fill) an existing PMC DEX offer."""
+    cdef Transaction tx = Transaction(
+        TT_PMC_OFFER_ACCEPT, account, "", Amount(0.0), Amount(fee), sequence,
+    )
+    flags_d = {"offer_id": offer_id}
+    if fill_amount > 0:
+        flags_d["fill_amount"] = fill_amount
+    tx.flags = flags_d
+    return tx
+
+cpdef object create_pmc_offer_cancel(str account, str offer_id,
+                                     double fee=0.00001, long long sequence=0):
+    """Cancel an open PMC DEX offer."""
+    cdef Transaction tx = Transaction(
+        TT_PMC_OFFER_CANCEL, account, "", Amount(0.0), Amount(fee), sequence,
+    )
+    tx.flags = {"offer_id": offer_id}
     return tx
 
 

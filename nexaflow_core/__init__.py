@@ -35,6 +35,7 @@ __all__ = [
     "order_book",
     "payment_channel",
     "payment_path",
+    "pmc",
     "precision",
     "privacy",
     "reporting",
