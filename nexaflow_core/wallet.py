@@ -575,6 +575,11 @@ class Wallet:
         if version >= 3:
             # v3 — AES-256-GCM with unique nonces per field
             iterations = data.get("kdf_iterations", 600_000)
+            if iterations < 100_000:
+                raise ValueError(
+                    f"v3 wallet kdf_iterations ({iterations}) below minimum 100000 — "
+                    "possible downgrade attack"
+                )
             key = hashlib.pbkdf2_hmac("sha256", passphrase.encode("utf-8"), salt, iterations)
             nonce = bytes.fromhex(data["nonce"])
             tag = bytes.fromhex(data["tag"])
@@ -608,6 +613,11 @@ class Wallet:
             )
             iv = bytes.fromhex(data["iv"])
             iterations = data.get("kdf_iterations", 100_000)
+            if iterations < 100_000:
+                raise ValueError(
+                    f"v2 wallet kdf_iterations ({iterations}) below minimum 100000 — "
+                    "possible downgrade attack"
+                )
             key = hashlib.pbkdf2_hmac("sha256", passphrase.encode("utf-8"), salt, iterations)
             priv = cls._legacy_ctr_encrypt(key, iv, enc_priv)  # CTR is symmetric
             view_priv = None

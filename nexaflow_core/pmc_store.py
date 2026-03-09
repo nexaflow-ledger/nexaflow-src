@@ -485,6 +485,12 @@ class PMCStore:
         Uses a single LMDB write transaction for atomicity — the import
         either fully succeeds or fully rolls back.
         """
+        # Validate data size to prevent memory exhaustion
+        import sys
+        estimated_size = sys.getsizeof(data)
+        if estimated_size > 500 * 1024 * 1024:  # 500 MiB safety cap
+            raise ValueError("Import data too large")
+
         ops: list[tuple[bytes, str | bytes, Any | None]] = []
 
         # Coins

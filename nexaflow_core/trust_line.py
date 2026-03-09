@@ -28,8 +28,13 @@ class TrustGraph:
         """Scan the ledger and populate the trust graph."""
         self._forward.clear()
         self._reverse.clear()
+        seen_edges: set[tuple[str, str, str]] = set()  # cycle/duplicate detection
         for address, acc in ledger.accounts.items():
             for (currency, issuer), tl in acc.trust_lines.items():
+                edge_key = (address, issuer, currency)
+                if edge_key in seen_edges:
+                    continue
+                seen_edges.add(edge_key)
                 fwd = self._forward.setdefault(address, [])
                 fwd.append((issuer, currency, tl.limit, tl.balance))
                 rev = self._reverse.setdefault(issuer, [])

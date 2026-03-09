@@ -74,6 +74,8 @@ class DirectoryNode:
     def count(self) -> int:
         return len(self.entries)
 
+    MAX_PAGES = 1000  # prevent unbounded page chain growth
+
     def add(self, entry: DirectoryEntry) -> "DirectoryNode":
         """
         Add an entry.  If this page is full, creates/uses the next
@@ -81,6 +83,10 @@ class DirectoryNode:
         """
         if self.is_full:
             if self.next_page is None:
+                if self.page_index + 1 >= self.MAX_PAGES:
+                    raise ValueError(
+                        f"Directory {self.directory_id} exceeded maximum page count ({self.MAX_PAGES})"
+                    )
                 self.next_page = DirectoryNode(
                     self.directory_id, self.page_index + 1
                 )

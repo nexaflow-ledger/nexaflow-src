@@ -601,14 +601,14 @@ def estimate_hashrate_to_difficulty(difficulty: int) -> float:
 
 
 def compute_block_reward(base_reward: float, difficulty: int) -> float:
-    """Reward = base_reward * 2^(difficulty - 1).
+    """Reward = base_reward * 2^(difficulty - 1), capped at MAX_BASE_REWARD.
 
     Higher difficulty exponentially increases the reward, reflecting
-    the greater computational work required.  This makes the coin
-    creator's difficulty choice the primary economic lever — a coin
-    with difficulty 8 pays 128× the base reward per solve.
+    the greater computational work required.  The cap prevents overflow
+    at extreme difficulties.
     """
-    return base_reward * (2 ** (difficulty - 1))
+    raw = base_reward * (2 ** (difficulty - 1))
+    return min(raw, MAX_BASE_REWARD)
 
 
 # ═══════════════════════════════════════════════════════════════════════

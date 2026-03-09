@@ -77,13 +77,15 @@ class FeeEscalation:
         """
         Compute the current open-ledger fee.
         If txn count is below target, returns base_fee.
-        Otherwise, escalates quadratically.
+        Otherwise, escalates quadratically, capped at 1000x base_fee.
         """
         if self._current_ledger_count <= self.target_txn_count:
             return self.base_fee
 
         ratio = self._current_ledger_count / self.target_txn_count
-        return self.base_fee * (ratio ** 2) * self.escalation_multiplier
+        escalated = self.base_fee * (ratio ** 2) * self.escalation_multiplier
+        # Cap to prevent absurd fees
+        return min(escalated, self.base_fee * 1000)
 
     def minimum_fee(self) -> float:
         """Minimum fee to enter the queue (not necessarily the open ledger)."""
@@ -117,8 +119,8 @@ class FeeEscalation:
         # Try to queue
         if self.queue_size >= self.max_queue_size:
             # Check if this txn's fee is higher than the lowest in queue
-            if self._queue and fee > -self._queue[-1].priority:
-                # Evict lowest
+            if self._queue and fee > -self._queue[0].priority:
+                # Evict lowest (heap root is lowest priority = highest negated fee = lowest actual fee)
                 heapq.heappop(self._queue)
             else:
                 return "rejected", "Queue full and fee too low"

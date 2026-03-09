@@ -458,7 +458,13 @@ cdef class Transaction:
         self.sequence = sequence
         self.signing_pub_key = b""
         self.signature = b""
-        self.tx_id = hashlib.sha256(os.urandom(32)).hexdigest()
+        self.tx_id = hashlib.sha256(
+            struct.pack(">I", tx_type)
+            + account.encode("utf-8")
+            + destination.encode("utf-8")
+            + os.urandom(16)
+            + struct.pack(">q", sequence)
+        ).hexdigest()
         self.timestamp = <long long>c_time(NULL)
         self.memo = memo
         self.result_code = -1
@@ -486,17 +492,18 @@ cdef class Transaction:
     cpdef bytes serialize_for_signing(self):
         """
         Produce a deterministic binary blob for signature hashing.
-        The blob layout:
-          [4 byte tx_type][account utf8][destination utf8]
-          [amount bytes][fee bytes]
-          [8 byte sequence][8 byte timestamp]
-          [optional: limit / offer fields]
-          [memo utf8]
+        All variable-length fields are length-prefixed to prevent
+        preimage collision attacks.
         """
         cdef bytearray buf = bytearray()
         buf.extend(struct.pack(">I", self.tx_type))
-        buf.extend(self.account.encode("utf-8"))
-        buf.extend(self.destination.encode("utf-8"))
+        # Length-prefix all variable-length string fields
+        cdef bytes _acct = self.account.encode("utf-8")
+        buf.extend(struct.pack(">H", len(_acct)))
+        buf.extend(_acct)
+        cdef bytes _dest = self.destination.encode("utf-8")
+        buf.extend(struct.pack(">H", len(_dest)))
+        buf.extend(_dest)
         buf.extend((<Amount>self.amount).serialize())
         buf.extend((<Amount>self.fee).serialize())
         buf.extend(struct.pack(">q", self.sequence))
@@ -518,11 +525,17 @@ cdef class Transaction:
         if self.ticket_sequence != 0:
             buf.extend(struct.pack(">q", self.ticket_sequence))
         if self.account_txn_id:
-            buf.extend(self.account_txn_id.encode("utf-8"))
-        buf.extend(self.memo.encode("utf-8"))
+            _atid = self.account_txn_id.encode("utf-8")
+            buf.extend(struct.pack(">H", len(_atid)))
+            buf.extend(_atid)
+        cdef bytes _memo = self.memo.encode("utf-8")
+        buf.extend(struct.pack(">H", len(_memo)))
+        buf.extend(_memo)
         if self.memos:
             import json as _json2
-            buf.extend(_json2.dumps(self.memos, sort_keys=True).encode("utf-8"))
+            _memos_b = _json2.dumps(self.memos, sort_keys=True).encode("utf-8")
+            buf.extend(struct.pack(">H", len(_memos_b)))
+            buf.extend(_memos_b)
         # Include privacy fields in signing preimage.
         # NOTE: ring_signature is intentionally excluded — a signature must
         # never be part of its own signing preimage.
@@ -530,6 +543,10 @@ cdef class Transaction:
             buf.extend(self.commitment)
         if self.stealth_address:
             buf.extend(self.stealth_address)
+        if self.ephemeral_pub:
+            buf.extend(self.ephemeral_pub)
+        if self.view_tag:
+            buf.extend(self.view_tag)
         if self.range_proof:
             buf.extend(self.range_proof)
         if self.key_image:

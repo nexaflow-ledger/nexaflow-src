@@ -201,6 +201,12 @@ class NFTokenManager:
             # Acceptor is the buyer — must not be the seller
             if acceptor == offer.owner:
                 return offer, "Cannot accept own offer"
+            # Enforce transfer fee: buyer pays fee to issuer
+            # (NXF deduction happens at the ledger layer; record fee here)
+            fee_amount = 0.0
+            if token.transfer_fee > 0 and token.issuer != offer.owner:
+                fee_amount = offer.amount * token.transfer_fee / 50000.0
+            offer._transfer_fee_charged = fee_amount
             # Transfer token
             token.owner = acceptor
         else:

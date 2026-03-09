@@ -27,6 +27,7 @@ class Account:
         self.wallet = wallet
         self.address: str = wallet.address
         self.tx_history: list[Transaction] = []
+        self._max_history = 10_000  # prevent unbounded memory growth
 
     @classmethod
     def create(cls) -> Account:
@@ -62,6 +63,8 @@ class Account:
         )
         self.wallet.sign_transaction(tx)
         self.tx_history.append(tx)
+        if len(self.tx_history) > self._max_history:
+            self.tx_history = self.tx_history[-self._max_history:]
         return tx
 
     def set_trust(

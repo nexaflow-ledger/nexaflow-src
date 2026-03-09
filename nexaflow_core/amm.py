@@ -406,6 +406,11 @@ class AMMManager:
             pool.balance1 -= out
             pool.balance2 += fee_amount
 
+        # Verify constant-product invariant was not violated
+        if pool.balance1 * pool.balance2 < pool.invariant * 0.99999:
+            # Revert the swap — this should never happen but guards against logic bugs
+            return False, "Invariant violation detected", 0.0
+
         return True, "Swap executed", out
 
     def vote(self, pool_id: str, account: str,
@@ -506,6 +511,8 @@ class AMMManager:
         pool = self.pools.get(pool_id)
         if pool is None:
             return False, "Pool not found"
+        if account != pool.creator:
+            return False, "Only the pool creator can delete the pool"
         if pool.lp_token_supply > 1e-10:
             return False, "Pool still has liquidity"
         pair_key = pool.pair_key()

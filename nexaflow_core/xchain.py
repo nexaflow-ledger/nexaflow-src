@@ -228,7 +228,7 @@ class XChainManager:
         return True, f"Attestation added ({len(cid.attestations)} total)"
 
     def claim(self, bridge_id: str, claim_id: int,
-              destination: str) -> tuple[bool, str, float]:
+              destination: str, caller: str = "") -> tuple[bool, str, float]:
         """
         Claim assets on the destination chain.
         Returns (ok, msg, amount).
@@ -250,10 +250,17 @@ class XChainManager:
             return False, "No destination set on claim ID", 0.0
         if cid.destination != destination:
             return False, "Destination mismatch", 0.0
+        # Authorization: only the destination (or the original sender) can claim
+        if caller and caller != cid.destination and caller != cid.sender:
+            return False, "Not authorized to claim", 0.0
 
         cid.claimed = True
         bridge = self.bridges[bridge_id]
-        amount = cid.amount - bridge.signal_reward
+        # Signal reward is deducted and tracked separately for witnesses
+        signal_reward = bridge.signal_reward
+        amount = cid.amount - signal_reward
+        # Record signal reward so the ledger can distribute it to attestors
+        cid._signal_reward_total = signal_reward
         return True, "Claimed", max(0, amount)
 
     def account_create_commit(self, bridge_id: str, sender: str,

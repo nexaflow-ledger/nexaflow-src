@@ -231,11 +231,12 @@ class SHAMap:
 
     def insert(self, key: bytes, data: bytes, object_type: int = 0) -> None:
         """Insert or update a leaf."""
+        MAX_TRIE_DEPTH = 64  # prevent pathological deep trie from hash collisions
         nibbles = _key_to_nibbles(key)
         node = self.root
         parents: list[SHAMapInner] = [self.root]
 
-        for depth in range(len(nibbles) - 1):
+        for depth in range(min(len(nibbles) - 1, MAX_TRIE_DEPTH)):
             idx = nibbles[depth]
             child = node.children[idx]
             if child is None:

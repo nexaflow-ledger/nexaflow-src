@@ -607,6 +607,18 @@ cdef class Ledger:
                         if credit_amt <= 0:
                             return 129  # tecPARTIAL_PAYMENT
                         tx.delivered_amount = credit_amt
+                        # Recalculate sender debit to match reduced credit
+                        if src != iss:
+                            reduced_amt = credit_amt
+                            if tl_dst.quality_in != 1.0 and tl_dst.quality_in > 0.0:
+                                reduced_amt = credit_amt / tl_dst.quality_in
+                            reduced_effective = reduced_amt
+                            if iss_acc is not None and iss_acc.transfer_rate > 1.0:
+                                reduced_effective = reduced_amt * iss_acc.transfer_rate
+                            if tl_src.quality_out != 1.0 and tl_src.quality_out > 0.0:
+                                reduced_effective = reduced_effective * tl_src.quality_out
+                            # Refund the over-debit
+                            tl_src.balance += (effective_amt - reduced_effective)
                     else:
                         return 101  # tecUNFUNDED — would exceed trust
                 tl_dst.balance += credit_amt
@@ -964,6 +976,7 @@ cdef class Ledger:
         self.invariant_checker.capture(self)
         # Deep-copy affected account state for rollback
         _snapshot_accounts = {}
+        _snapshot_account_addrs = set(self.accounts.keys())
         for _addr, _acc in self.accounts.items():
             _snapshot_accounts[_addr] = (
                 _acc.balance, _acc.sequence, _acc.owner_count,
@@ -983,6 +996,24 @@ cdef class Ledger:
         for _addr, _acc in self.accounts.items():
             if _acc.open_offers:
                 _snapshot_offers[_addr] = list(_acc.open_offers)
+        # Snapshot sub-manager state for complete rollback
+        _snapshot_sub_managers = {
+            'staking': copy.deepcopy(self.staking_pool),
+            'escrow': copy.deepcopy(self.escrow_manager),
+            'channel': copy.deepcopy(self.channel_manager),
+            'check': copy.deepcopy(self.check_manager),
+            'nftoken': copy.deepcopy(self.nftoken_manager),
+            'ticket': copy.deepcopy(self.ticket_manager),
+            'amm': copy.deepcopy(self.amm_manager),
+            'xchain': copy.deepcopy(self.xchain_manager),
+            'hooks': copy.deepcopy(self.hooks_manager),
+            'pmc': copy.deepcopy(self.pmc_manager),
+            'order_book': copy.deepcopy(self.order_book),
+        }
+        # Snapshot confidential payment state
+        _snapshot_spent_key_images = set(self.spent_key_images)
+        _snapshot_applied_tx_ids = set(self.applied_tx_ids)
+        _snapshot_confidential_outputs = dict(self.confidential_outputs)
 
         # ── MetadataBuilder ──
         meta = MetadataBuilder(tx_hash=tx.tx_id or "", tx_index=len(self.pending_txns))
@@ -1145,6 +1176,26 @@ cdef class Ledger:
                     _racc = self.accounts.get(_off_addr)
                     if _racc is not None:
                         _racc.open_offers = _off_list
+                # Remove newly created accounts that were not in the snapshot
+                _new_addrs = set(self.accounts.keys()) - _snapshot_account_addrs
+                for _new_addr in _new_addrs:
+                    del self.accounts[_new_addr]
+                # Restore sub-manager state
+                self.staking_pool = _snapshot_sub_managers['staking']
+                self.escrow_manager = _snapshot_sub_managers['escrow']
+                self.channel_manager = _snapshot_sub_managers['channel']
+                self.check_manager = _snapshot_sub_managers['check']
+                self.nftoken_manager = _snapshot_sub_managers['nftoken']
+                self.ticket_manager = _snapshot_sub_managers['ticket']
+                self.amm_manager = _snapshot_sub_managers['amm']
+                self.xchain_manager = _snapshot_sub_managers['xchain']
+                self.hooks_manager = _snapshot_sub_managers['hooks']
+                self.pmc_manager = _snapshot_sub_managers['pmc']
+                self.order_book = _snapshot_sub_managers['order_book']
+                # Restore confidential payment state
+                self.spent_key_images = _snapshot_spent_key_images
+                self.applied_tx_ids = _snapshot_applied_tx_ids
+                self.confidential_outputs = _snapshot_confidential_outputs
                 result = 128  # tecINVARIANT_FAILED
 
         # ── Build and store metadata ──
@@ -1379,13 +1430,14 @@ cdef class Ledger:
         cdef double fee_val = tx.fee.value
         if src_acc.balance < fee_val:
             return 104  # tecINSUF_FEE
+
+        if tx.sequence != 0 and tx.sequence != src_acc.sequence:
+            return 105  # tecBAD_SEQ
+
         src_acc.balance -= fee_val
         # Burn the fee
         self.total_supply -= fee_val
         self.total_burned += fee_val
-
-        if tx.sequence != 0 and tx.sequence != src_acc.sequence:
-            return 105  # tecBAD_SEQ
 
         # Remove the offer (best-effort, no error if not found)
         offer_id = tx.flags.get("offer_id", "") if tx.flags else ""
@@ -1425,6 +1477,8 @@ cdef class Ledger:
             if taker_acc.balance >= base_amount:
                 taker_acc.balance -= base_amount
                 maker_acc.balance += base_amount
+            else:
+                return  # insufficient NXF balance for base debit — fill not settled
         else:
             # Base is IOU — adjust trust lines with quality + transfer_rate
             base_issuer = getattr(taker_order, 'issuer', '') or ''
@@ -2887,8 +2941,12 @@ cdef class Ledger:
         bridge = self.xchain_manager.bridges.get(bridge_id)
         if not bridge:
             return 123
-        attestations = bridge.get("attestations", {}).get(claim_id, [])
-        min_quorum = bridge.get("min_attestations", 1)
+        claims = self.xchain_manager._claim_ids.get(bridge_id, {})
+        cid = claims.get(claim_id)
+        if cid is None:
+            return 123
+        attestations = cid.attestations
+        min_quorum = self.xchain_manager.min_witnesses
         valid_attestations = [a for a in attestations if a.get("signature")]
         if len(valid_attestations) < min_quorum:
             return 123  # insufficient attestation quorum

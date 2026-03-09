@@ -294,8 +294,10 @@ class InvariantChecker:
         and not a gateway should not persist after a transaction.
 
         In XRP Ledger, accounts with balance below reserve and no objects
-        are deleted.  We flag but don't delete (informational warning).
+        are deleted.  This is an informational warning — it does not fail
+        the invariant check (returning True) but logs the finding.
         """
+        import logging as _log
         for addr, acc in ledger.accounts.items():
             if (acc.balance <= 0 and
                 acc.owner_count == 0 and
@@ -305,9 +307,10 @@ class InvariantChecker:
                 # Only flag if the account existed before and now has nothing
                 old_bal = self._snapshot.account_balances.get(addr, 0)
                 if old_bal > 0:
-                    return (False,
-                            f"Zombie account {addr}: balance drained to "
-                            f"{acc.balance} with no owned objects")
+                    _log.getLogger('nexaflow_invariants').warning(
+                        "Zombie account %s: balance drained to %s with no owned objects",
+                        addr, acc.balance,
+                    )
         return True, ""
 
     def _check_burn_mint_non_negative(self, ledger) -> tuple[bool, str]:

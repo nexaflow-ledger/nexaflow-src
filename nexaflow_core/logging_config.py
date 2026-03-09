@@ -30,12 +30,17 @@ _LOG_BACKUP_COUNT = 5
 class _JSONFormatter(logging.Formatter):
     """Emit each log record as a single JSON object."""
 
+    @staticmethod
+    def _sanitize(msg: str) -> str:
+        """Strip newlines and control characters to prevent log injection."""
+        return msg.replace('\n', '\\n').replace('\r', '\\r').replace('\x1b', '')
+
     def format(self, record: logging.LogRecord) -> str:
         log_obj = {
             "ts": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
             "level": record.levelname,
             "logger": record.name,
-            "msg": record.getMessage(),
+            "msg": self._sanitize(record.getMessage()),
         }
         if record.exc_info and record.exc_info[1]:
             log_obj["exception"] = self.formatException(record.exc_info)
@@ -57,9 +62,10 @@ class _HumanFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         colour = self.COLOURS.get(record.levelname, "")
         ts = datetime.fromtimestamp(record.created).strftime("%H:%M:%S")
+        msg = _JSONFormatter._sanitize(record.getMessage())
         return (
             f"{colour}{ts} [{record.levelname:<7}]{self.RESET} "
-            f"{record.name}: {record.getMessage()}"
+            f"{record.name}: {msg}"
         )
 
 

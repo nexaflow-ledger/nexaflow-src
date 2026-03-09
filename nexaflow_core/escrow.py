@@ -50,9 +50,10 @@ class EscrowEntry:
         if self.condition:
             if not fulfillment:
                 return False, "Condition requires fulfillment"
-            # Verify: SHA-256(fulfillment) == condition
+            # Verify: SHA-256(fulfillment) == condition (timing-safe)
+            import hmac
             computed = hashlib.sha256(fulfillment.encode("utf-8")).hexdigest()
-            if computed != self.condition:
+            if not hmac.compare_digest(computed, self.condition):
                 return False, "Fulfillment does not match condition"
         return True, "OK"
 
@@ -105,6 +106,10 @@ class EscrowManager:
         now: float | None = None,
     ) -> EscrowEntry:
         """Create and store a new escrow."""
+        if escrow_id in self.escrows:
+            raise ValueError(f"Escrow {escrow_id} already exists")
+        if amount <= 0:
+            raise ValueError("Escrow amount must be positive")
         if cancel_after > 0 and finish_after > 0 and finish_after >= cancel_after:
             raise ValueError("finish_after must be before cancel_after")
         entry = EscrowEntry(

@@ -313,6 +313,10 @@ class OrderBook:
             fills.append(fill)
             self._fills.append(fill)
 
+            # Cap fill history to prevent unbounded memory growth
+            if len(self._fills) > 100_000:
+                self._fills = self._fills[-50_000:]
+
             taker.remaining -= fill_qty
             best.remaining -= fill_qty
 

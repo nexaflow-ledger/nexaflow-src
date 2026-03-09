@@ -675,6 +675,10 @@ class StratumServer:
             await self._send_error(writer, msg_id, -1, "Missing submit params")
             return
 
+        if not session.authorized:
+            await self._send_error(writer, msg_id, -1, "Not authorized")
+            return
+
         _worker, job_id, extranonce2, ntime, nonce_hex = params[:5]
 
         accepted, message, minted = self.coordinator.validate_share(

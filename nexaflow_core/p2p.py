@@ -267,6 +267,9 @@ class P2PNode:
         # validators / hubs always maintain connectivity.
         self._reserved_peers: set[str] = set()
         self._reserved_slots: int = 8  # how many slots above MAX_PEERS
+        # Per-IP connection limit to prevent Sybil/resource exhaustion attacks
+        self._per_ip_limit: int = 4
+        self._ip_connections: dict[str, int] = {}  # ip -> count
 
         # Callbacks - set by the node runner
         self.on_transaction: Callable | None = None
@@ -447,6 +450,15 @@ class P2PNode:
             await peer.close()
             return
 
+        # ── Per-IP connection limit ───────────────────────────────
+        ip = peer.remote_addr.rsplit(":", 1)[0] if peer.remote_addr else ""
+        if ip and ip not in self._reserved_peers:
+            ip_count = self._ip_connections.get(ip, 0)
+            if ip_count >= self._per_ip_limit:
+                logger.warning(f"[{self.node_id}] Per-IP limit ({self._per_ip_limit}) reached for {ip}")
+                await peer.close()
+                return
+
         # ── Reject duplicate peer_id ──────────────────────────────
         if claimed_id in self.peers:
             logger.warning(
@@ -474,8 +486,9 @@ class P2PNode:
                     except (BadSignatureError, ValueError, Exception):
                         logger.warning(f"[{self.node_id}] Pubkey challenge failed for {claimed_id}")
                 elif not challenge:
-                    # No challenge was sent (e.g., inbound), store provisionally
-                    self.peer_pubkeys[peer.peer_id] = peer_pub
+                    # No challenge was sent (e.g., inbound) — do NOT store
+                    # unverified pubkeys; wait for challenge-response
+                    logger.info(f"[{self.node_id}] Pubkey from {claimed_id} not stored — no challenge verification")
 
         # Generate a challenge for this peer to prove pubkey ownership
         hello_challenge = os.urandom(32)
@@ -500,6 +513,10 @@ class P2PNode:
         await peer.send("HELLO", hello_payload)
 
         self.peers[peer.peer_id] = peer
+        # Track per-IP connection count
+        _ip = peer.remote_addr.rsplit(":", 1)[0] if peer.remote_addr else ""
+        if _ip:
+            self._ip_connections[_ip] = self._ip_connections.get(_ip, 0) + 1
         logger.info(
             f"[{self.node_id}] Inbound connection from {peer.peer_id} "
             f"({peer.remote_addr})"
@@ -522,6 +539,12 @@ class P2PNode:
         # Peer disconnected
         self.peers.pop(peer.peer_id, None)
         self._peer_msg_rate.pop(peer.peer_id, None)
+        # Decrement per-IP connection count
+        _disc_ip = peer.remote_addr.rsplit(":", 1)[0] if peer.remote_addr else ""
+        if _disc_ip and _disc_ip in self._ip_connections:
+            self._ip_connections[_disc_ip] = max(0, self._ip_connections[_disc_ip] - 1)
+            if self._ip_connections[_disc_ip] == 0:
+                del self._ip_connections[_disc_ip]
         await peer.close()
         logger.info(f"[{self.node_id}] Peer {peer.peer_id} disconnected")
         if self.on_peer_disconnected:

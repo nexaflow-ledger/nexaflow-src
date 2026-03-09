@@ -513,6 +513,12 @@ def deserialize_field(data: bytes, offset: int) -> tuple[str, Any, int]:
         else:
             vl_len = 12481 + ((b0 - 241) << 16) + (data[offset + 1] << 8) + data[offset + 2]
             offset += 3
+        # Bounds check: VL length must not exceed remaining data
+        MAX_VL_LENGTH = 262144  # 256 KiB absolute cap
+        if vl_len > MAX_VL_LENGTH:
+            raise ValueError(f"VL field '{name}' length {vl_len} exceeds maximum {MAX_VL_LENGTH}")
+        if offset + vl_len > len(data):
+            raise ValueError(f"VL field '{name}' length {vl_len} overflows buffer (remaining: {len(data) - offset})")
         val = data[offset:offset + vl_len]
         if tc == STType.ACCOUNT or tc == STType.STRING:
             val = val.decode("utf-8", errors="replace")

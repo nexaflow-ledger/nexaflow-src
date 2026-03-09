@@ -86,6 +86,12 @@ class MultiSignManager:
                 f"Total signer weight ({signer_list.total_weight()}) "
                 f"is less than quorum ({signer_quorum})"
             )
+        # Validate individual signer weights
+        for s in signer_list.signers:
+            if s.weight <= 0:
+                raise ValueError(f"Signer {s.account} weight must be positive")
+            if s.weight > 65535:
+                raise ValueError(f"Signer {s.account} weight exceeds maximum (65535)")
         # Ensure no duplicate signers
         addrs = [s.account for s in signer_list.signers]
         if len(addrs) != len(set(addrs)):

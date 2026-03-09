@@ -113,11 +113,15 @@ class CheckManager:
         amount: float = 0.0,
         deliver_min: float = 0.0,
         now: float | None = None,
+        requester: str = "",
     ) -> tuple[CheckEntry, float, str]:
         """Cash a Check. Returns (entry, cashed_amount, error_msg)."""
         entry = self.checks.get(check_id)
         if entry is None:
             raise KeyError(f"Check {check_id} not found")
+        # Only the destination can cash a check
+        if requester and requester != entry.destination:
+            return entry, 0.0, "Only the check destination can cash this check"
         ok, reason = entry.can_cash(amount, deliver_min, now)
         if not ok:
             return entry, 0.0, reason

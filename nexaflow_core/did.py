@@ -61,6 +61,22 @@ class DIDManager:
         if attestations and len(attestations) > MAX_ATTESTATIONS:
             return False, f"Max {MAX_ATTESTATIONS} attestations", None
 
+        # Validate URI scheme if provided
+        if uri:
+            import re
+            if not re.match(r'^https?://', uri) and not re.match(r'^ipfs://', uri) and not re.match(r'^did:', uri):
+                return False, "URI must use http(s), ipfs, or did scheme", None
+
+        # Validate data is valid hex if provided
+        if data:
+            import re
+            if not re.fullmatch(r'[0-9a-fA-F]*', data):
+                return False, "Data must be hex-encoded", None
+
+        # Validate account format
+        if not account or not account.startswith('r') or len(account) < 10:
+            return False, "Invalid account format", None
+
         existing = self.dids.get(account)
         if existing:
             # Update

@@ -43,6 +43,8 @@ class TicketManager:
         self, account: str, start_sequence: int, count: int,
     ) -> list[Ticket]:
         """Create `count` tickets starting at `start_sequence`."""
+        if count <= 0 or count > 250:
+            raise ValueError("Ticket count must be between 1 and 250")
         created: list[Ticket] = []
         for i in range(count):
             seq = start_sequence + i
@@ -57,13 +59,15 @@ class TicketManager:
             created.append(ticket)
         return created
 
-    def use_ticket(self, ticket_id: str) -> tuple[Ticket | None, str]:
+    def use_ticket(self, ticket_id: str, caller: str = "") -> tuple[Ticket | None, str]:
         """Mark a ticket as used. Returns (ticket, error_msg)."""
         ticket = self.tickets.get(ticket_id)
         if ticket is None:
             return None, "Ticket not found"
         if ticket.used:
             return ticket, "Ticket already used"
+        if caller and caller != ticket.account:
+            return ticket, "Only the ticket owner can use this ticket"
         ticket.used = True
         return ticket, ""
 

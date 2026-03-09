@@ -120,6 +120,9 @@ class ManifestCache:
         if existing is not None:
             if manifest.sequence <= existing.sequence:
                 return False, "Sequence too low"
+            # Guard against sequence overflow / wrap-around
+            if manifest.sequence > existing.sequence + 1000:
+                return False, "Sequence jump too large (possible overflow)"
             existing.revoked = True
 
         self._manifests[key] = manifest

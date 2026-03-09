@@ -97,6 +97,18 @@ class OracleManager:
         if prices and len(prices) > MAX_PRICE_ENTRIES:
             return False, f"Max {MAX_PRICE_ENTRIES} price entries per update", None
 
+        # Validate price values — reject NaN, Inf, and negative prices
+        if prices:
+            import math as _math
+            for p in prices:
+                pv = p.get("price", 0)
+                if not isinstance(pv, (int, float)):
+                    return False, "Price must be a number", None
+                if _math.isnan(pv) or _math.isinf(pv):
+                    return False, "Price cannot be NaN or Inf", None
+                if pv < 0:
+                    return False, "Price cannot be negative", None
+
         existing = self.oracles.get(oid)
 
         if existing is None:
@@ -194,6 +206,15 @@ class OracleManager:
 
         if not values:
             return None
+
+        # Require a minimum number of oracle sources for reliable aggregation
+        if len(values) < 3:
+            return {
+                "base_asset": base_asset,
+                "quote_asset": quote_asset,
+                "error": f"Insufficient oracle sources ({len(values)}), need at least 3",
+                "count": len(values),
+            }
 
         values.sort()
         # Trim outliers

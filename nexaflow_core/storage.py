@@ -26,8 +26,14 @@ class LedgerStore:
     """Thin SQLite wrapper for persisting ledger state."""
 
     def __init__(self, db_path: str = "data/nexaflow.db"):
-        self.db_path = db_path
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        # Path traversal protection: resolve and ensure db_path is within
+        # the expected data directory (no ../ escape)
+        resolved = Path(db_path).resolve()
+        allowed_root = Path("data").resolve()
+        if not str(resolved).startswith(str(allowed_root) + "/") and resolved != allowed_root:
+            raise ValueError(f"db_path must be within the data/ directory, got: {db_path}")
+        self.db_path = str(resolved)
+        resolved.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(db_path)
         self._conn.row_factory = sqlite3.Row
         # S2 — busy_timeout prevents "database is locked" under contention

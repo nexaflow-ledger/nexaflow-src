@@ -199,19 +199,22 @@ class PaymentChannelManager:
         self.channels[channel_id] = ch
         return ch
 
-    def fund_channel(self, channel_id: str, additional: float) -> PaymentChannel:
+    def fund_channel(self, channel_id: str, additional: float,
+                     requester: str = "") -> PaymentChannel:
         """Add more NXF to an existing channel."""
         ch = self.channels.get(channel_id)
         if ch is None:
             raise KeyError(f"Channel {channel_id} not found")
         if ch.closed:
             raise ValueError("Cannot fund a closed channel")
+        if requester and requester != ch.account:
+            raise ValueError("Only the channel creator can fund the channel")
         ch.amount += additional
         return ch
 
     def claim(
         self, channel_id: str, new_balance: float, now: float | None = None,
-        signature: str = "", public_key: str = "",
+        signature: str = "", public_key: str = ",",
     ) -> tuple[PaymentChannel, float, str]:
         """Process a claim. Returns (channel, NXF_paid_out, error_msg).
 
@@ -222,11 +225,12 @@ class PaymentChannelManager:
         if ch is None:
             raise KeyError(f"Channel {channel_id} not found")
         # Verify claim signature — MANDATORY when channel has a public key
+        # Always use the channel's stored public key — never accept caller override
         if ch.public_key:
             if not signature:
                 return ch, 0.0, "Claim signature required"
             if not verify_claim_signature(
-                channel_id, new_balance, signature, public_key or ch.public_key
+                channel_id, new_balance, signature, ch.public_key
             ):
                 return ch, 0.0, "Invalid claim signature"
         ok, reason = ch.can_claim(new_balance, now)

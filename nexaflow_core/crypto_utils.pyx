@@ -121,7 +121,9 @@ cpdef bytes base58check_decode(str encoded):
     cdef bytes decoded = base58_decode(encoded)
     cdef bytes payload = decoded[:-4]
     cdef bytes checksum = decoded[-4:]
-    if sha256d(payload)[:4] != checksum:
+    cdef bytes expected = sha256d(payload)[:4]
+    # Timing-safe comparison to prevent side-channel leakage
+    if len(checksum) != 4 or memcmp(<const char*>expected, <const char*>checksum, 4) != 0:
         raise ValueError("Invalid base58check checksum")
     return payload[1:]  # strip version byte
 

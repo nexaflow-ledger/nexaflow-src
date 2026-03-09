@@ -415,16 +415,16 @@ cdef class RangeProof:
     def verify(self, bytes commitment, long long value=-1, bytes blinding=None) -> bool:
         """Verify the proof is bound to *commitment* and is well-formed.
 
-        If *value* and *blinding* are provided, fully re-derives the proof
-        and checks a cryptographic match (full verification).  Otherwise
-        performs a weaker binding-only check.
+        Requires *value* and *blinding* for full verification.
+        Without the opening parameters, verification is rejected to
+        prevent forged commitments with negative values.
         """
         if len(self.proof) != 32 or self.proof == b"\x00" * 32:
             return False
         commit_hash = sha256(commitment)
         if self._commitment_hash and self._commitment_hash != commit_hash:
             return False
-        # Full verification when opening is provided
+        # Full verification: always require opening parameters
         if value >= 0 and blinding is not None:
             expected = sha256(
                 blinding
@@ -433,7 +433,8 @@ cdef class RangeProof:
                 + b"NexaFlow/RangeProof/v2"
             )
             return expected == self.proof
-        return True
+        # Without opening params, reject (prevents negative value forgery)
+        return False
 
 
 # ===================================================================
@@ -500,8 +501,12 @@ cpdef object create_confidential_payment(
     # Key image
     ki = KeyImage.generate(sender_priv, sender_pub)
 
-    # Build ring: sender at index 0
-    ring = [sender_pub] + [p for p in decoy_pubs if p != sender_pub]
+    # Build ring: place sender at a random index for privacy
+    import random as _rng
+    decoys = [p for p in decoy_pubs if p != sender_pub]
+    ring = decoys + [sender_pub]
+    _rng.shuffle(ring)
+    signer_idx = ring.index(sender_pub)
 
     # Stealth address for recipient
     stealth, _shared_secret = StealthAddress.generate(
@@ -532,7 +537,7 @@ cpdef object create_confidential_payment(
     tx.key_image       = ki.image
 
     # Ring signature over tx signing hash (ring_sig excluded from preimage by design)
-    ring_sig          = RingSignature.sign(tx.hash_for_signing(), sender_priv, ring, 0)
+    ring_sig          = RingSignature.sign(tx.hash_for_signing(), sender_priv, ring, signer_idx)
     tx.ring_signature = ring_sig.sig
 
     # tx_id: blake2b of the full serialized blob + ring_signature

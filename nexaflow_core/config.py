@@ -233,12 +233,18 @@ def load_config(path: str | None = None) -> NexaFlowConfig:
     if v := os.environ.get("NEXAFLOW_CORS_ORIGINS"):
         cfg.api.cors_origins = [o.strip() for o in v.split(",") if o.strip()]
 
-    # D2 — Warn when API is enabled but no key is set
+    # D2 — Warn when API is enabled but no key is set, enforce minimum length
     if cfg.api.enabled and not cfg.api.api_key:
         import logging as _log
         _log.getLogger("nexaflow_config").warning(
             "API is enabled but api_key is empty — "
             "POST endpoints are unprotected!  Set api_key or NEXAFLOW_API_KEY."
+        )
+    elif cfg.api.enabled and len(cfg.api.api_key) < 16:
+        import logging as _log
+        _log.getLogger("nexaflow_config").warning(
+            "API key is shorter than 16 characters — "
+            "use a strong random key for production."
         )
 
     return cfg

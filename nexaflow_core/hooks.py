@@ -295,6 +295,9 @@ class HooksManager:
 
             state = self.state.setdefault(account, {}).setdefault(
                 hook.hook_hash, HookState())
+            # Snapshot state before execution so we can rollback on REJECT/ROLLBACK
+            import copy
+            state_snapshot = copy.deepcopy(state)
             ctx = HookContext(
                 tx_data=tx_data,
                 account=account,
@@ -339,7 +342,11 @@ class HooksManager:
             self.executions.append(execution)
 
             if result in (HookResult.REJECT, HookResult.ROLLBACK):
+                # Rollback any state mutations made during this hook execution
+                self.state[account][hook.hook_hash] = state_snapshot
                 all_accepted = False
+                if result == HookResult.ROLLBACK:
+                    break  # Stop executing further hooks on ROLLBACK
 
         return all_accepted, results
 

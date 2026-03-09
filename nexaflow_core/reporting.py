@@ -167,6 +167,8 @@ class ReportingStore:
                                  limit: int = 200,
                                  marker: int = 0) -> list[StoredTransaction]:
         """Return transactions for an account, paginated."""
+        # Cap limit to prevent excessive memory usage
+        limit = min(limit, 1000)
         tx_ids = self._tx_by_account.get(account, [])
         result: list[StoredTransaction] = []
         for tx_id in tx_ids[marker:marker + limit]:

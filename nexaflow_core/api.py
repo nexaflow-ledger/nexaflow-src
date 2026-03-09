@@ -1813,6 +1813,12 @@ class APIServer:
         else:
             raise web.HTTPBadRequest(text="tx_blob or tx_json required")
 
+        # Verify signature before applying — MANDATORY
+        if not tx.signature or not tx.signing_pub_key:
+            raise web.HTTPBadRequest(text="Transaction must be signed (signature and signing_pub_key required)")
+        if not tx.verify_signature():
+            raise web.HTTPBadRequest(text="Invalid transaction signature")
+
         result = self.node.ledger.apply_transaction(tx)
         if result != 0:
             from nexaflow_core.transaction import RESULT_NAMES
@@ -1860,12 +1866,38 @@ class APIServer:
         weight_sum = 0
         for signer in signers:
             signer_account = signer.get("Signer", {}).get("Account", "")
-            for entry in signer_list.entries:
+            for entry in signer_list.signers:
                 if entry.account == signer_account:
                     weight_sum += entry.weight
                     break
-        if weight_sum < signer_list.quorum:
-            raise web.HTTPBadRequest(text=f"Insufficient signer weight: {weight_sum} < {signer_list.quorum}")
+        if weight_sum < signer_list.signer_quorum:
+            raise web.HTTPBadRequest(text=f"Insufficient signer weight: {weight_sum} < {signer_list.signer_quorum}")
+
+        # Verify each signer's cryptographic signature
+        from nexaflow_core.crypto_utils import verify as crypto_verify
+        for signer in signers:
+            signer_data = signer.get("Signer", {})
+            sig_hex = signer_data.get("TxnSignature", "")
+            pub_hex = signer_data.get("SigningPubKey", "")
+            if not sig_hex or not pub_hex:
+                raise web.HTTPBadRequest(text="Each signer must have TxnSignature and SigningPubKey")
+            try:
+                sig_bytes = bytes.fromhex(sig_hex)
+                pub_bytes = bytes.fromhex(pub_hex)
+            except ValueError:
+                raise web.HTTPBadRequest(text="Invalid hex in signer signature or public key")
+            # Build the signing preimage for verification
+            from nexaflow_core.transaction import Transaction as _TxCls, Amount as _AmtCls
+            _verify_tx = _TxCls(
+                tx_type=tx_json.get("TransactionType", 0),
+                account=account,
+                destination=tx_json.get("Destination", ""),
+                amount=_AmtCls(float(amt.get("value", 0)), amt.get("currency", "NXF")),
+                fee=_AmtCls(float(fee.get("value", 0))),
+                sequence=tx_json.get("Sequence", 0),
+            )
+            if not crypto_verify(pub_bytes, _verify_tx.hash_for_signing(), sig_bytes):
+                raise web.HTTPBadRequest(text=f"Invalid signature for signer {signer_data.get('Account', '')}")
 
         # Build and apply the transaction
         from nexaflow_core.transaction import Transaction, Amount
@@ -1915,6 +1947,8 @@ class APIServer:
 
         if not tx_json:
             raise web.HTTPBadRequest(text="tx_json required")
+        if not secret:
+            raise web.HTTPBadRequest(text="secret is required for signing")
 
         from nexaflow_core.transaction import Transaction, Amount
         amt = tx_json.get("Amount", tx_json.get("amount", {}))
@@ -1941,8 +1975,13 @@ class APIServer:
         if tx_json.get("DestinationTag"):
             tx.destination_tag = int(tx_json["DestinationTag"])
 
-        # Sign with node wallet (or provided secret — for now use node wallet)
-        self.node.wallet.sign_transaction(tx)
+        # Sign with the caller's secret key
+        from nexaflow_core.wallet import Wallet
+        try:
+            caller_wallet = Wallet.from_secret(secret)
+        except Exception:
+            raise web.HTTPBadRequest(text="Invalid secret key")
+        caller_wallet.sign_transaction(tx)
 
         tx_dict = tx.to_dict()
         tx_dict["tx_id"] = tx.tx_id
@@ -1967,8 +2006,11 @@ class APIServer:
 
         tx_json = body.get("tx_json", {})
         signer_account = body.get("account", "")
+        secret = body.get("secret", "")
         if not tx_json or not signer_account:
             raise web.HTTPBadRequest(text="tx_json and account required")
+        if not secret:
+            raise web.HTTPBadRequest(text="secret is required for signing")
 
         # Sign the transaction on behalf of signer_account
         from nexaflow_core.transaction import Transaction, Amount
@@ -1987,7 +2029,13 @@ class APIServer:
             sequence=tx_json.get("Sequence", 0),
         )
 
-        self.node.wallet.sign_transaction(tx)
+        # Sign with the signer's secret key
+        from nexaflow_core.wallet import Wallet
+        try:
+            signer_wallet = Wallet.from_secret(secret)
+        except Exception:
+            raise web.HTTPBadRequest(text="Invalid secret key")
+        signer_wallet.sign_transaction(tx)
         signer_entry = {
             "Signer": {
                 "Account": signer_account,

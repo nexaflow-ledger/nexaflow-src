@@ -217,6 +217,8 @@ class MPTManager:
             return False, "Holder not opted in"
         if (iss.flags & MPT_REQUIRE_AUTH) and not h.authorized:
             return False, "Holder not authorized"
+        if h.frozen:
+            return False, "Holder is frozen — cannot mint to frozen account"
 
         h.balance += amount
         iss.outstanding += amount
@@ -268,13 +270,16 @@ class MPTManager:
         return True, "Transferred", fee
 
     def burn(self, issuance_id: str, account: str,
-             amount: float) -> tuple[bool, str]:
+             amount: float, caller: str = "") -> tuple[bool, str]:
         """Burn (redeem) tokens from a holder."""
         iss = self.issuances.get(issuance_id)
         if iss is None:
             return False, "Issuance not found"
         if amount <= 0:
             return False, "Amount must be positive"
+        # Only the holder themselves or the issuer can burn
+        if caller and caller != account and caller != iss.issuer:
+            return False, "Only the holder or issuer can burn tokens"
 
         holders = self._holders.setdefault(issuance_id, {})
         h = holders.get(account)

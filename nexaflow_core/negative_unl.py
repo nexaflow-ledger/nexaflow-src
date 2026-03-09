@@ -73,6 +73,15 @@ class NegativeUNL:
         count = self._miss_counts.get(validator_id, 0) + 1
         self._miss_counts[validator_id] = count
 
+        # Prune miss_counts to prevent unbounded growth from forgotten validators
+        MAX_TRACKED_VALIDATORS = 10_000
+        if len(self._miss_counts) > MAX_TRACKED_VALIDATORS:
+            # Keep only validators with non-zero counts and those in entries
+            self._miss_counts = {
+                k: v for k, v in self._miss_counts.items()
+                if v > 0 or k in self.entries
+            }
+
     def check_and_update(self, total_validators: int,
                          ledger_seq: int = 0) -> list[str]:
         """

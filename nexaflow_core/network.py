@@ -65,7 +65,12 @@ class ValidatorNode:
         If provided, at least 80% of UNL validators must have signed.
         """
         # Verify quorum proof when UNL is configured
-        if self.unl and quorum_proof is not None:
+        if self.unl:
+            if quorum_proof is None:
+                logger.warning(
+                    f"[{self.node_id}] Consensus quorum proof required but not provided"
+                )
+                return []
             valid_signers = set(quorum_proof.keys()) & set(self.unl)
             required = max(1, int(len(self.unl) * 0.8))
             if len(valid_signers) < required:
@@ -198,7 +203,8 @@ class Network:
             proposals[node.node_id] = node.create_proposal()
 
         # Step 2-3: Each node runs consensus with all proposals
-        agreed_tx_ids: set[str] | None = None
+        # Aggregate results across all nodes — require supermajority agreement
+        all_results: list[set[str]] = []
 
         for node in node_list:
             engine = ConsensusEngine(
@@ -212,11 +218,22 @@ class Network:
                     engine.add_proposal(prop)
 
             result = engine.run_rounds()
-            if result is not None and agreed_tx_ids is None:
-                # Use the first successful consensus result
-                agreed_tx_ids = result.agreed_tx_ids
+            if result is not None:
+                all_results.append(result.agreed_tx_ids)
 
-        if agreed_tx_ids is None:
+        if not all_results:
+            return {"status": "no_consensus", "agreed": 0}
+
+        # Only include tx_ids that a supermajority (>80%) of nodes agreed on
+        from collections import Counter
+        tx_counts: Counter = Counter()
+        for result_set in all_results:
+            for tx_id in result_set:
+                tx_counts[tx_id] += 1
+        threshold = max(1, int(len(all_results) * 0.8))
+        agreed_tx_ids = {tx_id for tx_id, count in tx_counts.items() if count >= threshold}
+
+        if not agreed_tx_ids:
             return {"status": "no_consensus", "agreed": 0}
 
         # Step 4: All nodes apply the agreed transactions

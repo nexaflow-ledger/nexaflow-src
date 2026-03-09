@@ -132,15 +132,15 @@ def effective_apy(
 # ── Penalty helpers ─────────────────────────────────────────────────────
 
 def _interest_penalty_rate(tier_apy: float) -> float:
-    """Interest penalty rate scaled by tier APY (0.50 … 0.90)."""
+    """Interest penalty rate scaled by tier APY (0.50 … 0.90), capped at 1.0."""
     ratio = tier_apy / MAX_BASE_APY if MAX_BASE_APY > 0 else 0.0
-    return BASE_INTEREST_PENALTY + ratio * INTEREST_PENALTY_SCALE
+    return min(1.0, BASE_INTEREST_PENALTY + ratio * INTEREST_PENALTY_SCALE)
 
 
 def _principal_penalty_rate(tier_apy: float) -> float:
-    """Principal penalty rate scaled by tier APY (0.02 … 0.10)."""
+    """Principal penalty rate scaled by tier APY (0.02 … 0.10), capped at 1.0."""
     ratio = tier_apy / MAX_BASE_APY if MAX_BASE_APY > 0 else 0.0
-    return BASE_PRINCIPAL_PENALTY + ratio * PRINCIPAL_PENALTY_SCALE
+    return min(1.0, BASE_PRINCIPAL_PENALTY + ratio * PRINCIPAL_PENALTY_SCALE)
 
 
 def _time_decay(elapsed: float, lock_duration: float) -> float:

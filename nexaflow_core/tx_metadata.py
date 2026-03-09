@@ -84,6 +84,13 @@ class TransactionMetadata:
     delivered_amount: float | None = None
     timestamp: float = field(default_factory=time.time)
 
+    MAX_AFFECTED_NODES = 5000  # prevent unbounded growth
+
+    def add_affected_node(self, node: AffectedNode) -> None:
+        """Add an affected node, enforcing cap."""
+        if len(self.affected_nodes) < self.MAX_AFFECTED_NODES:
+            self.affected_nodes.append(node)
+
     def to_dict(self) -> dict:
         d = {
             "tx_hash": self.tx_hash,
