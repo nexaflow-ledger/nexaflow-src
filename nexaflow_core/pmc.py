@@ -1355,7 +1355,7 @@ class PMCManager:
         # Verify Proof-of-Work (Bitcoin-style double-SHA256)
         # The tx_root is now part of the hash input — PoW is bound to
         # the exact set of transactions the miner is validating.
-        prev_hash = self._last_pow_hash.get(coin_id, coin_id)
+        prev_hash = self._last_pow_hash.get(coin_id, "")
         if not verify_pow(coin_id, miner, nonce, coin.pow_difficulty,
                           prev_hash, tx_root):
             return False, "Invalid Proof-of-Work", 0.0

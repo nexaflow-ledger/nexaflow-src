@@ -40,7 +40,7 @@ from nexaflow_core.mpt import MPTManager
 from nexaflow_core.credentials import CredentialManager
 from nexaflow_core.xchain import XChainManager
 from nexaflow_core.hooks import HooksManager, HookOn
-from nexaflow_core.pmc import PMCManager, RuleViolation
+from nexaflow_core.pmc import PMCManager, RuleViolation, EMPTY_TX_ROOT
 from nexaflow_core.invariants import InvariantChecker
 from nexaflow_core.tx_metadata import MetadataBuilder
 from nexaflow_core.order_book import OrderBook
@@ -3098,7 +3098,7 @@ cdef class Ledger:
         committed_tx_hashes = flags_d.get("committed_tx_hashes", None)
         ok, msg, minted = self.pmc_manager.mint(
             coin_id=coin_id, miner=src, nonce=nonce,
-            tx_root=tx_root if tx_root else "",
+            tx_root=tx_root if tx_root else EMPTY_TX_ROOT,
             committed_tx_hashes=committed_tx_hashes,
         )
         if not ok:
