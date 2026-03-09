@@ -236,6 +236,13 @@ class Network:
         if not agreed_tx_ids:
             return {"status": "no_consensus", "agreed": 0}
 
+        # Build quorum proof from nodes that participated in consensus
+        quorum_proof: dict[str, str] = {}
+        for node in node_list:
+            prop = proposals.get(node.node_id)
+            if prop is not None:
+                quorum_proof[node.node_id] = prop.compute_hash()
+
         # Step 4: All nodes apply the agreed transactions
         total_applied = 0
         for node in node_list:
@@ -248,7 +255,7 @@ class Network:
                             node.tx_pool[tx_id] = other.tx_pool[tx_id]
                             break
 
-            applied = node.apply_consensus_result(agreed_tx_ids)
+            applied = node.apply_consensus_result(agreed_tx_ids, quorum_proof=quorum_proof)
             total_applied = max(total_applied, len(applied))
 
         return {

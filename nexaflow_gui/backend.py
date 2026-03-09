@@ -109,6 +109,11 @@ class NodeBackend(QObject):
         self._p2p_timer.setInterval(1000)
         self._p2p_timer.timeout.connect(self._emit_p2p_status)
 
+        # Automatic consensus timer (10 s)
+        self._consensus_timer = QTimer(self)
+        self._consensus_timer.setInterval(10000)
+        self._consensus_timer.timeout.connect(self._auto_consensus)
+
         self._log(f"Backend initialised with {len(self._validators)} validator(s): {', '.join(self._validators)}")
     def _build_validator_list(self) -> list[str]:
         """Derive the validator set from config: this node + one per peer."""
@@ -128,6 +133,7 @@ class NodeBackend(QObject):
     def start(self) -> None:
         self._poll_timer.start()
         self._p2p_timer.start()
+        self._consensus_timer.start()
         self._emit_status()
         self._emit_p2p_status()
         self._log("Node network started")
@@ -135,6 +141,7 @@ class NodeBackend(QObject):
     def stop(self) -> None:
         self._poll_timer.stop()
         self._p2p_timer.stop()
+        self._consensus_timer.stop()
         self._log("Node network stopped")
 
     # ── Wallet operations ───────────────────────────────────────────────
@@ -1359,6 +1366,12 @@ class NodeBackend(QObject):
         """Push a P2P status snapshot every second."""
         with contextlib.suppress(Exception):
             self.p2p_status_updated.emit(self.get_p2p_status())
+
+    def _auto_consensus(self) -> None:
+        """Periodic consensus round — only runs when transactions are pending."""
+        pending = any(node.tx_pool for node in self.network.nodes.values())
+        if pending:
+            self.run_consensus()
 
     def _log(self, msg: str) -> None:
         logger.info(msg)
