@@ -166,6 +166,9 @@ class XChainManager:
             return False, "Claim ID not found"
         if cid.committed:
             return False, "Already committed"
+        # Only the claim ID creator can commit against it
+        if cid.sender != sender:
+            return False, "Sender not authorized for this claim ID"
 
         cid.committed = True
         cid.amount = amount
@@ -243,7 +246,9 @@ class XChainManager:
                     f"Need {self.min_witnesses} attestations, "
                     f"have {len(cid.attestations)}",
                     0.0)
-        if cid.destination and cid.destination != destination:
+        if not cid.destination:
+            return False, "No destination set on claim ID", 0.0
+        if cid.destination != destination:
             return False, "Destination mismatch", 0.0
 
         cid.claimed = True

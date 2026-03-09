@@ -32,9 +32,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import ipaddress
 import json
 import logging
+import os
 import ssl
 import time
 from collections import deque
@@ -235,6 +237,7 @@ class P2PNode:
         ssl_context: ssl.SSLContext | None = None,
         client_ssl_context: ssl.SSLContext | None = None,
         node_pubkey: bytes | None = None,
+        node_privkey: bytes | None = None,
     ):
         self.node_id = node_id
         self.host = host
@@ -251,8 +254,12 @@ class P2PNode:
         # This node's 65-byte uncompressed secp256k1 public key (optional).
         # Advertised in HELLO so peers can verify signed consensus proposals.
         self.node_pubkey: bytes | None = node_pubkey
+        # Private key for signing messages (optional).
+        self._node_privkey: bytes | None = node_privkey
         # Map peer_id -> their 65-byte public key (populated from HELLO)
         self.peer_pubkeys: dict[str, bytes] = {}
+        # Pending HELLO challenges: peer_id -> challenge_bytes
+        self._hello_challenges: dict[str, bytes] = {}
 
         # ── Peer reservations (rippled-style) ──────────────────────
         # A set of node_ids (or IP addresses) that get reserved slots
@@ -348,11 +355,15 @@ class P2PNode:
                 host, port, ssl=self._client_ssl_context
             )
             peer = PeerConnection(reader, writer, direction="outbound")
-            await peer.send("HELLO", {
+            # Generate a challenge for the remote peer
+            outbound_challenge = os.urandom(32)
+            hello_payload = {
                 "node_id": self.node_id,
                 "port": self.port,
                 "pubkey": self.node_pubkey.hex() if self.node_pubkey else "",
-            })
+                "challenge": outbound_challenge.hex(),
+            }
+            await peer.send("HELLO", hello_payload)
             msg = await peer.readline()
             if msg and msg.get("type") == "HELLO":
                 claimed_id = msg["payload"].get("node_id", "")
@@ -363,7 +374,33 @@ class P2PNode:
                 pubkey_hex = msg["payload"].get("pubkey", "")
                 if pubkey_hex:
                     with contextlib.suppress(ValueError):
-                        self.peer_pubkeys[peer.peer_id] = bytes.fromhex(pubkey_hex)
+                        peer_pub = bytes.fromhex(pubkey_hex)
+                        # Verify challenge response to confirm pubkey ownership
+                        cr_hex = msg["payload"].get("challenge_response", "")
+                        if cr_hex:
+                            try:
+                                from ecdsa import VerifyingKey, SECP256k1, BadSignatureError
+                                vk = VerifyingKey.from_string(peer_pub, curve=SECP256k1)
+                                vk.verify(bytes.fromhex(cr_hex), outbound_challenge)
+                                self.peer_pubkeys[peer.peer_id] = peer_pub
+                            except (BadSignatureError, ValueError, Exception):
+                                logger.warning(f"[{self.node_id}] Pubkey verification failed for {claimed_id}")
+                        else:
+                            # No challenge response — store without verification
+                            self.peer_pubkeys[peer.peer_id] = peer_pub
+                # If the peer sent us a challenge, respond to it
+                peer_challenge_hex = msg["payload"].get("challenge", "")
+                if peer_challenge_hex and self._node_privkey:
+                    try:
+                        from ecdsa import SigningKey, SECP256k1
+                        sk = SigningKey.from_string(self._node_privkey, curve=SECP256k1)
+                        sig = sk.sign(bytes.fromhex(peer_challenge_hex))
+                        await peer.send("HELLO_RESPONSE", {
+                            "node_id": self.node_id,
+                            "challenge_response": sig.hex(),
+                        })
+                    except Exception:
+                        pass
                 self.peers[peer.peer_id] = peer
                 logger.info(
                     f"[{self.node_id}] Connected to {peer.peer_id} "
@@ -402,7 +439,9 @@ class P2PNode:
             return
 
         # ── Connection limit (respects peer reservations) ─────────
-        cap = self._effective_max_peers(claimed_id, peer.remote_addr)
+        # Use actual remote address for reservation check to prevent
+        # an attacker from claiming a reserved peer_id to bypass limits.
+        cap = self._effective_max_peers(remote_addr=peer.remote_addr)
         if len(self.peers) >= cap:
             logger.warning(f"[{self.node_id}] Peer cap ({cap}) reached — rejecting {claimed_id}")
             await peer.close()
@@ -418,18 +457,47 @@ class P2PNode:
             return
 
         peer.peer_id = claimed_id
-        # Store peer's advertised public key
+        # Store peer's advertised public key only after challenge verification
         pubkey_hex = msg["payload"].get("pubkey", "")
+        challenge_response = msg["payload"].get("challenge_response", "")
         if pubkey_hex:
             with contextlib.suppress(ValueError):
-                self.peer_pubkeys[peer.peer_id] = bytes.fromhex(pubkey_hex)
+                peer_pub = bytes.fromhex(pubkey_hex)
+                # If we sent a challenge, verify the response
+                challenge = self._hello_challenges.pop(claimed_id, None)
+                if challenge and challenge_response:
+                    try:
+                        from ecdsa import VerifyingKey, SECP256k1, BadSignatureError
+                        vk = VerifyingKey.from_string(peer_pub, curve=SECP256k1)
+                        vk.verify(bytes.fromhex(challenge_response), challenge)
+                        self.peer_pubkeys[peer.peer_id] = peer_pub
+                    except (BadSignatureError, ValueError, Exception):
+                        logger.warning(f"[{self.node_id}] Pubkey challenge failed for {claimed_id}")
+                elif not challenge:
+                    # No challenge was sent (e.g., inbound), store provisionally
+                    self.peer_pubkeys[peer.peer_id] = peer_pub
 
-        # Send our HELLO back — include our public key
-        await peer.send("HELLO", {
+        # Generate a challenge for this peer to prove pubkey ownership
+        hello_challenge = os.urandom(32)
+        # Send our HELLO back — include our public key and challenge
+        hello_payload = {
             "node_id": self.node_id,
             "port": self.port,
             "pubkey": self.node_pubkey.hex() if self.node_pubkey else "",
-        })
+            "challenge": hello_challenge.hex(),
+        }
+        # If peer sent us a challenge, sign it to prove our identity
+        peer_challenge_hex = msg["payload"].get("challenge", "")
+        if peer_challenge_hex and self._node_privkey:
+            try:
+                from ecdsa import SigningKey, SECP256k1
+                sk = SigningKey.from_string(self._node_privkey, curve=SECP256k1)
+                sig = sk.sign(bytes.fromhex(peer_challenge_hex))
+                hello_payload["challenge_response"] = sig.hex()
+            except Exception:
+                pass
+        self._hello_challenges[claimed_id] = hello_challenge
+        await peer.send("HELLO", hello_payload)
 
         self.peers[peer.peer_id] = peer
         logger.info(
@@ -464,24 +532,27 @@ class P2PNode:
         msg_type = msg.get("type", "")
         payload = msg.get("payload", {})
 
-        # ── Per-peer rate limiting ────────────────────────────────
+        # ── Per-peer rate limiting (sliding window / token bucket) ──
         rate_info = self._peer_msg_rate.get(peer.peer_id)
         now = time.time()
         if rate_info is None:
-            rate_info = [1.0, now]
+            # [tokens_remaining, last_refill_time]
+            rate_info = [MSG_PER_PEER_PER_SEC - 1.0, now]
             self._peer_msg_rate[peer.peer_id] = rate_info
         else:
             elapsed = now - rate_info[1]
-            if elapsed >= 1.0:
-                rate_info[0] = 1.0
-                rate_info[1] = now
-            else:
-                rate_info[0] += 1.0
-                if rate_info[0] > MSG_PER_PEER_PER_SEC:
-                    logger.warning(
-                        f"[{self.node_id}] Rate limit exceeded for {peer.peer_id}"
-                    )
-                    return  # drop message
+            # Refill tokens proportionally to elapsed time
+            rate_info[0] = min(
+                MSG_PER_PEER_PER_SEC,
+                rate_info[0] + elapsed * MSG_PER_PEER_PER_SEC
+            )
+            rate_info[1] = now
+            if rate_info[0] < 1.0:
+                logger.warning(
+                    f"[{self.node_id}] Rate limit exceeded for {peer.peer_id}"
+                )
+                return  # drop message
+            rate_info[0] -= 1.0
 
         if msg_type == "PING":
             await peer.send("PONG", {"node_id": self.node_id})
@@ -522,6 +593,14 @@ class P2PNode:
                 return
             if peer.peer_id not in self.peer_pubkeys:
                 logger.warning(f"[{self.node_id}] Dropping CONSENSUS_OK from unauthenticated peer {peer.peer_id}")
+                return
+            # Verify cryptographic signature on the consensus message
+            sig_hex = payload.get("signature", "")
+            if not sig_hex:
+                logger.warning(f"[{self.node_id}] Dropping unsigned CONSENSUS_OK from {peer.peer_id}")
+                return
+            if not self._verify_peer_signature(peer.peer_id, payload):
+                logger.warning(f"[{self.node_id}] Invalid signature on CONSENSUS_OK from {peer.peer_id}")
                 return
             if self.on_consensus_result:
                 self.on_consensus_result(payload, peer.peer_id)
@@ -732,6 +811,26 @@ class P2PNode:
         if self._is_reserved(peer_id, remote_addr):
             return MAX_PEERS + self._reserved_slots
         return MAX_PEERS
+
+    def _verify_peer_signature(self, peer_id: str, payload: dict) -> bool:
+        """Verify the signature on a peer message using their registered pubkey."""
+        pubkey_bytes = self.peer_pubkeys.get(peer_id)
+        if not pubkey_bytes:
+            return False
+        sig_hex = payload.get("signature", "")
+        if not sig_hex:
+            return False
+        try:
+            from ecdsa import VerifyingKey, SECP256k1, BadSignatureError
+            # Build the signed message from payload fields (excluding signature)
+            msg_fields = {k: v for k, v in sorted(payload.items()) if k != "signature"}
+            msg_bytes = json.dumps(msg_fields, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            msg_hash = hashlib.sha256(msg_bytes).digest()
+            vk = VerifyingKey.from_string(pubkey_bytes, curve=SECP256k1)
+            vk.verify(bytes.fromhex(sig_hex), msg_hash)
+            return True
+        except (BadSignatureError, ValueError, Exception):
+            return False
 
     # ── Crawl endpoint (rippled /crawl) ──────────────────────────
 

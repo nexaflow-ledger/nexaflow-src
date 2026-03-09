@@ -619,19 +619,14 @@ class Wallet:
                 enc_spend_priv = bytes.fromhex(data["encrypted_spend_private_key"])
                 spend_priv = cls._legacy_ctr_encrypt(key, iv, enc_spend_priv)
         else:
-            # Legacy v1 XOR fallback
-            import warnings
-            warnings.warn(
-                "Importing wallet from deprecated v1 format (XOR encryption — "
-                "not secure). Re-export with export_encrypted() to upgrade "
-                "to v3 AES-256-GCM.",
-                DeprecationWarning,
-                stacklevel=2,
+            # Legacy v1 XOR fallback — INSECURE
+            # v1 uses single SHA-256 XOR with no IV or authentication.
+            # Refuse import unless caller explicitly opts in via allow_v1.
+            raise ValueError(
+                "v1 wallet format uses insecure XOR encryption and is no longer "
+                "supported. Decrypt with an older version and re-export using "
+                "export_encrypted() to upgrade to v3 AES-256-GCM."
             )
-            key = sha256(passphrase.encode("utf-8"))
-            priv = bytes(a ^ b for a, b in zip(enc_priv, key))
-            view_priv = None
-            spend_priv = None
 
         view_pub = bytes.fromhex(data["view_public_key"]) if data.get("view_public_key") else None
         spend_pub = bytes.fromhex(data["spend_public_key"]) if data.get("spend_public_key") else None

@@ -360,6 +360,8 @@ class StakingPool:
             now = time.time()
 
         payouts: list[tuple[str, float, float]] = []
+        # Collect mature stakes first, then apply all mutations atomically
+        to_mature: list[tuple[object, float]] = []
         for record in list(self.stakes.values()):
             if record.matured or record.cancelled:
                 continue
@@ -367,16 +369,20 @@ class StakingPool:
                 continue  # Flexible must be manually cancelled
             if now >= record.maturity_time:
                 interest = record.maturity_interest()
-                record.matured = True
-                record.payout_amount = record.amount + interest
-                self.total_staked -= record.amount
-                self.total_interest_paid += interest
-                payouts.append((record.address, record.amount, interest))
+                to_mature.append((record, interest))
+        # Apply all mutations together
+        for record, interest in to_mature:
+            record.matured = True
+            record.payout_amount = record.amount + interest
+            self.total_staked -= record.amount
+            self.total_interest_paid += interest
+            payouts.append((record.address, record.amount, interest))
         return payouts
 
     def cancel_stake(
         self,
         stake_id: str,
+        caller: str | None = None,
         now: float | None = None,
     ) -> tuple[str, float, float, float]:
         """
@@ -392,6 +398,9 @@ class StakingPool:
             raise ValueError(f"Stake {stake_id} already matured")
         if record.cancelled:
             raise ValueError(f"Stake {stake_id} already cancelled")
+        # Only the stake owner can cancel their own stake
+        if caller is not None and record.address != caller:
+            raise ValueError("Only the stake owner can cancel this stake")
 
         payout, interest_forfeited, principal_penalty = \
             record.early_cancel_payout(now)

@@ -1364,6 +1364,12 @@ class PMCManager:
         factor = 10 ** coin.decimals
         reward = math.floor(reward * factor) / factor
 
+        # Final supply cap enforcement after rounding to prevent float drift
+        if coin.max_supply > 0 and coin.total_minted + reward > coin.max_supply:
+            reward = math.floor((coin.max_supply - coin.total_minted) * factor) / factor
+            if reward <= 0:
+                return False, "Max supply reached", 0.0
+
         # Apply mint
         holder.balance += reward
         holder.last_mint_at = now
@@ -1559,6 +1565,10 @@ class PMCManager:
         royalty = math.floor(royalty * factor) / factor
 
         net_amount = amount - royalty
+
+        # Re-check balance after rounding to prevent negative balances
+        if s_holder.balance < amount:
+            return False, "Insufficient balance after rounding", 0.0
 
         # Debit sender
         s_holder.balance -= amount
@@ -1866,37 +1876,54 @@ class PMCManager:
         net_qty = qty - royalty
 
         # ── Execute settlement atomically ──
+        # Save pre-settlement state so we can rollback on failure
+        _pre_s_bal = s_holder.balance
+        _pre_s_last = s_holder.last_transfer_at
+        _pre_r_bal = r_holder.balance
 
-        # 1. Move coins: seller → buyer
-        if offer.is_sell:
-            # Sell offer: tokens already escrowed at create_offer time.
-            # Do NOT deduct again — just credit the buyer.
-            pass
-        else:
-            # Buy offer: seller is the taker, hasn't escrowed tokens.
-            s_holder.balance -= qty
-        s_holder.last_transfer_at = now
-        r_holder.balance += net_qty
-
-        # Royalty to issuer
-        if royalty > 0:
-            issuer_h = self._get_or_create_holder(offer.coin_id, coin.issuer, now)
-            issuer_h.balance += royalty
-
-        # 2. Move payment: buyer → seller
-        if counter_coin_id:
-            if not offer.is_sell and offer.owner == buyer:
-                # Buy offer: buyer already escrowed counter-coin — don't deduct again.
+        try:
+            # 1. Move coins: seller → buyer
+            if offer.is_sell:
+                # Sell offer: tokens already escrowed at create_offer time.
+                # Do NOT deduct again — just credit the buyer.
                 pass
             else:
-                b_counter = self._holders[counter_coin_id][buyer]
-                b_counter.balance -= total_cost
-            s_counter = self._get_or_create_holder(counter_coin_id, seller, now)
-            s_counter.balance += total_cost
-        # If NXF-based, the ledger layer handles NXF balance moves
+                # Buy offer: seller is the taker, hasn't escrowed tokens.
+                s_holder.balance -= qty
+            s_holder.last_transfer_at = now
+            r_holder.balance += net_qty
 
-        # 3. Update offer fill
-        offer.filled += qty
+            # Royalty to issuer
+            _pre_issuer_bal = None
+            if royalty > 0:
+                issuer_h = self._get_or_create_holder(offer.coin_id, coin.issuer, now)
+                _pre_issuer_bal = issuer_h.balance
+                issuer_h.balance += royalty
+
+            # 2. Move payment: buyer → seller
+            if counter_coin_id:
+                if not offer.is_sell and offer.owner == buyer:
+                    # Buy offer: buyer already escrowed counter-coin — don't deduct again.
+                    pass
+                else:
+                    b_counter = self._holders[counter_coin_id][buyer]
+                    if b_counter.balance < total_cost:
+                        raise ValueError("Buyer insufficient counter-coin balance")
+                    b_counter.balance -= total_cost
+                s_counter = self._get_or_create_holder(counter_coin_id, seller, now)
+                s_counter.balance += total_cost
+            # If NXF-based, the ledger layer handles NXF balance moves
+
+            # 3. Update offer fill
+            offer.filled += qty
+        except Exception:
+            # Rollback all mutations
+            s_holder.balance = _pre_s_bal
+            s_holder.last_transfer_at = _pre_s_last
+            r_holder.balance = _pre_r_bal
+            if royalty > 0 and _pre_issuer_bal is not None:
+                issuer_h.balance = _pre_issuer_bal
+            return False, "Settlement failed — rolled back", {}
 
         settlement = {
             "coin_id": offer.coin_id,

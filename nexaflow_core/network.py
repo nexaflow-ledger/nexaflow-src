@@ -11,12 +11,16 @@ This is a local simulation — no actual sockets are used.
 
 from __future__ import annotations
 
+import logging
+
 from nexaflow_core.consensus import ConsensusEngine, Proposal
 from nexaflow_core.ledger import Ledger
 from nexaflow_core.payment_path import PathFinder
 from nexaflow_core.transaction import Transaction
 from nexaflow_core.trust_line import TrustGraph
 from nexaflow_core.validator import TransactionValidator
+
+logger = logging.getLogger("nexaflow_network")
 
 
 class ValidatorNode:
@@ -51,11 +55,25 @@ class ValidatorNode:
         tx_ids = set(self.tx_pool.keys())
         return Proposal(self.node_id, self.ledger.current_sequence, tx_ids)
 
-    def apply_consensus_result(self, agreed_tx_ids: set[str]) -> list[Transaction]:
+    def apply_consensus_result(self, agreed_tx_ids: set[str],
+                               quorum_proof: dict[str, str] | None = None) -> list[Transaction]:
         """
         Apply the agreed transactions to our ledger and close it.
         Returns list of applied transactions.
+
+        quorum_proof: mapping of validator_id -> signature proving agreement.
+        If provided, at least 80% of UNL validators must have signed.
         """
+        # Verify quorum proof when UNL is configured
+        if self.unl and quorum_proof is not None:
+            valid_signers = set(quorum_proof.keys()) & set(self.unl)
+            required = max(1, int(len(self.unl) * 0.8))
+            if len(valid_signers) < required:
+                logger.warning(
+                    f"[{self.node_id}] Consensus quorum not met: "
+                    f"{len(valid_signers)}/{required} required"
+                )
+                return []
         applied: list[Transaction] = []
         for tx_id in agreed_tx_ids:
             tx = self.tx_pool.get(tx_id)

@@ -172,8 +172,8 @@ class InvariantChecker:
         burn_delta = ledger.total_burned - snap.total_burned
         mint_delta = ledger.total_minted - snap.total_minted
         expected_supply = snap.total_supply - burn_delta + mint_delta
-        # Use relative tolerance scaled to supply magnitude
-        tol = max(1e-4, abs(expected_supply) * 1e-12)
+        # Use tight relative tolerance to catch even small supply leaks
+        tol = max(1e-8, abs(expected_supply) * 1e-14)
         if abs(ledger.total_supply - expected_supply) > tol:
             return (False,
                     f"Supply mismatch: expected {expected_supply}, "
@@ -207,8 +207,8 @@ class InvariantChecker:
     def _check_supply_formula(self, ledger) -> tuple[bool, str]:
         """total_supply == initial_supply - total_burned + total_minted."""
         expected = ledger.initial_supply - ledger.total_burned + ledger.total_minted
-        # Use relative tolerance scaled to supply magnitude
-        tol = max(1e-4, abs(expected) * 1e-12)
+        # Use tight relative tolerance to catch supply leaks
+        tol = max(1e-8, abs(expected) * 1e-14)
         if abs(ledger.total_supply - expected) > tol:
             return (False,
                     f"Supply formula violated: {ledger.total_supply} != "
@@ -229,8 +229,13 @@ class InvariantChecker:
                     tl_snap_key = (addr, key)
                     old_tl_bal = old_tl_balances.get(tl_snap_key) if old_tl_balances else None
                     if old_tl_bal is not None and old_tl_bal > tl.limit + 1e-8:
-                        # Pre-existing over-limit — allow (limit was reduced)
-                        continue
+                        # Pre-existing over-limit — allow only if balance did NOT increase
+                        if tl.balance <= old_tl_bal + 1e-8:
+                            continue
+                        return False, (
+                            f"Trust-line over-limit balance increased: {addr} {key} "
+                            f"balance {tl.balance:.8f} > old {old_tl_bal:.8f}"
+                        )
                     return False, (
                         f"Trust-line limit violated: {addr} {key} "
                         f"balance {tl.balance:.8f} > limit {tl.limit:.8f}"
@@ -277,7 +282,7 @@ class InvariantChecker:
         expected_change = -burn_delta + mint_delta
         actual_change = new_system - old_system
 
-        if abs(actual_change - expected_change) > max(1e-4, abs(old_system) * 1e-12):
+        if abs(actual_change - expected_change) > max(1e-8, abs(old_system) * 1e-14):
             return (False,
                     f"NXF creation detected: system total changed by "
                     f"{actual_change} but expected {expected_change}")

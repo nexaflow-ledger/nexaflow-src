@@ -432,6 +432,12 @@ class TransactionValidator:
             return False, TEC_NO_PERMISSION, "Only destination can cash a check"
         if entry.cashed or entry.cancelled:
             return False, TEC_CHECK_EXPIRED, "Check already resolved"
+        # Verify the check issuer can cover the check amount
+        issuer_acc = self.ledger.accounts.get(entry.account)
+        if issuer_acc is None:
+            return False, TEC_UNFUNDED, "Check issuer account not found"
+        if issuer_acc.balance < entry.amount:
+            return False, TEC_UNFUNDED, "Check issuer has insufficient balance"
         return True, TES_SUCCESS, "Valid"
 
     def _validate_check_cancel(self, tx, src_acc, fee_val):

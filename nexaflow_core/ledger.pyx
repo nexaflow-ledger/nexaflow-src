@@ -645,6 +645,8 @@ cdef class Ledger:
         # trust line.
         hops = path.hops
         remaining = min(amt, path.max_amount)
+        total_debited = 0.0
+        total_credited = 0.0
         for i in range(len(hops) - 1):
             sender_addr = hops[i][0]
             receiver_addr = hops[i + 1][0]
@@ -663,6 +665,8 @@ cdef class Ledger:
                         return -1
                 s_acc.balance -= remaining
                 r_acc.balance += remaining
+                total_debited += remaining
+                total_credited += remaining
             else:
                 # IOU leg: adjust trust-line balances
 
@@ -693,6 +697,7 @@ cdef class Ledger:
                         if remaining <= 0:
                             return -1
                     tl_r.balance += credit
+                    total_credited += credit
                 elif receiver_addr == hop_iss:
                     # Sending back to issuer: debit sender's trust line
                     tl_s = self.get_trust_line(sender_addr, hop_cur, hop_iss)
@@ -717,6 +722,7 @@ cdef class Ledger:
                         if remaining <= 0:
                             return -1
                     tl_s.balance -= effective
+                    total_debited += effective
                 else:
                     # Rippling through an intermediary: debit sender's line,
                     # credit receiver's line, both toward hop_iss.
@@ -765,6 +771,13 @@ cdef class Ledger:
                             debit_amt = debit_amt * hop_transfer_rate
                     tl_s.balance -= debit_amt
                     tl_r.balance += credit_amt
+                    total_debited += debit_amt
+                    total_credited += credit_amt
+
+        # Conservation check: total credited must not exceed total debited
+        # (transfer_rate fees are allowed to create a surplus in debits)
+        if total_credited > total_debited + 1e-10:
+            return -1  # conservation violation — abort payment
 
         # Record delivered amount for partial payments
         if remaining < amt:
@@ -788,11 +801,15 @@ cdef class Ledger:
         """
         from nexaflow_core.privacy import RangeProof, verify_ring_signature
 
-        # ── 1. Double-spend check (per tx_id) ────────────────────────────────
+        # ── 1. Double-spend check (key image + tx_id) ──────────────────────
         if not tx.tx_id:
             return 107  # reject empty tx_id — prevents replay
         if tx.tx_id in self.applied_tx_ids:
             return 107  # tecKEY_IMAGE_SPENT — duplicate transaction
+        # Key image must be checked BEFORE any state changes to prevent
+        # double-spend via reused key images across different tx_ids.
+        if tx.key_image and tx.key_image in self.spent_key_images:
+            return 107  # tecKEY_IMAGE_SPENT — key image already consumed
 
         # ── 2. Range proof: value committed is non-negative ───────────────
         if tx.range_proof and tx.commitment:
@@ -1424,6 +1441,8 @@ cdef class Ledger:
                     debit = base_amount * tl_taker.quality_out
                 if base_xfer_rate > 1.0:
                     debit = debit * base_xfer_rate
+                if tl_taker.balance < debit:
+                    return  # insufficient IOU balance for base debit
                 tl_taker.balance -= debit
             if tl_maker is not None:
                 credit = base_amount
@@ -1450,6 +1469,8 @@ cdef class Ledger:
                     debit_c = counter_amount * tl_maker_c.quality_out
                 if ctr_xfer_rate > 1.0:
                     debit_c = debit_c * ctr_xfer_rate
+                if tl_maker_c.balance < debit_c:
+                    return  # insufficient IOU balance for counter debit
                 tl_maker_c.balance -= debit_c
             if tl_taker_c is not None:
                 credit_c = counter_amount
@@ -1548,7 +1569,7 @@ cdef class Ledger:
 
         now_ts = tx.timestamp if tx.timestamp else None
         address, payout, interest_forfeited, principal_penalty = \
-            self.staking_pool.cancel_stake(stake_id, now=now_ts)
+            self.staking_pool.cancel_stake(stake_id, caller=src, now=now_ts)
 
         # Credit payout; burn the principal penalty permanently
         acc.balance += payout
@@ -1681,7 +1702,7 @@ cdef class Ledger:
         escrow_id = tx.flags.get("escrow_id", "")
         fulfillment = tx.flags.get("fulfillment", "")
         try:
-            entry, err = self.escrow_manager.finish_escrow(escrow_id, fulfillment)
+            entry, err = self.escrow_manager.finish_escrow(escrow_id, fulfillment, caller=src)
         except KeyError:
             return 117  # tecNO_ENTRY
         if err:

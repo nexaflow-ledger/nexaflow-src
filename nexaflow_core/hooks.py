@@ -17,6 +17,7 @@ Hook lifecycle:
 from __future__ import annotations
 
 import hashlib
+import signal
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -123,6 +124,7 @@ MAX_HOOKS_PER_ACCOUNT = 4
 MAX_STATE_ENTRIES = 256
 MAX_STATE_KEY_LEN = 32
 MAX_STATE_VALUE_LEN = 256
+HOOK_EXECUTION_TIMEOUT_SECS = 5  # max seconds a hook can run
 
 
 class HookContext:
@@ -163,6 +165,14 @@ class HookContext:
         """Emit a new transaction from the hook."""
         if len(self._emitted) >= 3:  # max 3 emitted txns per hook
             return False
+        # Validate required fields on emitted transactions
+        if not isinstance(tx_dict, dict):
+            return False
+        if "tx_type" not in tx_dict or "account" not in tx_dict:
+            return False
+        # Tag emitted transaction with hook origin for audit
+        tx_dict["_hook_origin"] = self.hook_hash
+        tx_dict["_hook_account"] = self.account
         self._emitted.append(tx_dict)
         return True
 
@@ -295,11 +305,23 @@ class HooksManager:
 
             try:
                 if defn.code is not None:
-                    result = defn.code(ctx)
-                    if not isinstance(result, HookResult):
-                        result = HookResult.ACCEPT
+                    # Execute with timeout to prevent infinite loops
+                    def _timeout_handler(signum, frame):
+                        raise TimeoutError("Hook execution exceeded time limit")
+                    old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
+                    signal.alarm(HOOK_EXECUTION_TIMEOUT_SECS)
+                    try:
+                        result = defn.code(ctx)
+                        if not isinstance(result, HookResult):
+                            result = HookResult.ACCEPT
+                    finally:
+                        signal.alarm(0)
+                        signal.signal(signal.SIGALRM, old_handler)
                 else:
                     result = HookResult.ACCEPT
+            except TimeoutError:
+                result = HookResult.ROLLBACK
+                ctx.return_string = "Hook execution timed out"
             except Exception as e:
                 result = HookResult.ROLLBACK
                 ctx.return_string = str(e)

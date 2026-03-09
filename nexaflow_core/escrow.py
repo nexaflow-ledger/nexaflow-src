@@ -30,7 +30,8 @@ class EscrowEntry:
     finished: bool = False
     cancelled: bool = False
 
-    def can_finish(self, fulfillment: str = "", now: float | None = None) -> tuple[bool, str]:
+    def can_finish(self, fulfillment: str = "", now: float | None = None,
+                   caller: str = "") -> tuple[bool, str]:
         """Check if escrow can be finished. Returns (ok, reason)."""
         if self.finished or self.cancelled:
             return False, "Escrow already resolved"
@@ -40,6 +41,12 @@ class EscrowEntry:
             return False, f"Cannot finish before {self.finish_after}"
         if self.cancel_after > 0 and now >= self.cancel_after:
             return False, "Escrow has expired (past cancel_after)"
+        # Authorization: only the destination or creator can finish.
+        # If a crypto-condition is set, anyone providing the fulfillment
+        # can finish (the condition acts as the authorization).
+        if caller and not self.condition:
+            if caller != self.destination and caller != self.account:
+                return False, "Only destination or creator can finish this escrow"
         if self.condition:
             if not fulfillment:
                 return False, "Condition requires fulfillment"
@@ -115,12 +122,13 @@ class EscrowManager:
 
     def finish_escrow(
         self, escrow_id: str, fulfillment: str = "", now: float | None = None,
+        caller: str = "",
     ) -> tuple[EscrowEntry, str]:
         """Finish an escrow, returning (entry, error_msg). Error empty on success."""
         entry = self.escrows.get(escrow_id)
         if entry is None:
             raise KeyError(f"Escrow {escrow_id} not found")
-        ok, reason = entry.can_finish(fulfillment, now)
+        ok, reason = entry.can_finish(fulfillment, now, caller=caller)
         if not ok:
             return entry, reason
         entry.finished = True

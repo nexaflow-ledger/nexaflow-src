@@ -257,8 +257,11 @@ class AMMManager:
         # Half is "swapped" — apply fee to the swap half
         swap_half = amount / 2
         effective = swap_half * (1 - fee_fraction)
-        # New reserve after deposit
-        new_reserve = reserve + amount
+        # Net amount added to reserve: non-swapped half + effective swapped half
+        # This ensures the fee is properly deducted from the pool reserve,
+        # preventing the depositor from receiving LP tokens for the fee portion.
+        net_deposit = (amount - swap_half) + effective
+        new_reserve = reserve + net_deposit
         # LP minted proportional to sqrt of product increase
         old_k = pool.balance1 * pool.balance2
         if is_asset1:
