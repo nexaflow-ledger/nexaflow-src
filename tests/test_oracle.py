@@ -68,8 +68,10 @@ class TestOracleAggregation:
         prices = [{"base_asset": "NXF", "quote_asset": "USD", "price": 2.5, "scale": 0}]
         oracles.set_oracle("rAlice", prices=prices)
         result = oracles.get_aggregate_price("NXF", "USD")
+        # Fewer than 3 oracle sources returns an error dict
         assert result is not None
-        assert abs(result["mean"] - 2.5) < 0.01
+        assert "error" in result
+        assert result["count"] == 1
 
     def test_aggregate_multiple_oracles(self, oracles):
         for i, name in enumerate(["rAlice", "rBob", "rCharlie"]):

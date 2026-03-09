@@ -163,7 +163,7 @@ class TestCancelStake(unittest.TestCase):
 
     def test_cancel_flexible_no_penalty(self):
         self.pool.record_stake("tx1", "rA", 100.0, 0, 10000.0, self.now)
-        addr, payout, int_forfeited, prin_penalty = self.pool.cancel_stake("tx1", self.now + 1)
+        addr, payout, int_forfeited, prin_penalty = self.pool.cancel_stake("tx1", caller="rA", now=self.now + 1)
         self.assertEqual(addr, "rA")
         # Flexible has zero time_decay → zero penalty
         self.assertAlmostEqual(prin_penalty, 0.0, places=8)
@@ -173,7 +173,7 @@ class TestCancelStake(unittest.TestCase):
     def test_cancel_locked_has_penalty(self):
         self.pool.record_stake("tx1", "rA", 1000.0, 2, 10000.0, self.now)  # 90-day
         # Cancel immediately → maximum penalty
-        _addr, payout, _int_forfeited, prin_penalty = self.pool.cancel_stake("tx1", self.now + 1)
+        _addr, payout, _int_forfeited, prin_penalty = self.pool.cancel_stake("tx1", caller="rA", now=self.now + 1)
         self.assertGreater(prin_penalty, 0.0)
         self.assertLess(payout, 1000.0)
 
@@ -181,7 +181,7 @@ class TestCancelStake(unittest.TestCase):
         # 30-day tier, cancel 29 days in (1 day left)
         self.pool.record_stake("tx1", "rA", 1000.0, 1, 10000.0, self.now)
         cancel_time = self.now + 29 * 86400
-        _addr, _payout, _int_forfeited, prin_penalty = self.pool.cancel_stake("tx1", cancel_time)
+        _addr, _payout, _int_forfeited, prin_penalty = self.pool.cancel_stake("tx1", caller="rA", now=cancel_time)
         # Penalty should be very small (time_decay ≈ 1/30)
         self.assertLess(prin_penalty, 5.0)  # much less than full penalty
 
@@ -198,14 +198,14 @@ class TestCancelStake(unittest.TestCase):
 
     def test_cancel_already_cancelled_raises(self):
         self.pool.record_stake("tx1", "rA", 100.0, 0, 10000.0, self.now)
-        self.pool.cancel_stake("tx1", self.now + 1)
+        self.pool.cancel_stake("tx1", caller="rA", now=self.now + 1)
         with self.assertRaises(ValueError):
-            self.pool.cancel_stake("tx1", self.now + 2)
+            self.pool.cancel_stake("tx1", caller="rA", now=self.now + 2)
 
     def test_total_staked_decreases_on_cancel(self):
         self.pool.record_stake("tx1", "rA", 200.0, 0, 10000.0, self.now)
         self.assertEqual(self.pool.total_staked, 200.0)
-        self.pool.cancel_stake("tx1", self.now + 1)
+        self.pool.cancel_stake("tx1", caller="rA", now=self.now + 1)
         self.assertEqual(self.pool.total_staked, 0.0)
 
 
@@ -392,14 +392,14 @@ class TestPoolQueries(unittest.TestCase):
     def test_get_active_stakes_only_active(self):
         self.pool.record_stake("tx1", "rA", 10.0, 0, 10000.0, self.now)
         self.pool.record_stake("tx2", "rA", 20.0, 0, 10000.0, self.now)
-        self.pool.cancel_stake("tx1", self.now + 1)
+        self.pool.cancel_stake("tx1", caller="rA", now=self.now + 1)
         active = self.pool.get_active_stakes("rA")
         self.assertEqual(len(active), 1)
         self.assertEqual(active[0].stake_id, "tx2")
 
     def test_get_all_stakes_includes_cancelled(self):
         self.pool.record_stake("tx1", "rA", 10.0, 0, 10000.0, self.now)
-        self.pool.cancel_stake("tx1", self.now + 1)
+        self.pool.cancel_stake("tx1", caller="rA", now=self.now + 1)
         all_stakes = self.pool.get_all_stakes("rA")
         self.assertEqual(len(all_stakes), 1)
 

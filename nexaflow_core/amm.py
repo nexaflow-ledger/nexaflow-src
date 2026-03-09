@@ -390,11 +390,9 @@ class AMMManager:
                 return False, "Insufficient liquidity", 0.0
             if out < min_amount_out:
                 return False, f"Slippage: output {out:.8f} < minimum {min_amount_out:.8f}", 0.0
-            # Pool receives amount_after_fee (fee is collected separately)
-            pool.balance1 += amount_after_fee
-            pool.balance2 -= out
-            # Collected fee stays in pool (distributed to LPs via k increase)
-            pool.balance1 += fee_amount
+            # Compute final balances (fee stays in pool for LPs via k increase)
+            final_bal1 = pool.balance1 + amount_after_fee + fee_amount
+            final_bal2 = pool.balance2 - out
         else:
             new_bal2 = pool.balance2 + amount_after_fee
             out = pool.balance1 - (pool.invariant / new_bal2)
@@ -402,14 +400,16 @@ class AMMManager:
                 return False, "Insufficient liquidity", 0.0
             if out < min_amount_out:
                 return False, f"Slippage: output {out:.8f} < minimum {min_amount_out:.8f}", 0.0
-            pool.balance2 += amount_after_fee
-            pool.balance1 -= out
-            pool.balance2 += fee_amount
+            final_bal1 = pool.balance1 - out
+            final_bal2 = pool.balance2 + amount_after_fee + fee_amount
 
-        # Verify constant-product invariant was not violated
-        if pool.balance1 * pool.balance2 < pool.invariant * 0.99999:
-            # Revert the swap — this should never happen but guards against logic bugs
+        # Verify constant-product invariant BEFORE committing state changes
+        if final_bal1 * final_bal2 < pool.invariant * 0.99999:
             return False, "Invariant violation detected", 0.0
+
+        # Commit — state only changes after invariant is verified
+        pool.balance1 = final_bal1
+        pool.balance2 = final_bal2
 
         return True, "Swap executed", out
 

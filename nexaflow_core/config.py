@@ -215,11 +215,17 @@ def load_config(path: str | None = None) -> NexaFlowConfig:
     if v := os.environ.get("NEXAFLOW_HOST"):
         cfg.node.host = v
     if v := os.environ.get("NEXAFLOW_PORT"):
-        cfg.node.port = int(v)
+        try:
+            cfg.node.port = int(v)
+        except ValueError:
+            raise ValueError(f"NEXAFLOW_PORT must be an integer, got '{v}'")
     if v := os.environ.get("NEXAFLOW_PEERS"):
         cfg.node.peers = [p.strip() for p in v.split(",") if p.strip()]
     if v := os.environ.get("NEXAFLOW_API_PORT"):
-        cfg.api.port = int(v)
+        try:
+            cfg.api.port = int(v)
+        except ValueError:
+            raise ValueError(f"NEXAFLOW_API_PORT must be an integer, got '{v}'")
         cfg.api.enabled = True
     if v := os.environ.get("NEXAFLOW_LOG_LEVEL"):
         cfg.logging.level = v.upper()

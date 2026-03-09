@@ -399,7 +399,7 @@ class StakingPool:
         if record.cancelled:
             raise ValueError(f"Stake {stake_id} already cancelled")
         # Only the stake owner can cancel their own stake
-        if caller is not None and record.address != caller:
+        if caller is None or record.address != caller:
             raise ValueError("Only the stake owner can cancel this stake")
 
         payout, interest_forfeited, principal_penalty = \

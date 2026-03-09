@@ -436,7 +436,7 @@ class TransactionValidator:
         issuer_acc = self.ledger.accounts.get(entry.account)
         if issuer_acc is None:
             return False, TEC_UNFUNDED, "Check issuer account not found"
-        if issuer_acc.balance < entry.amount:
+        if issuer_acc.balance < entry.send_max:
             return False, TEC_UNFUNDED, "Check issuer has insufficient balance"
         return True, TES_SUCCESS, "Valid"
 

@@ -232,9 +232,9 @@ class PathFinder:
         if current != destination:
             # Can current send to destination via their trust line?
             credit = self.graph.available_credit(destination, current, currency)
-            if (credit >= amount or current_path) and self.graph.has_trust(destination, current, currency):
+            if credit > 0 and self.graph.has_trust(destination, current, currency):
                     full_path = [*current_path, (current, currency, current), (destination, currency, current)]
-                    max_amt = min(credit, amount) if credit > 0 else amount
+                    max_amt = min(credit, amount)
                     paths.append(
                         PaymentPath(
                             hops=full_path,

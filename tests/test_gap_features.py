@@ -586,7 +586,7 @@ class TestLedgerReplay:
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test_replay.db")
-            store = LedgerStore(db_path)
+            store = LedgerStore(db_path, _allow_any_path=True)
 
             # Save a transaction blob
             tx_blob = json.dumps({
@@ -616,7 +616,7 @@ class TestLedgerReplay:
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test_blobs.db")
-            store = LedgerStore(db_path)
+            store = LedgerStore(db_path, _allow_any_path=True)
 
             store.save_transaction(
                 tx_id="blob1", ledger_seq=1, tx_type=0,
@@ -822,7 +822,7 @@ class TestTxBlobStorage:
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test_txblob.db")
-            store = LedgerStore(db_path)
+            store = LedgerStore(db_path, _allow_any_path=True)
 
             blob_data = '{"tx_type": 0, "account": "alice"}'
             store.save_transaction(

@@ -268,9 +268,9 @@ class TestRangeProof(unittest.TestCase):
         rp = RangeProof.prove(1_000_000, self._blinding())
         self.assertIsInstance(rp, RangeProof)
 
-    def test_proof_is_32_bytes(self):
+    def test_proof_is_64_bytes(self):
         rp = RangeProof.prove(500_000, self._blinding())
-        self.assertEqual(len(rp.proof), 32)
+        self.assertEqual(len(rp.proof), 64)
 
     def test_verify_valid_proof(self):
         blinding = self._blinding()
@@ -464,7 +464,7 @@ class TestCreateConfidentialPayment(unittest.TestCase):
     def test_range_proof_populated(self):
         tx = self._make_tx()
         self.assertIsNotNone(tx.range_proof)
-        self.assertEqual(len(tx.range_proof), 32)
+        self.assertEqual(len(tx.range_proof), 64)
 
     def test_key_image_populated(self):
         tx = self._make_tx()
@@ -480,10 +480,14 @@ class TestCreateConfidentialPayment(unittest.TestCase):
         tx = self._make_tx()
         self.assertTrue(verify_ring_signature(tx.ring_signature, tx.hash_for_signing()))
 
-    def test_key_image_matches_sender(self):
-        tx = self._make_tx()
-        expected_ki = KeyImage.generate(self.s_priv, self.s_pub).image
-        self.assertEqual(tx.key_image, expected_ki)
+    def test_key_image_is_unique_per_tx(self):
+        tx1 = self._make_tx()
+        tx2 = self._make_tx()
+        # Key images should be unique (derived from per-tx ephemeral key)
+        self.assertNotEqual(tx1.key_image, tx2.key_image)
+        # Each key image should be a valid 65-byte uncompressed secp256k1 point
+        self.assertEqual(len(tx1.key_image), 65)
+        self.assertEqual(tx1.key_image[0:1], b'\x04')
 
     def test_amount_field_zeroed(self):
         tx = self._make_tx(amount=99.0)

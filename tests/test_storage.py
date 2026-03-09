@@ -27,7 +27,7 @@ from nexaflow_core.storage import LedgerStore
 def store(tmp_path):
     """Fresh LedgerStore in a temp directory."""
     db_path = str(tmp_path / "test.db")
-    s = LedgerStore(db_path)
+    s = LedgerStore(db_path, _allow_any_path=True)
     yield s
     s.close()
 
@@ -55,7 +55,7 @@ class TestSchema:
 
     def test_directory_created_if_missing(self, tmp_path):
         deep_path = str(tmp_path / "a" / "b" / "c" / "test.db")
-        s = LedgerStore(deep_path)
+        s = LedgerStore(deep_path, _allow_any_path=True)
         assert os.path.isfile(deep_path)
         s.close()
 
@@ -390,7 +390,7 @@ class TestSnapshotRestore:
 class TestContextManager:
     def test_context_manager(self, tmp_path):
         db_path = str(tmp_path / "ctx.db")
-        with LedgerStore(db_path) as s:
+        with LedgerStore(db_path, _allow_any_path=True) as s:
             s.save_account("rTest", 42.0)
         # Should be closed — but we can verify the file was created
         assert os.path.isfile(db_path)

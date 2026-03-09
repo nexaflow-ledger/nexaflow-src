@@ -43,8 +43,10 @@ class TicketManager:
         self, account: str, start_sequence: int, count: int,
     ) -> list[Ticket]:
         """Create `count` tickets starting at `start_sequence`."""
-        if count <= 0 or count > 250:
+        if count < 0 or count > 250:
             raise ValueError("Ticket count must be between 1 and 250")
+        if count == 0:
+            return []
         created: list[Ticket] = []
         for i in range(count):
             seq = start_sequence + i

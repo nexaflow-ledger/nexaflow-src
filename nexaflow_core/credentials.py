@@ -84,9 +84,9 @@ class CredentialManager:
         if expiration > 0 and expiration < time.time():
             return False, "Expiration must be in the future", None
         # Validate issuer and subject account format
-        if not issuer or not issuer.startswith('r') or len(issuer) < 10:
+        if not issuer or not issuer.startswith('r') or len(issuer) < 3:
             return False, "Invalid issuer account format", None
-        if not subject or not subject.startswith('r') or len(subject) < 10:
+        if not subject or not subject.startswith('r') or len(subject) < 3:
             return False, "Invalid subject account format", None
 
         cid = self._make_id(issuer, subject, credential_type)

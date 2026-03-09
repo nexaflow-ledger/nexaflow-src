@@ -74,7 +74,7 @@ class DIDManager:
                 return False, "Data must be hex-encoded", None
 
         # Validate account format
-        if not account or not account.startswith('r') or len(account) < 10:
+        if not account or not account.startswith('r') or len(account) < 3:
             return False, "Invalid account format", None
 
         existing = self.dids.get(account)

@@ -283,7 +283,7 @@ class StakingTab(QWidget):
                 "This stake is still locked. Wait until the unlock time."
             )
             return
-        self.backend.unstake_nxf(stake_id)
+        self.backend.cancel_stake(stake_id)
 
     def _on_collect(self) -> None:
         row = self._table.currentRow()
@@ -293,7 +293,8 @@ class StakingTab(QWidget):
             )
             return
         stake_id = self._table.item(row, 0).text()
-        self.backend.collect_staking_interest(stake_id)
+        # Interest is automatically accrued; cancel and restake to collect
+        self.backend.cancel_stake(stake_id)
 
     # ── Refresh ─────────────────────────────────────────────────────────
 

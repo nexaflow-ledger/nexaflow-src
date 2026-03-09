@@ -30,15 +30,15 @@ class TestDIDSet:
         assert did.data == ""
 
     def test_update_did(self, dids):
-        dids.set_did("rAlice", uri="v1")
-        ok, msg, did = dids.set_did("rAlice", uri="v2")
+        dids.set_did("rAlice", uri="https://example.com/v1")
+        ok, msg, did = dids.set_did("rAlice", uri="https://example.com/v2")
         assert ok is True
-        assert did.uri == "v2"
+        assert did.uri == "https://example.com/v2"
 
 
 class TestDIDDelete:
     def test_delete_did(self, dids):
-        dids.set_did("rAlice", uri="test")
+        dids.set_did("rAlice", uri="https://example.com/test")
         ok, msg = dids.delete_did("rAlice")
         assert ok is True
         assert dids.get_did("rAlice") is None
@@ -50,7 +50,7 @@ class TestDIDDelete:
 
 class TestDIDResolve:
     def test_resolve_by_uri(self, dids):
-        dids.set_did("rAlice", uri="test")
+        dids.set_did("rAlice", uri="https://example.com/test")
         resolved = dids.resolve("did:nxf:rAlice")
         assert resolved is not None
         assert resolved.account == "rAlice"
@@ -64,8 +64,8 @@ class TestDIDResolve:
 
 class TestDIDDocument:
     def test_to_dict(self, dids):
-        ok, msg, did = dids.set_did("rAlice", uri="uri", data="data")
+        ok, msg, did = dids.set_did("rAlice", uri="https://example.com/uri", data="deadbeef")
         d = did.to_dict()
         assert d["account"] == "rAlice"
-        assert d["uri"] == "uri"
-        assert d["data"] == "data"
+        assert d["uri"] == "https://example.com/uri"
+        assert d["data"] == "deadbeef"

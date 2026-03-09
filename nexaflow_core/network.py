@@ -195,7 +195,6 @@ class Network:
             return {"error": "No validators"}
 
         node_list = list(self.nodes.values())
-        list(self.nodes.keys())
 
         # Step 1: Each node creates a proposal
         proposals: dict[str, Proposal] = {}

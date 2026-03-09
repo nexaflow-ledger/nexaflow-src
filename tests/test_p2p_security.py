@@ -261,14 +261,26 @@ class TestDispatch(unittest.TestCase):
         node = P2PNode("v1")
         results = []
         node.on_consensus_result = lambda payload, pid: results.append(payload)
-        # Register the peer's public key so CONSENSUS_OK is accepted
-        node.peer_pubkeys["p1"] = "ab" * 32
+        # Generate a real keypair so the signature check passes
+        from ecdsa import SigningKey, SECP256k1
+        import hashlib, json as _json
+        sk = SigningKey.generate(curve=SECP256k1)
+        vk = sk.get_verifying_key()
+        node.peer_pubkeys["p1"] = vk.to_string()
 
         class FakePeer:
             peer_id = "p1"
             async def send(self, *a, **kw): return True
 
-        msg = {"type": "CONSENSUS_OK", "payload": {"tx_set": ["tx1"], "ledger_seq": 1}}
+        payload = {"tx_set": ["tx1"], "ledger_seq": 1}
+        # Sign the payload
+        msg_fields = {k: v for k, v in sorted(payload.items())}
+        msg_bytes = _json.dumps(msg_fields, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        msg_hash = hashlib.sha256(msg_bytes).digest()
+        sig = sk.sign(msg_hash)
+        payload["signature"] = sig.hex()
+
+        msg = {"type": "CONSENSUS_OK", "payload": payload}
         self._run(node._dispatch(FakePeer(), msg))
         self.assertEqual(len(results), 1)
 

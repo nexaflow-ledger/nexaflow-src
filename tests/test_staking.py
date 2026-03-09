@@ -277,7 +277,7 @@ class TestStakingPool:
     def test_cancel_stake_flexible(self, pool):
         now = time.time()
         pool.record_stake("tx5", "rAlice", 1000, StakeTier.FLEXIBLE, now=now)
-        addr, payout, forfeit, prin_pen = pool.cancel_stake("tx5", now=now + 30*86400)
+        addr, payout, forfeit, prin_pen = pool.cancel_stake("tx5", caller="rAlice", now=now + 30*86400)
         assert addr == "rAlice"
         assert forfeit == pytest.approx(0.0)
         assert prin_pen == pytest.approx(0.0)
@@ -287,7 +287,7 @@ class TestStakingPool:
     def test_cancel_stake_locked_with_penalty(self, pool):
         now = time.time()
         pool.record_stake("tx6", "rAlice", 1000, StakeTier.DAYS_90, now=now)
-        _addr, payout, forfeit, prin_pen = pool.cancel_stake("tx6", now=now + 10*86400)
+        _addr, payout, forfeit, prin_pen = pool.cancel_stake("tx6", caller="rAlice", now=now + 10*86400)
         assert forfeit > 0
         assert prin_pen > 0
         assert payout < 1000
@@ -297,7 +297,7 @@ class TestStakingPool:
         pool.record_stake("tx7", "rAlice", 1000, StakeTier.DAYS_30, now=now)
         pool.mature_stakes(now=now + 31*86400)
         with pytest.raises(ValueError, match="already matured"):
-            pool.cancel_stake("tx7", now=now + 32*86400)
+            pool.cancel_stake("tx7", caller="rAlice", now=now + 32*86400)
 
     def test_mature_stakes(self, pool):
         now = time.time()

@@ -1018,6 +1018,7 @@ class NodeBackend(QObject):
                 self.pmc_changed.emit()
                 self.mining_pool_changed.emit()
                 return amount
+            logger.warning("PMC mint failed: %s", msg)
             return 0.0
 
         self.mining_node = MiningNode(mgr, mint_callback=_sync_mint)
@@ -1031,8 +1032,6 @@ class NodeBackend(QObject):
         else:
             # Auto-register all mintable coins
             for coin in mgr.list_coins():
-                if coin.has_flag(coin.__class__.flags.__class__(0x0004)):
-                    pass  # flag check below
                 info = mgr.get_pow_info(coin.coin_id)
                 if info.get("mintable"):
                     if self.mining_node.add_coin(coin.coin_id):
@@ -1046,9 +1045,12 @@ class NodeBackend(QObject):
         # Start the async server in a background thread event loop
         import threading
 
+        self._mining_loop = None
+
         def _run_server():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
+            self._mining_loop = loop
             try:
                 loop.run_until_complete(
                     self.mining_node.start(host=host, port=port)
@@ -1058,6 +1060,7 @@ class NodeBackend(QObject):
                 logger.error("Mining pool error: %s", exc)
             finally:
                 loop.close()
+                self._mining_loop = None
 
         self._mining_thread = threading.Thread(
             target=_run_server, daemon=True, name="mining-pool",
@@ -1078,14 +1081,25 @@ class NodeBackend(QObject):
 
         if not self.mining_node or not self.mining_node.is_running:
             return
-        # Stop the server from the mining thread's event loop
+        # Schedule stop coroutine on the mining thread's event loop
         try:
-            loop = asyncio.new_event_loop()
-            loop.run_until_complete(self.mining_node.stop())
-            loop.close()
+            loop = getattr(self, '_mining_loop', None)
+            if loop and loop.is_running():
+                import concurrent.futures
+                future = asyncio.run_coroutine_threadsafe(
+                    self.mining_node.stop(), loop
+                )
+                try:
+                    future.result(timeout=5.0)
+                except (concurrent.futures.TimeoutError, Exception) as exc:
+                    logger.warning("Timeout stopping mining pool: %s", exc)
+                loop.call_soon_threadsafe(loop.stop)
+            else:
+                self.mining_node._running = False
         except Exception as exc:
             logger.warning("Error stopping mining pool: %s", exc)
         self.mining_node = None
+        self._mining_loop = None
         self._log("Mining pool stopped")
         self.mining_pool_changed.emit()
 
@@ -1257,7 +1271,12 @@ class NodeBackend(QObject):
             shutil.rmtree(certs_dir, ignore_errors=True)
             removed_dirs.append("certs/")
 
-        # 4. Rebuild network from scratch
+        # 4. Stop timers while rebuilding state
+        self._poll_timer.stop()
+        self._p2p_timer.stop()
+        self._consensus_timer.stop()
+
+        # 5. Rebuild network from scratch
         old_supply = self.network.total_supply
         genesis_accounts = self.config.genesis.accounts or None
         self.network = Network(old_supply, genesis_accounts=genesis_accounts)
@@ -1265,13 +1284,19 @@ class NodeBackend(QObject):
             self.network.add_validator(vid)
         self._primary_node = self.network.nodes[self._validators[0]]
 
-        # 5. Clear all in-memory state
+        # 6. Clear all in-memory state
+        wallet_count = len(self.wallets)
         self.wallets.clear()
         self.wallet_names.clear()
         self.tx_history.clear()
         self.order_book = OrderBook()
 
-        # 6. Emit signals so every tab refreshes
+        # 7. Restart timers
+        self._poll_timer.start()
+        self._p2p_timer.start()
+        self._consensus_timer.start()
+
+        # 8. Emit signals so every tab refreshes
         self.ledger_reset.emit()
         self.accounts_changed.emit()
         self.staking_changed.emit()
@@ -1282,7 +1307,7 @@ class NodeBackend(QObject):
         self._log("\u26a0 ALL data cleared (wallets, ledger, caches, keys)")
 
         lines = ["All data has been cleared:\n"]
-        lines.append(f"  \u2022  {len(self.wallets)} wallets remaining (was purged)")
+        lines.append(f"  \u2022  {wallet_count} wallet(s) deleted")
         lines.append("  \u2022  Ledger reset to empty")
         lines.append("  \u2022  Transaction history cleared")
         lines.append("  \u2022  Order book cleared")
@@ -1300,6 +1325,10 @@ class NodeBackend(QObject):
         if not self.DEV_MODE:
             self.error_occurred.emit("Ledger reset is only available in dev mode")
             return
+        # Stop timers while rebuilding state
+        self._poll_timer.stop()
+        self._p2p_timer.stop()
+        self._consensus_timer.stop()
         # Rebuild network from scratch
         old_supply = self.network.total_supply
         genesis_accounts = self.config.genesis.accounts or None
@@ -1314,6 +1343,10 @@ class NodeBackend(QObject):
                     node.ledger.create_account(addr, 0.0)
         self.tx_history.clear()
         self.order_book = OrderBook()
+        # Restart timers
+        self._poll_timer.start()
+        self._p2p_timer.start()
+        self._consensus_timer.start()
         self.ledger_reset.emit()
         self.accounts_changed.emit()
         self.staking_changed.emit()

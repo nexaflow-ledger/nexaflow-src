@@ -33,7 +33,7 @@ class StorageTestBase(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
         self.db_path = os.path.join(self.tmpdir, "test.db")
-        self.store = LedgerStore(self.db_path)
+        self.store = LedgerStore(self.db_path, _allow_any_path=True)
 
     def tearDown(self):
         self.store.close()
@@ -229,7 +229,7 @@ class TestConcurrentAccess(StorageTestBase):
 
         def write_accounts(start: int, count: int):
             try:
-                store = LedgerStore(self.db_path)
+                store = LedgerStore(self.db_path, _allow_any_path=True)
                 for i in range(start, start + count):
                     store.save_account(f"addr_{i}", float(i))
                 store.close()
@@ -258,7 +258,7 @@ class TestConcurrentAccess(StorageTestBase):
 
         def writer():
             try:
-                store = LedgerStore(self.db_path)
+                store = LedgerStore(self.db_path, _allow_any_path=True)
                 for i in range(100):
                     store.save_account("alice", float(i))
                 store.close()
@@ -267,7 +267,7 @@ class TestConcurrentAccess(StorageTestBase):
 
         def reader():
             try:
-                store = LedgerStore(self.db_path)
+                store = LedgerStore(self.db_path, _allow_any_path=True)
                 for _ in range(100):
                     acct = store.get_account("alice")
                     if acct:
@@ -413,14 +413,14 @@ class TestDBPathEdgeCases(unittest.TestCase):
         """Parent directories should be created automatically."""
         tmpdir = tempfile.mkdtemp()
         deep_path = os.path.join(tmpdir, "a", "b", "c", "test.db")
-        store = LedgerStore(deep_path)
+        store = LedgerStore(deep_path, _allow_any_path=True)
         store.save_account("alice", 100.0)
         store.close()
         self.assertTrue(os.path.exists(deep_path))
 
     def test_in_memory_database(self):
         """':memory:' path should work (no file on disk)."""
-        store = LedgerStore(":memory:")
+        store = LedgerStore(":memory:", _allow_any_path=True)
         store.save_account("alice", 100.0)
         acct = store.get_account("alice")
         self.assertIsNotNone(acct)
@@ -436,7 +436,7 @@ class TestContextManager(unittest.TestCase):
     def test_context_manager_closes(self):
         tmpdir = tempfile.mkdtemp()
         db_path = os.path.join(tmpdir, "ctx.db")
-        with LedgerStore(db_path) as store:
+        with LedgerStore(db_path, _allow_any_path=True) as store:
             store.save_account("alice", 100.0)
         # After exit, connection should be closed
         # Accessing store._conn should raise ProgrammingError

@@ -214,7 +214,7 @@ class PaymentChannelManager:
 
     def claim(
         self, channel_id: str, new_balance: float, now: float | None = None,
-        signature: str = "", public_key: str = ",",
+        signature: str = "", public_key: str = "",
     ) -> tuple[PaymentChannel, float, str]:
         """Process a claim. Returns (channel, NXF_paid_out, error_msg).
 

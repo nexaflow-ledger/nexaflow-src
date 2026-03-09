@@ -54,16 +54,18 @@ class TestValidatorNode(unittest.TestCase):
         self.assertIn(tx.tx_id, prop.tx_ids)
 
     def test_apply_consensus_result(self):
+        # Use empty UNL so quorum proof is not required for this unit test
+        node = ValidatorNode("node1", self.ledger, unl=[])
         w = Wallet.from_seed("alice-seed")
         self.ledger.create_account(w.address, 500.0)
         tx = create_payment(w.address, "rBob", 10.0)
         w.sign_transaction(tx)
-        self.node.receive_transaction(tx)
-        applied = self.node.apply_consensus_result({tx.tx_id})
+        node.receive_transaction(tx)
+        applied = node.apply_consensus_result({tx.tx_id})
         self.assertEqual(len(applied), 1)
-        self.assertEqual(self.node.closed_count, 1)
+        self.assertEqual(node.closed_count, 1)
         # tx should be removed from pool
-        self.assertNotIn(tx.tx_id, self.node.tx_pool)
+        self.assertNotIn(tx.tx_id, node.tx_pool)
 
     def test_get_path_finder(self):
         pf = self.node.get_path_finder()

@@ -462,9 +462,6 @@ cdef class ConsensusEngine:
 
         # Use adjusted quorum if NegativeUNL is active
         if self.negative_unl and self.negative_unl.size > 0:
-            adj_quorum = self.negative_unl.adjusted_quorum(
-                self.unl_size + 1, threshold,
-            )
             # total must still meet the adjusted quorum denominator
             effective_total = max(total, self.unl_size + 1 - len(neg_unl_set))
         else:

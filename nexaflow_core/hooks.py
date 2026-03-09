@@ -17,6 +17,7 @@ Hook lifecycle:
 from __future__ import annotations
 
 import hashlib
+import os
 import signal
 import time
 from dataclasses import dataclass, field
@@ -125,6 +126,7 @@ MAX_STATE_ENTRIES = 256
 MAX_STATE_KEY_LEN = 32
 MAX_STATE_VALUE_LEN = 256
 HOOK_EXECUTION_TIMEOUT_SECS = 5  # max seconds a hook can run
+_HAS_SIGALRM = hasattr(signal, "SIGALRM")  # False on Windows
 
 
 class HookContext:
@@ -309,17 +311,19 @@ class HooksManager:
             try:
                 if defn.code is not None:
                     # Execute with timeout to prevent infinite loops
-                    def _timeout_handler(signum, frame):
-                        raise TimeoutError("Hook execution exceeded time limit")
-                    old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
-                    signal.alarm(HOOK_EXECUTION_TIMEOUT_SECS)
+                    if _HAS_SIGALRM:
+                        def _timeout_handler(signum, frame):
+                            raise TimeoutError("Hook execution exceeded time limit")
+                        old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
+                        signal.alarm(HOOK_EXECUTION_TIMEOUT_SECS)
                     try:
                         result = defn.code(ctx)
                         if not isinstance(result, HookResult):
                             result = HookResult.ACCEPT
                     finally:
-                        signal.alarm(0)
-                        signal.signal(signal.SIGALRM, old_handler)
+                        if _HAS_SIGALRM:
+                            signal.alarm(0)
+                            signal.signal(signal.SIGALRM, old_handler)
                 else:
                     result = HookResult.ACCEPT
             except TimeoutError:

@@ -480,7 +480,7 @@ class TestHistorySharding(unittest.TestCase):
         import tempfile, os
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
-            store = LedgerStore(db_path)
+            store = LedgerStore(db_path, _allow_any_path=True)
             # Insert 10 ledgers
             for i in range(1, 11):
                 store.save_closed_ledger(
@@ -501,7 +501,7 @@ class TestHistorySharding(unittest.TestCase):
         import tempfile, os
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
-            store = LedgerStore(db_path)
+            store = LedgerStore(db_path, _allow_any_path=True)
             # Insert a few ledgers
             for i in range(1, 6):
                 store.save_closed_ledger(
@@ -518,7 +518,7 @@ class TestHistorySharding(unittest.TestCase):
         import tempfile, os
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
-            store = LedgerStore(db_path)
+            store = LedgerStore(db_path, _allow_any_path=True)
             store.vacuum()  # Should not raise
             store.close()
 
