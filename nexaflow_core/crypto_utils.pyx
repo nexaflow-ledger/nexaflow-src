@@ -147,16 +147,33 @@ cpdef tuple generate_keypair():
 
 
 cpdef bytes sign(bytes private_key, bytes message_hash):
-    """Sign a 32-byte hash with the private key (DER-encoded)."""
+    """Sign a 32-byte hash with the private key (DER-encoded, low-S canonical)."""
     from ecdsa import SigningKey, SECP256k1
+    from ecdsa.util import sigencode_der, sigdecode_der
     cdef object sk = SigningKey.from_string(private_key, curve=SECP256k1)
-    return sk.sign_digest(message_hash, sigencode=_sigencode_der)
+    cdef bytes raw_sig = sk.sign_digest(message_hash, sigencode=sigencode_der)
+    # Enforce low-S: if S > order/2, replace with order - S
+    cdef object order = SECP256k1.order
+    r, s = sigdecode_der(raw_sig, order)
+    if s > order // 2:
+        s = order - s
+    return sigencode_der(r, s, order)
 
 
 cpdef bint verify(bytes public_key, bytes message_hash, bytes signature):
-    """Verify a DER-encoded signature against a public key and hash."""
+    """Verify a DER-encoded signature against a public key and hash.
+    Rejects high-S signatures to prevent malleability."""
     from ecdsa import VerifyingKey, SECP256k1, BadSignatureError
     from ecdsa.errors import MalformedPointError
+    from ecdsa.util import sigdecode_der
+    # Reject high-S signatures (malleability protection)
+    cdef object order = SECP256k1.order
+    try:
+        r, s = sigdecode_der(signature, order)
+        if s > order // 2:
+            return False
+    except Exception:
+        return False
     cdef bytes raw_pub = public_key
     if raw_pub[0:1] == b"\x04":
         raw_pub = raw_pub[1:]

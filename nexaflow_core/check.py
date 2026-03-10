@@ -94,6 +94,8 @@ class CheckManager:
         now: float | None = None,
     ) -> CheckEntry:
         """Create and store a new Check."""
+        if check_id in self.checks:
+            raise ValueError(f"Check {check_id} already exists")
         entry = CheckEntry(
             check_id=check_id,
             account=account,

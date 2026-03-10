@@ -220,6 +220,11 @@ class NodeBackend(QObject):
 
     def get_wallet_keys(self, address: str) -> dict:
         """Return raw key material for a wallet (DANGEROUS — guard in UI)."""
+        import logging as _log
+        _log.getLogger("nexaflow_gui").warning(
+            "get_wallet_keys() called for %s — raw private key material exposed",
+            address,
+        )
         wallet = self.wallets.get(address)
         if not wallet:
             raise ValueError(f"No wallet found for {address}")

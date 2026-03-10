@@ -108,6 +108,8 @@ class OracleManager:
                     return False, "Price cannot be NaN or Inf", None
                 if pv < 0:
                     return False, "Price cannot be negative", None
+                if pv == 0:
+                    return False, "Price cannot be zero", None
 
         existing = self.oracles.get(oid)
 

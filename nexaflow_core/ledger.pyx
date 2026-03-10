@@ -893,6 +893,8 @@ cdef class Ledger:
         self.total_burned += fee_val
 
         cdef object la = tx.limit_amount
+        if la.value < 0:
+            return 110  # tecNO_PERMISSION — negative trust limit
         self.set_trust_line(src, la.currency, la.issuer, la.value)
 
         # ── Process TrustSet flags (Tier 1) ──────────────────────────────
@@ -1145,7 +1147,7 @@ cdef class Ledger:
         elif tt == 67:   # PMCOfferCancel
             result = self.apply_pmc_offer_cancel(tx)
         else:
-            result = 0   # for simplicity, other types succeed
+            result = 117  # tecNO_ENTRY — unknown/unsupported tx type
 
         # Verify invariants after transaction; ROLLBACK on failure
         if result == 0:
@@ -1727,15 +1729,20 @@ cdef class Ledger:
         if dst and dst not in self.accounts:
             self.create_account(dst)
         # Create the escrow entry
-        self.escrow_manager.create_escrow(
-            escrow_id=tx.tx_id,
-            account=src,
-            destination=dst,
-            amount=amt,
-            condition=tx.flags.get("condition", ""),
-            finish_after=tx.flags.get("finish_after", 0),
-            cancel_after=tx.flags.get("cancel_after", 0),
-        )
+        try:
+            self.escrow_manager.create_escrow(
+                escrow_id=tx.tx_id,
+                account=src,
+                destination=dst,
+                amount=amt,
+                condition=tx.flags.get("condition", ""),
+                finish_after=tx.flags.get("finish_after", 0),
+                cancel_after=tx.flags.get("cancel_after", 0),
+            )
+        except ValueError:
+            # Duplicate escrow ID or invalid parameters — refund the amount
+            acc.balance += amt
+            return 117  # tecNO_ENTRY
         acc.owner_count += 1
         acc.sequence += 1
         return 0
@@ -1934,15 +1941,20 @@ cdef class Ledger:
         cdef str dst = tx.destination
         if dst and dst not in self.accounts:
             self.create_account(dst)
-        self.channel_manager.create_channel(
-            channel_id=tx.tx_id,
-            account=src,
-            destination=dst,
-            amount=amt,
-            settle_delay=tx.flags.get("settle_delay", 3600),
-            public_key=tx.flags.get("public_key", ""),
-            cancel_after=tx.flags.get("cancel_after", 0),
-        )
+        try:
+            self.channel_manager.create_channel(
+                channel_id=tx.tx_id,
+                account=src,
+                destination=dst,
+                amount=amt,
+                settle_delay=tx.flags.get("settle_delay", 3600),
+                public_key=tx.flags.get("public_key", ""),
+                cancel_after=tx.flags.get("cancel_after", 0),
+            )
+        except ValueError:
+            # Duplicate channel ID — refund amount
+            acc.balance += amt
+            return 117  # tecNO_ENTRY
         acc.owner_count += 1
         acc.sequence += 1
         return 0
@@ -2035,15 +2047,18 @@ cdef class Ledger:
         cdef double send_max = tx.amount.value
         cdef str cur = tx.amount.currency
         cdef str iss = tx.amount.issuer
-        self.check_manager.create_check(
-            check_id=tx.tx_id,
-            account=src,
-            destination=tx.destination,
-            send_max=send_max,
-            currency=cur,
-            issuer=iss,
-            expiration=tx.flags.get("expiration", 0),
-        )
+        try:
+            self.check_manager.create_check(
+                check_id=tx.tx_id,
+                account=src,
+                destination=tx.destination,
+                send_max=send_max,
+                currency=cur,
+                issuer=iss,
+                expiration=tx.flags.get("expiration", 0),
+            )
+        except ValueError:
+            return 117  # tecNO_ENTRY — duplicate check ID
         acc.owner_count += 1
         acc.sequence += 1
         return 0
@@ -2054,13 +2069,7 @@ cdef class Ledger:
         acc = <AccountEntry>self.accounts.get(src)
         if acc is None:
             return 101
-        cdef double fee_val = tx.fee.value
-        cdef int rc = self._debit_fee(acc, fee_val)
-        if rc:
-            return rc
-        rc = self._check_seq(tx, acc)
-        if rc:
-            return rc
+        # Verify casher is the destination BEFORE deducting fee
         check_id = tx.flags.get("check_id", "")
         deliver_min = tx.flags.get("deliver_min", 0.0)
         cash_amount = tx.amount.value
@@ -2074,9 +2083,16 @@ cdef class Ledger:
             if "expired" in err.lower():
                 return 114  # tecCHECK_EXPIRED
             return 110  # tecNO_PERMISSION
-        # Verify casher is the destination
         if entry.destination != src:
             return 110  # tecNO_PERMISSION
+        # Now deduct fee and check sequence
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
         # Debit the check creator
         creator_acc = <AccountEntry>self.accounts.get(entry.account)
         if creator_acc is None:
@@ -2926,18 +2942,11 @@ cdef class Ledger:
         acc = <AccountEntry>self.accounts.get(src)
         if acc is None:
             return 101
-        cdef double fee_val = tx.fee.value
-        cdef int rc = self._debit_fee(acc, fee_val)
-        if rc:
-            return rc
-        rc = self._check_seq(tx, acc)
-        if rc:
-            return rc
         bridge_id = tx.flags.get("bridge_id", "")
         claim_id = tx.flags.get("claim_id", 0)
         dest = tx.destination
 
-        # Verify attestation quorum before allowing mint
+        # Verify attestation quorum BEFORE deducting fee
         bridge = self.xchain_manager.bridges.get(bridge_id)
         if not bridge:
             return 123
@@ -2950,6 +2959,15 @@ cdef class Ledger:
         valid_attestations = [a for a in attestations if a.get("signature")]
         if len(valid_attestations) < min_quorum:
             return 123  # insufficient attestation quorum
+
+        # Now deduct fee and check sequence
+        cdef double fee_val = tx.fee.value
+        cdef int rc = self._debit_fee(acc, fee_val)
+        if rc:
+            return rc
+        rc = self._check_seq(tx, acc)
+        if rc:
+            return rc
 
         ok, msg, amount = self.xchain_manager.claim(bridge_id, claim_id, dest)
         if not ok:

@@ -529,11 +529,15 @@ cdef class Transaction:
             buf.extend(struct.pack(">H", len(_atid)))
             buf.extend(_atid)
         cdef bytes _memo = self.memo.encode("utf-8")
+        if len(_memo) > 65535:
+            _memo = _memo[:65535]
         buf.extend(struct.pack(">H", len(_memo)))
         buf.extend(_memo)
         if self.memos:
             import json as _json2
             _memos_b = _json2.dumps(self.memos, sort_keys=True).encode("utf-8")
+            if len(_memos_b) > 65535:
+                _memos_b = _memos_b[:65535]
             buf.extend(struct.pack(">H", len(_memos_b)))
             buf.extend(_memos_b)
         # Include privacy fields in signing preimage.

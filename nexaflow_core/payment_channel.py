@@ -185,6 +185,8 @@ class PaymentChannelManager:
         now: float | None = None,
     ) -> PaymentChannel:
         """Create a new payment channel."""
+        if channel_id in self.channels:
+            raise ValueError(f"Channel {channel_id} already exists")
         ch = PaymentChannel(
             channel_id=channel_id,
             account=account,

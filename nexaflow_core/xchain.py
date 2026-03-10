@@ -258,6 +258,8 @@ class XChainManager:
         bridge = self.bridges[bridge_id]
         # Signal reward is deducted and tracked separately for witnesses
         signal_reward = bridge.signal_reward
+        if signal_reward > cid.amount:
+            signal_reward = cid.amount
         amount = cid.amount - signal_reward
         # Record signal reward so the ledger can distribute it to attestors
         cid._signal_reward_total = signal_reward

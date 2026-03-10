@@ -118,12 +118,11 @@ cdef class Proposal:
         Verify the DER ECDSA signature against *pubkey_bytes* (65-byte
         uncompressed secp256k1 public key).
 
-        Returns True when the signature is valid or when no signature was
-        provided (unsigned proposals are accepted only when the engine is
-        not running in BFT mode).
+        Returns True when the signature is valid.
+        Returns False when the signature is missing or invalid.
         """
         if not self.signature:
-            return True   # unsigned — caller decides whether to accept
+            return False  # unsigned — caller must decide policy
         try:
             from ecdsa import VerifyingKey, SECP256k1
             from ecdsa.util import sigdecode_der
@@ -294,7 +293,10 @@ cdef class ConsensusEngine:
         # ── Equivocation check ───────────────────────────────────────
         existing = self.proposals.get(vid)
         if existing is not None:
-            if (<Proposal>existing).compute_hash() != p.compute_hash():
+            # Only flag equivocation for proposals in the SAME round;
+            # validators legitimately change their proposal set across rounds.
+            if (<Proposal>existing).round_number == p.round_number and \
+               (<Proposal>existing).compute_hash() != p.compute_hash():
                 import logging as _log
                 _log.getLogger("nexaflow_consensus").warning(
                     f"[BFT] Equivocation detected from {vid}: conflicting "
